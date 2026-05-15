@@ -2,9 +2,12 @@
 
 import asyncio
 import io
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import yaml
 from telethon import TelegramClient
@@ -86,6 +89,32 @@ def to_archonum(title: str) -> str:
     return title
 
 
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FFFF\U00002600-\U000027BF︀-️‍]+"
+)
+
+
+def name_key(title: str) -> str:
+    """Strip brand keyword and emoji, return just the name part for fuzzy matching."""
+    for v in (*_DE_SKLAD_VARIANTS, "Archonum"):
+        if v in title:
+            title = title.replace(v, "")
+            break
+    return _EMOJI_RE.sub("", title).strip()
+
+
+def find_recipient(expected: str, recipients: dict):
+    """Exact title match first; fall back to matching by name (brand + emoji stripped)."""
+    if expected in recipients:
+        return recipients[expected]
+    key = name_key(expected)
+    if key:
+        for title, dlg in recipients.items():
+            if name_key(title) == key:
+                return dlg
+    return None
+
+
 def full_id(entity) -> int:
     return int(f"-100{entity.id}")
 
@@ -153,7 +182,7 @@ async def step_create_pairs(client):
         dtype = entity_type(donor.entity)
         if dtype == "other":
             continue
-        rec = recipients.get(expected)
+        rec = find_recipient(expected, recipients)
         if rec and entity_type(rec.entity) == dtype:
             print(f"OK:      '{donor.title}'  →  '{expected}'")
         else:
@@ -239,12 +268,12 @@ async def step_configure(client):
 
     for donor in donors:
         expected = to_archonum(donor.title)
-        recipient = recipients.get(expected)
+        recipient = find_recipient(expected, recipients)
         if not recipient:
             print(f"ПРОПУСК '{donor.title}': получатель '{expected}' не найден")
             continue
 
-        print(f"'{donor.title}'  →  '{expected}'")
+        print(f"'{donor.title}'  →  '{recipient.title}'")
         d_entity = donor.entity
         r_entity = recipient.entity
 
@@ -294,8 +323,15 @@ async def step_configure(client):
                     )
                     print(f"  Топик '{d_topic.title}': эмодзи обновлён")
 
-            # Видимость General
+            # Видимость и название General
             if d_topic.id == 1:
+                if d_topic.title != r_topic.title:
+                    await safe_call(client,
+                        lambda re=r_entity, t=d_topic.title: client(
+                            EditForumTopicRequest(channel=re, topic_id=1, title=t)
+                        )
+                    )
+                    print(f"  General: переименован в '{d_topic.title}'")
                 d_hidden = bool(getattr(d_topic, "hidden", False))
                 r_hidden = bool(getattr(r_topic, "hidden", False))
                 if d_hidden != r_hidden:
@@ -322,7 +358,7 @@ async def step_verify(client):
     for donor in donors:
         expected = to_archonum(donor.title)
         dtype = entity_type(donor.entity)
-        rec = recipients.get(expected)
+        rec = find_recipient(expected, recipients)
         if rec and entity_type(rec.entity) == dtype:
             print(f"OK:      '{donor.title}'  →  '{expected}'")
         else:
@@ -343,21 +379,23 @@ async def step_verify(client):
     for dlg in dialogs:
         title = dlg.title or ""
         if "Archonum" in title and not title.startswith("[ДУБЛЬ]"):
-            groups[title].append(dlg)
+            groups[name_key(title)].append(dlg)
 
     extras = []
     any_dupe = False
-    for title, dlgs in groups.items():
+    for key, dlgs in groups.items():
         if len(dlgs) <= 1:
             continue
         any_dupe = True
+        titles = {d.title for d in dlgs}
+        label = "ДУБЛЬ" if len(titles) == 1 else "ПОТЕНЦ. ДУБЛЬ"
         real  = [d for d in dlgs if full_id(d.entity) in known_ids] or dlgs[:1]
         extra = [d for d in dlgs if d not in real]
-        print(f'ДУБЛЬ: "{title}"')
+        print(f'{label}: {" / ".join(f"\"{t}\"" for t in sorted(titles))}')
         for d in real:
-            print(f"  [оставить]  id={full_id(d.entity)}")
+            print(f"  [оставить]  id={full_id(d.entity)}  '{d.title}'")
         for d in extra:
-            print(f"  [лишний]    id={full_id(d.entity)}")
+            print(f"  [лишний]    id={full_id(d.entity)}  '{d.title}'")
             extras.append(d)
 
     if not any_dupe:
@@ -411,7 +449,7 @@ async def step_build_config(client):
     for donor in donors:
         e = donor.entity
         expected = to_archonum(donor.title)
-        rec = recipients.get(expected)
+        rec = find_recipient(expected, recipients)
 
         if not rec:
             print(f"НЕ НАЙДЕН: '{donor.title}' → '{expected}'")
@@ -422,7 +460,7 @@ async def step_build_config(client):
 
         if getattr(e, "broadcast", False):
             directions.append({"from": [full_id(e)], "to": [full_id(r_e)]})
-            print(f"OK (канал): '{donor.title}' → '{expected}'")
+            print(f"OK (канал): '{donor.title}' → '{rec.title}'")
 
         elif getattr(e, "megagroup", False):
             if not getattr(e, "forum", False):
@@ -430,7 +468,7 @@ async def step_build_config(client):
                     "from": [f"{full_id(e)}#1"],
                     "to":   [f"{full_id(r_e)}#1"],
                 })
-                print(f"OK (супергруппа): '{donor.title}' → '{expected}'")
+                print(f"OK (супергруппа): '{donor.title}' → '{rec.title}'")
                 continue
 
             d_result = await client(GetForumTopicsRequest(
@@ -451,7 +489,7 @@ async def step_build_config(client):
                     r_topic = r_by_title.get(d_topic.title)
 
                 if not r_topic:
-                    print(f"  Топик '{d_topic.title}' не найден у '{expected}', пропускаю")
+                    print(f"  Топик '{d_topic.title}' не найден у '{rec.title}', пропускаю")
                     continue
 
                 directions.append({
@@ -459,7 +497,7 @@ async def step_build_config(client):
                     "to":   [f"{full_id(r_e)}#{r_topic.id}"],
                 })
 
-            print(f"OK (форум): '{donor.title}' → '{expected}'")
+            print(f"OK (форум): '{donor.title}' → '{rec.title}'")
 
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -518,6 +556,9 @@ async def step_final_verify(client):
         if to_e.title == expected:
             print(f"OK: '{from_e.title}' → '{to_e.title}'")
             ok += 1
+        elif name_key(to_e.title) == name_key(expected):
+            print(f"OK (эмодзи): '{from_e.title}' → '{to_e.title}'")
+            ok += 1
         else:
             print(f"ОШИБКА: '{from_e.title}' → '{to_e.title}' (ожидалось '{expected}')")
             fixes.append(("channel", to_e, expected))
@@ -541,8 +582,12 @@ async def step_final_verify(client):
             continue
 
         if from_tid == 1 and to_tid == 1:
-            print(f"OK (General): '{f_topic.title}' → '{t_topic.title}'")
-            ok += 1
+            if f_topic.title == t_topic.title:
+                print(f"OK (General): '{f_topic.title}'")
+                ok += 1
+            else:
+                print(f"ОШИБКА (General): '{f_topic.title}' != '{t_topic.title}'")
+                fixes.append(("topic", entity_cache[to_id], to_tid, f_topic.title))
         elif f_topic.title == t_topic.title:
             print(f"OK: '{f_topic.title}'")
             ok += 1
