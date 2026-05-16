@@ -88,4 +88,3 @@ ENV/
 *.session
 
 .vscode
-.configs/
