@@ -1,4 +1,9 @@
 telethon==1.41.2
+opencv-python-headless
+simple-lama-inpainting
+# torch is a transitive dep of simple-lama-inpainting; on some platforms install manually:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# ffmpeg must be installed at OS level: apt install ffmpeg
 cryptg==0.5.2
 psycopg[binary,pool]==3.2.12
 python-decouple==3.8
