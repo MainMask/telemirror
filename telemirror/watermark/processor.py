@@ -1,13 +1,16 @@
 import asyncio
+import io
 import logging
 import math
 import os
+import random
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 _DEFAULT_TEMPLATE = str(Path(__file__).parent / "reference_watermark.png")
+_DEFAULT_STAMP = str(Path(__file__).parent / "my_watermark.png")
 
 import cv2
 import numpy as np
@@ -27,6 +30,9 @@ class ChannelWatermarkConfig:
     scale_max: float = 1.0
     scale_steps: int = 80
     inpaint_dilate_px: int = 6
+    stamp_watermark_path: str = _DEFAULT_STAMP
+    stamp_opacity: float = 0.8
+    stamp_scale: float = 0.30
 
 
 def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
@@ -203,3 +209,89 @@ async def async_remove_watermark_from_video(
 ) -> bool:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, remove_watermark_from_video, video_path, config, output_path)
+
+
+def stamp_watermark_on_image(
+    image_bytes: bytes,
+    config: ChannelWatermarkConfig,
+) -> bytes:
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    wm = Image.open(config.stamp_watermark_path).convert("RGBA")
+
+    img_w, img_h = img.size
+    wm_w = int(img_w * config.stamp_scale)
+    wm_h = int(wm.height * wm_w / wm.width)
+    wm = wm.resize((wm_w, wm_h), Image.LANCZOS)
+
+    a = wm.getchannel("A").point(lambda v: int(v * config.stamp_opacity))
+    wm.putalpha(a)
+
+    x = random.randint(10, img_w - wm_w - 10)
+    y = random.randint(10, img_h - wm_h - 10)
+    img.paste(wm, (x, y), wm)
+
+    out = io.BytesIO()
+    img.convert("RGB").save(out, format="JPEG", quality=92)
+    return out.getvalue()
+
+
+def stamp_watermark_on_video(
+    video_path: str,
+    config: ChannelWatermarkConfig,
+    output_path: str,
+) -> bool:
+    cap = cv2.VideoCapture(video_path)
+    fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+
+    if fw == 0 or fh == 0:
+        logger.warning("Could not read video dimensions: %s", video_path)
+        return False
+
+    wm_orig = Image.open(config.stamp_watermark_path)
+    wm_w = int(fw * config.stamp_scale)
+    wm_h = int(wm_orig.height * wm_w / wm_orig.width)
+
+    x = random.randint(10, fw - wm_w - 10)
+    y = random.randint(10, fh - wm_h - 10)
+
+    filter_complex = (
+        f"[1:v]scale={wm_w}:{wm_h},format=rgba,"
+        f"colorchannelmixer=aa={config.stamp_opacity}[wm];"
+        f"[0:v][wm]overlay={x}:{y}"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-i", config.stamp_watermark_path,
+        "-filter_complex", filter_complex,
+        "-c:a", "copy",
+        output_path,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=300)
+    if proc.returncode != 0:
+        logger.error(
+            "ffmpeg overlay failed (code %d): %s",
+            proc.returncode,
+            proc.stderr.decode(errors="replace"),
+        )
+        return False
+    return True
+
+
+async def async_stamp_watermark_on_image(
+    image_bytes: bytes,
+    config: ChannelWatermarkConfig,
+) -> bytes:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, stamp_watermark_on_image, image_bytes, config)
+
+
+async def async_stamp_watermark_on_video(
+    video_path: str,
+    config: ChannelWatermarkConfig,
+    output_path: str,
+) -> bool:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, stamp_watermark_on_video, video_path, config, output_path)

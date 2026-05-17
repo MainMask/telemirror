@@ -6,7 +6,7 @@ from typing import Dict, Type
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
-from ..watermark.remover import (
+from ..watermark.processor import (
     ChannelWatermarkConfig,
     async_remove_watermark_from_image,
     async_remove_watermark_from_video,
