@@ -22,7 +22,7 @@ _lama: Optional[object] = None
 @dataclass(frozen=True)
 class ChannelWatermarkConfig:
     template_path: str = _DEFAULT_TEMPLATE
-    match_threshold: float = 0.33
+    match_threshold: float = 0.31
     scale_min: float = 0.2
     scale_max: float = 1.0
     scale_steps: int = 80
@@ -30,8 +30,10 @@ class ChannelWatermarkConfig:
 
 
 def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
-    sx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-    sy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    sx = cv2.Sobel(enhanced, cv2.CV_32F, 1, 0, ksize=3)
+    sy = cv2.Sobel(enhanced, cv2.CV_32F, 0, 1, ksize=3)
     mag = np.sqrt(sx ** 2 + sy ** 2)
     return cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
