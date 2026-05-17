@@ -1,6 +1,6 @@
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, List, NamedTuple, Protocol
+from typing import Any, AsyncIterator, Dict, List, NamedTuple, Optional, Protocol, Tuple
 
 from psycopg import AsyncCursor, errors
 from psycopg.rows import class_row
@@ -121,6 +121,20 @@ class Database(Protocol):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    async def get_past_mode_checkpoint(
+        self: "Database", source: int, target: int
+    ) -> Optional[int]:
+        """Returns last processed message_id for source→target pair, or None"""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def set_past_mode_checkpoint(
+        self: "Database", source: int, target: int, message_id: int
+    ) -> None:
+        """Upserts checkpoint for source→target pair"""
+        raise NotImplementedError
+
     def __repr__(self) -> str:
         return self.__class__.__name__
 
@@ -140,6 +154,7 @@ class InMemoryDatabase(Database):
         self: "InMemoryDatabase", max_capacity: int = MAX_CAPACITY
     ) -> "InMemoryDatabase":
         self.__storage = LRUCache[str, List[MirrorMessage]](capacity=max_capacity)
+        self.__checkpoints: Dict[Tuple[int, int], int] = {}
 
     async def _async__init__(self: "InMemoryDatabase") -> "InMemoryDatabase":
         return self
@@ -231,6 +246,16 @@ class InMemoryDatabase(Database):
         """
         for idx in original_ids:
             self.__storage.pop(self.__build_message_key(idx, original_channel), None)
+
+    async def get_past_mode_checkpoint(
+        self: "InMemoryDatabase", source: int, target: int
+    ) -> Optional[int]:
+        return self.__checkpoints.get((source, target))
+
+    async def set_past_mode_checkpoint(
+        self: "InMemoryDatabase", source: int, target: int, message_id: int
+    ) -> None:
+        self.__checkpoints[(source, target)] = message_id
 
     def __build_message_key(
         self: "InMemoryDatabase", original_id: int, original_channel: int
@@ -455,9 +480,42 @@ class PostgresDatabase(Database):
                     mirror_channel bigint not null
                 );
 
-                CREATE INDEX IF NOT EXISTS binding_id_original_idx 
+                CREATE INDEX IF NOT EXISTS binding_id_original_idx
                 ON binding_id (original_channel, original_id);
+
+                CREATE TABLE IF NOT EXISTS past_mode_checkpoint (
+                    source_channel BIGINT NOT NULL,
+                    target_channel BIGINT NOT NULL,
+                    last_message_id BIGINT NOT NULL,
+                    PRIMARY KEY (source_channel, target_channel)
+                );
                 """
+            )
+
+    async def get_past_mode_checkpoint(
+        self: "PostgresDatabase", source: int, target: int
+    ) -> Optional[int]:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "SELECT last_message_id FROM past_mode_checkpoint "
+                "WHERE source_channel = %s AND target_channel = %s",
+                (source, target),
+            )
+            row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def set_past_mode_checkpoint(
+        self: "PostgresDatabase", source: int, target: int, message_id: int
+    ) -> None:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO past_mode_checkpoint (source_channel, target_channel, last_message_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (source_channel, target_channel)
+                DO UPDATE SET last_message_id = EXCLUDED.last_message_id
+                """,
+                (source, target, message_id),
             )
 
     @asynccontextmanager

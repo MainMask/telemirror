@@ -4,6 +4,7 @@ Loads environment(.env)/config.yaml config
 
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
 from decouple import AutoConfig, Csv, RepositoryEnv
@@ -132,6 +133,21 @@ CHAT_MAPPING: Dict[int, Dict[int, List["DirectionConfig"]]] = {}
 
 
 @dataclass(frozen=True)
+class PastModeConfig:
+    send_delay: float = 0.5
+    since_date: Optional[datetime] = None
+    last_n: Optional[int] = None
+    full_history: bool = False
+
+    def __post_init__(self) -> None:
+        n = sum([self.since_date is not None, self.last_n is not None, self.full_history])
+        if n != 1:
+            raise ValueError(
+                f"PastModeConfig: ожидается ровно одна стратегия (since_date/last_n/full_history), задано {n}"
+            )
+
+
+@dataclass(frozen=True)
 class DirectionConfig:
     disable_delete: bool
     disable_edit: bool
@@ -139,6 +155,7 @@ class DirectionConfig:
     from_topic_id: Optional[int] = None
     to_topic_id: Optional[int] = None
     mode: Literal["copy", "forward"] = "copy"
+    past_mode: Optional[PastModeConfig] = None
 
     def __repr__(self) -> str:
         return (
@@ -147,6 +164,7 @@ class DirectionConfig:
             f"editing: {not self.disable_edit}, "
             f"{f'from_topic_id: {self.from_topic_id}, ' if self.from_topic_id else ''}"
             f"{f'to_topic_id: {self.to_topic_id}, ' if self.to_topic_id else ''}"
+            f"{f'past_mode: {self.past_mode}, ' if self.past_mode else ''}"
             f"filters: {self.filters}"
         )
 
@@ -187,6 +205,16 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
 
         return CompositeMessageFilter(filters) if (len(filters) > 1) else filters[0]
 
+    def build_past_mode(pm: Optional[dict]) -> Optional[PastModeConfig]:
+        if not pm:
+            return None
+        return PastModeConfig(
+            send_delay=pm.get("send_delay", 0.5),
+            since_date=datetime.fromisoformat(pm["since_date"]) if "since_date" in pm else None,
+            last_n=pm.get("last_n"),
+            full_history=pm.get("full_history", False),
+        )
+
     default_filters = build_filters(
         yaml_config.get("filters", None), EmptyMessageFilter()
     )
@@ -225,6 +253,7 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
                         from_topic_id=source_topic_id,
                         to_topic_id=target_topic_id,
                         mode=direction.get("mode", yaml_config.get("mode", "copy")),
+                        past_mode=build_past_mode(direction.get("past_mode")),
                     )
                 )
 
@@ -233,7 +262,11 @@ else:
     from functools import partial
 
     def build_mapping_from_env(
-        disable_edit: bool, disable_delete: bool, filters: MessageFilter, env_str: str
+        disable_edit: bool,
+        disable_delete: bool,
+        filters: MessageFilter,
+        past_mode: Optional[PastModeConfig],
+        env_str: str,
     ) -> Dict[int, Dict[int, List[DirectionConfig]]]:
         mapping: Dict[int, Dict[int, List[DirectionConfig]]] = {}
 
@@ -270,6 +303,7 @@ else:
                             filters=filters,
                             from_topic_id=source_topic_id,
                             to_topic_id=target_topic_id,
+                            past_mode=past_mode,
                         )
                     )
 
@@ -296,11 +330,28 @@ else:
     else:
         message_filter = EmptyMessageFilter()
 
+    _PAST_MODE_STR: Optional[str] = config("PAST_MODE", default=None)
+
+    def _parse_past_mode_env(value: Optional[str]) -> Optional[PastModeConfig]:
+        if not value:
+            return None
+        v = value.strip()
+        if v == "full_history":
+            return PastModeConfig(full_history=True)
+        if v.startswith("since_date="):
+            return PastModeConfig(since_date=datetime.fromisoformat(v[len("since_date="):]))
+        if v.startswith("last_n="):
+            return PastModeConfig(last_n=int(v[len("last_n="):]))
+        raise ValueError(f"PAST_MODE: неверный формат: {v!r}")
+
+    _GLOBAL_PAST_MODE: Optional[PastModeConfig] = _parse_past_mode_env(_PAST_MODE_STR)
+
     cast_env_chat_mapping = partial(
         build_mapping_from_env,
         DISABLE_EDIT,
         DISABLE_DELETE,
         message_filter,
+        _GLOBAL_PAST_MODE,
     )
 
     CHAT_MAPPING = config("CHAT_MAPPING", cast=cast_env_chat_mapping, default="")
