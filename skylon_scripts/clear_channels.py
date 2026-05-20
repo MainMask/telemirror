@@ -1,0 +1,194 @@
+"""
+Удаляет все сообщения во всех каналах-получателях и топиках супергрупп,
+описанных в конфиге (CHAT_MAPPING).
+
+Использование:
+    python clear_channels.py           # с подтверждением
+    python clear_channels.py --dry-run # только показывает цели
+
+Предупреждение: использует тот же SESSION_STRING, что и основной сервис.
+Не запускайте одновременно с main.py.
+"""
+
+import argparse
+import asyncio
+import logging
+import sys
+from pathlib import Path
+from typing import Dict, Optional, Set
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from config import (
+        API_APP_VERSION,
+        API_DEVICE_MODEL,
+        API_HASH,
+        API_ID,
+        API_SYSTEM_VERSION,
+        CHAT_MAPPING,
+        LOG_LEVEL,
+        SESSION_STRING,
+    )
+except Exception:
+    print("Failed reading .env")
+    raise
+
+from telethon import TelegramClient, errors, utils
+from telethon.sessions import StringSession
+
+GENERAL_TOPIC_ID = 1
+DELETE_BATCH = 100
+
+
+def _configure_logging(log_level: str) -> logging.Logger:
+    logger = logging.getLogger("purge_targets")
+    logger.setLevel(log_level)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(levelname)-5s %(asctime)s [%(filename)s:%(lineno)d]:%(name)s: %(message)s"
+            )
+        )
+        logger.addHandler(handler)
+    return logger
+
+
+def _get_msg_topic(msg) -> int:
+    """Возвращает topic_id сообщения (логика из mirroring.py:101-108)."""
+    if msg.reply_to and msg.reply_to.forum_topic:
+        return msg.reply_to.reply_to_top_id or msg.reply_to.reply_to_msg_id
+    return GENERAL_TOPIC_ID
+
+
+def collect_targets(chat_mapping) -> Dict[int, Set[Optional[int]]]:
+    """Собирает {channel_id: set(topic_ids)} из целевых каналов CHAT_MAPPING."""
+    targets: Dict[int, Set[Optional[int]]] = {}
+    for _, tgt_map in chat_mapping.items():
+        for tgt_id, cfgs in tgt_map.items():
+            for cfg in cfgs:
+                targets.setdefault(tgt_id, set()).add(cfg.to_topic_id)
+    return targets
+
+
+async def purge(
+    client: TelegramClient,
+    channel_id: int,
+    topic_id: Optional[int],
+    dry_run: bool,
+    logger: logging.Logger,
+) -> int:
+    """Удаляет сообщения в канале (или конкретном топике). Возвращает кол-во удалённых."""
+    label = f"{channel_id}#{topic_id}" if topic_id is not None else str(channel_id)
+    deleted = 0
+    batch = []
+
+    async def flush():
+        nonlocal deleted
+        if not batch:
+            return
+        if not dry_run:
+            while True:
+                try:
+                    await client.delete_messages(channel_id, batch)
+                    break
+                except errors.FloodWaitError as e:
+                    logger.warning(f"[{label}] FloodWait {e.seconds}s, ждём...")
+                    await asyncio.sleep(e.seconds)
+        deleted += len(batch)
+        batch.clear()
+
+    async for msg in client.iter_messages(channel_id):
+        if topic_id is not None and _get_msg_topic(msg) != topic_id:
+            continue
+        batch.append(msg.id)
+        if len(batch) >= DELETE_BATCH:
+            await flush()
+
+    await flush()
+
+    action = "Найдено (dry-run)" if dry_run else "Удалено"
+    logger.info(f"[{label}] {action}: {deleted} сообщений")
+    return deleted
+
+
+async def _run(logger: logging.Logger, dry_run: bool) -> None:
+    logger.warning(
+        "purge_targets.py использует тот же SESSION_STRING, что и живой сервис. "
+        "Убедитесь, что main.py НЕ запущен."
+    )
+
+    targets = collect_targets(CHAT_MAPPING)
+    if not targets:
+        logger.warning("CHAT_MAPPING пуст — нечего очищать.")
+        return
+
+    # Строим список задач: если None в topic_ids — чистим весь канал (одна задача без фильтра)
+    tasks = []
+    for channel_id, topic_ids in targets.items():
+        if None in topic_ids:
+            tasks.append((channel_id, None))
+        else:
+            for topic_id in sorted(topic_ids):
+                tasks.append((channel_id, topic_id))
+
+    logger.info(f"Целей для очистки: {len(tasks)}")
+    for channel_id, topic_id in tasks:
+        label = f"{channel_id}#{topic_id}" if topic_id is not None else str(channel_id)
+        logger.info(f"  {label}")
+
+    if not dry_run:
+        answer = input("\nПродолжить удаление? [y/N] ").strip().lower()
+        if answer != "y":
+            logger.info("Отменено.")
+            return
+
+    client = TelegramClient(
+        StringSession(SESSION_STRING),
+        API_ID,
+        API_HASH,
+        device_model=API_DEVICE_MODEL,
+        system_version=API_SYSTEM_VERSION,
+        app_version=API_APP_VERSION,
+        flood_sleep_threshold=60,
+    )
+    client.parse_mode = "markdown"
+    await client.connect()
+
+    me = await client.get_me()
+    if me is None:
+        raise RuntimeError("Нет авторизации. Запустите login.py для получения SESSION_STRING.")
+    logger.info(f"Вошли как {utils.get_display_name(me)} ({me.phone})")
+
+    total = 0
+    try:
+        for channel_id, topic_id in tasks:
+            try:
+                total += await purge(client, channel_id, topic_id, dry_run, logger)
+            except Exception as e:
+                label = f"{channel_id}#{topic_id}" if topic_id is not None else str(channel_id)
+                logger.error(f"[{label}] Ошибка: {e}")
+    finally:
+        await client.disconnect()
+
+    action = "Найдено (dry-run)" if dry_run else "Итого удалено"
+    logger.info(f"{action}: {total} сообщений во всех каналах.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Очистка каналов-получателей telemirror")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Только показать что будет удалено, без реального удаления",
+    )
+    args = parser.parse_args()
+
+    logger = _configure_logging(LOG_LEVEL)
+    asyncio.run(_run(logger, args.dry_run))
+
+
+if __name__ == "__main__":
+    main()
