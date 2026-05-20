@@ -517,7 +517,7 @@ class EventProcessor(CopyEventMessage):
                 )
                 if deleting_message.mirror_id not in _ch_ids:
                     _ch_ids.append(deleting_message.mirror_id)
-                break  # check disable_delete once per mirror message
+                break  # add to deletion list once per mirror message
 
         for channel_id, message_ids in deleting_per_channel.items():
             try:

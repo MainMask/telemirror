@@ -369,9 +369,8 @@ else:
             "Please provide valid non-empty CHAT_MAPPING environment variable."
         )
 
-_bc_send_delay: float = config("BROADCAST_SEND_DELAY", default=0.5, cast=float)
-
 if BROADCAST_CHANNEL:
+    _bc_send_delay: float = config("BROADCAST_SEND_DELAY", default=0.5, cast=float)
     _all_broadcast_targets: Dict[int, set] = {}
     for _src, _targets in CHAT_MAPPING.items():
         if _src == BROADCAST_CHANNEL:
