@@ -216,6 +216,9 @@ class EventProcessor(CopyEventMessage):
                         )
                     )
 
+                if config.send_delay:
+                    await asyncio.sleep(config.send_delay)
+
     @__handle_exceptions
     async def new_album(
         self: "EventProcessor", chat_id: int, album: EventAlbumMessage, album_link: str
@@ -395,6 +398,9 @@ class EventProcessor(CopyEventMessage):
                         ]
                     )
 
+                if config.send_delay:
+                    await asyncio.sleep(config.send_delay)
+
     @__handle_exceptions
     async def edit_message(
         self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
@@ -469,6 +475,8 @@ class EventProcessor(CopyEventMessage):
                         f"{type(e).__name__}: {e}"
                     )
 
+                break  # edit each mirror message once regardless of how many configs exist
+
     @__handle_exceptions
     async def delete_message(
         self: "EventProcessor", chat_id: int, message_ids: List[int]
@@ -504,9 +512,12 @@ class EventProcessor(CopyEventMessage):
                 if config.disable_delete is True:
                     continue
 
-                deleting_per_channel.setdefault(
+                _ch_ids = deleting_per_channel.setdefault(
                     deleting_message.mirror_channel, []
-                ).append(deleting_message.mirror_id)
+                )
+                if deleting_message.mirror_id not in _ch_ids:
+                    _ch_ids.append(deleting_message.mirror_id)
+                break  # check disable_delete once per mirror message
 
         for channel_id, message_ids in deleting_per_channel.items():
             try:

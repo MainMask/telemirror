@@ -131,6 +131,9 @@ YAML_CONFIG_FILE = "./.configs/mirror.config.yml"
 # source and target chats mapping
 CHAT_MAPPING: Dict[int, Dict[int, List["DirectionConfig"]]] = {}
 
+_bc = config("BROADCAST_CHANNEL", default=None)
+BROADCAST_CHANNEL: Optional[int] = int(_bc) if _bc else None
+
 
 @dataclass(frozen=True)
 class PastModeConfig:
@@ -156,6 +159,7 @@ class DirectionConfig:
     to_topic_id: Optional[int] = None
     mode: Literal["copy", "forward"] = "copy"
     past_mode: Optional[PastModeConfig] = None
+    send_delay: float = 0.0
 
     def __repr__(self) -> str:
         return (
@@ -188,6 +192,9 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
     else:
         with open(YAML_CONFIG_FILE, encoding="utf8") as file:
             yaml_config = yaml.load(file, Loader=yaml.FullLoader)
+
+    if "broadcast_channel" in yaml_config:
+        BROADCAST_CHANNEL = int(yaml_config["broadcast_channel"])
 
     def build_filters(
         filter_config: Optional[dict], default: MessageFilter
@@ -361,3 +368,35 @@ else:
             "The chat mapping configuration is incorrect. "
             "Please provide valid non-empty CHAT_MAPPING environment variable."
         )
+
+_bc_send_delay: float = config("BROADCAST_SEND_DELAY", default=0.5, cast=float)
+
+if BROADCAST_CHANNEL:
+    _all_broadcast_targets: Dict[int, set] = {}
+    for _src, _targets in CHAT_MAPPING.items():
+        if _src == BROADCAST_CHANNEL:
+            continue
+        for _tgt_id, _cfgs in _targets.items():
+            for _cfg in _cfgs:
+                _all_broadcast_targets.setdefault(_tgt_id, set()).add(_cfg.to_topic_id)
+
+    _bc_filter = EmptyMessageFilter()
+    for _tgt_id, _topic_ids in _all_broadcast_targets.items():
+        _existing_topics = {
+            _c.to_topic_id
+            for _c in CHAT_MAPPING.get(BROADCAST_CHANNEL, {}).get(_tgt_id, [])
+        }
+        for _topic_id in _topic_ids:
+            if _topic_id not in _existing_topics:
+                CHAT_MAPPING.setdefault(BROADCAST_CHANNEL, {}).setdefault(
+                    _tgt_id, []
+                ).append(
+                    DirectionConfig(
+                        disable_delete=False,
+                        disable_edit=False,
+                        filters=_bc_filter,
+                        to_topic_id=_topic_id,
+                        mode="copy",
+                        send_delay=_bc_send_delay,
+                    )
+                )
