@@ -31,8 +31,8 @@ class ChannelWatermarkConfig:
     scale_steps: int = 80
     inpaint_dilate_px: int = 6
     stamp_watermark_path: str = _DEFAULT_STAMP
-    stamp_opacity: float = 0.8
-    stamp_scale: float = 0.30
+    stamp_opacity: float = 0.65
+    stamp_scale: float = 0.35
 
 
 def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
@@ -144,7 +144,11 @@ def remove_watermark_from_image(
     image_pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     mask_pil = Image.fromarray(mask)
 
-    result_pil = _get_lama()(image_pil, mask_pil)
+    try:
+        result_pil = _get_lama()(image_pil, mask_pil)
+    except ModuleNotFoundError:
+        logger.warning("LaMa unavailable (torch not installed) — skipping inpainting")
+        return None
 
     result_bgr = cv2.cvtColor(np.array(result_pil), cv2.COLOR_RGB2BGR)
     ok, buf = cv2.imencode(".jpg", result_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
@@ -176,10 +180,10 @@ def remove_watermark_from_video(
     fh, fw = frame.shape[:2]
     d = config.inpaint_dilate_px
     x, y, w, h = bbox
-    x = max(0, x - d)
-    y = max(0, y - d)
-    w = min(fw - x, w + 2 * d)
-    h = min(fh - y, h + 2 * d)
+    x = max(1, x - d)
+    y = max(1, y - d)
+    w = min(fw - x - 1, w + 2 * d)
+    h = min(fh - y - 1, h + 2 * d)
 
     delogo = f"delogo=x={x}:y={y}:w={w}:h={h}"
     cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", delogo, "-c:a", "copy", output_path]

@@ -10,6 +10,8 @@ from ..watermark.processor import (
     ChannelWatermarkConfig,
     async_remove_watermark_from_image,
     async_remove_watermark_from_video,
+    async_stamp_watermark_on_image,
+    async_stamp_watermark_on_video,
 )
 from .base import FilterAction, FilterResult, MessageFilter
 
@@ -66,9 +68,11 @@ class WatermarkRemovalFilter(MessageFilter):
                 message=message, file=bytes
             )
             cleaned = await async_remove_watermark_from_image(photo_bytes, config)
-            if cleaned is not None:
-                handle = await message._client.upload_file(cleaned)
-                message.media = handle
+            stamped = await async_stamp_watermark_on_image(
+                cleaned if cleaned is not None else photo_bytes, config
+            )
+            handle = await message._client.upload_file(stamped, file_name="photo.jpg")
+            message.media = handle
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: photo processing failed (chat_id=%s)", message.chat_id
@@ -79,23 +83,29 @@ class WatermarkRemovalFilter(MessageFilter):
         message: EventMessage,
         config: ChannelWatermarkConfig,
     ) -> None:
-        tmp_in = tmp_out = None
+        tmp_in = tmp_out = tmp_stamp = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
                 tmp_in = f.name
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
                 tmp_out = f.name
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                tmp_stamp = f.name
 
             await message._client.download_media(message=message, file=tmp_in)
             removed = await async_remove_watermark_from_video(tmp_in, config, tmp_out)
-            if removed:
-                handle = await message._client.upload_file(tmp_out)
+            source_for_stamp = tmp_out if removed else tmp_in
+            stamped = await async_stamp_watermark_on_video(source_for_stamp, config, tmp_stamp)
+
+            upload_path = tmp_stamp if stamped else (tmp_out if removed else None)
+            if upload_path is not None:
+                handle = await message._client.upload_file(upload_path)
                 message.media = handle
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: video processing failed (chat_id=%s)", message.chat_id
             )
         finally:
-            for p in (tmp_in, tmp_out):
+            for p in (tmp_in, tmp_out, tmp_stamp):
                 if p and os.path.exists(p):
                     os.unlink(p)
