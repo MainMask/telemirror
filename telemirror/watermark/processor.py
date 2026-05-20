@@ -31,7 +31,7 @@ class ChannelWatermarkConfig:
     scale_steps: int = 80
     inpaint_dilate_px: int = 6
     stamp_watermark_path: str = _DEFAULT_STAMP
-    stamp_opacity: float = 0.65
+    stamp_opacity: float = 0.55
     stamp_scale: float = 0.35
 
 
