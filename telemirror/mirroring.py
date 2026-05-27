@@ -716,12 +716,14 @@ class Mirroring:
 
         # 2. Remove mirrors for messages deleted from source
         all_db = await self._database.get_all_messages_for_channel(bc)
-        deleted = list({m.original_id for m in all_db} - source_messages.keys())
+        mirrored_ids = {m.original_id for m in all_db}
+        deleted = list(mirrored_ids - source_messages.keys())
         if deleted:
             self._logger.info(
                 f"[Sync broadcast]: deleting {len(deleted)} removed message(s)"
             )
             await self._processor.delete_message(bc, deleted)
+            mirrored_ids -= set(deleted)
 
         # 3. Send missing / edit existing — with album grouping (same as past_mode.py)
         pending_album: List[types.Message] = []
@@ -735,7 +737,7 @@ class Mirroring:
             if not pending_album:
                 return
             first = pending_album[0]
-            if await self._database.get_messages(first.id, bc):
+            if first.id in mirrored_ids:
                 for msg in pending_album:
                     await self._processor.edit_message(bc, msg, _msg_link(msg.id))
             else:
@@ -744,7 +746,7 @@ class Mirroring:
             pending_gid = None
 
         async def process_single(msg: types.Message) -> None:
-            if await self._database.get_messages(msg.id, bc):
+            if msg.id in mirrored_ids:
                 await self._processor.edit_message(bc, msg, _msg_link(msg.id))
             else:
                 await self._processor.new_message(bc, msg, _msg_link(msg.id))
@@ -796,7 +798,13 @@ class Mirroring:
             self._logger.info(f"Logged in as {utils.get_display_name(me)} ({me.phone})")
 
             if self._broadcast_channel:
-                await self._sync_broadcast_channel(client)
+                try:
+                    await self._sync_broadcast_channel(client)
+                except Exception as e:
+                    self._logger.error(
+                        f"[Sync broadcast]: failed, live mirroring will continue. "
+                        f"{type(e).__name__}: {e}"
+                    )
 
             await client.run_until_disconnected()
         except (errors.UserDeactivatedBanError, errors.UserDeactivatedError):
