@@ -134,6 +134,9 @@ CHAT_MAPPING: Dict[int, Dict[int, List["DirectionConfig"]]] = {}
 _bc = config("BROADCAST_CHANNEL", default=None)
 BROADCAST_CHANNEL: Optional[int] = int(_bc) if _bc else None
 
+_tc = config("TECH_CHANNEL", default=None)
+TECH_CHANNEL: Optional[int] = int(_tc) if _tc else None
+
 
 @dataclass(frozen=True)
 class PastModeConfig:
@@ -195,6 +198,9 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
 
     if "broadcast_channel" in yaml_config:
         BROADCAST_CHANNEL = int(yaml_config["broadcast_channel"])
+
+    if "tech_channel" in yaml_config:
+        TECH_CHANNEL = int(yaml_config["tech_channel"])
 
     def build_filters(
         filter_config: Optional[dict], default: MessageFilter

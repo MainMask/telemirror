@@ -58,6 +58,7 @@ async def run_telemirror(
     host: str,
     port: int,
     broadcast_channel: int = None,
+    tech_channel: int = None,
 ):
     await serve_health_endpoint(host=host, port=port)
 
@@ -77,6 +78,7 @@ async def run_telemirror(
         api_system_version=api_system_version,
         api_app_version=api_app_version,
         broadcast_channel=broadcast_channel,
+        tech_channel=tech_channel,
     )
     await telemirror.run()
 
@@ -92,6 +94,7 @@ def main():
         API_ID,
         API_SYSTEM_VERSION,
         BROADCAST_CHANNEL,
+        TECH_CHANNEL,
         CHAT_MAPPING,
         DB_URL,
         HOST,
@@ -125,6 +128,7 @@ def main():
             host=HOST,
             port=PORT,
             broadcast_channel=BROADCAST_CHANNEL,
+            tech_channel=TECH_CHANNEL,
         )
     )
 
