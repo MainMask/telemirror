@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Dict, List, Optional, Union
 
 from telethon import TelegramClient, errors, events, utils
@@ -16,11 +17,19 @@ from telemirror._patch import (
 )
 from telemirror.hints import EventAlbumMessage, EventLike, EventMessage
 from telemirror.messagefilters.base import FilterAction
-from telemirror.mixins import CopyEventMessage
+from telemirror.mixins import CopyEventMessage, UpdateEntitiesParams
 from telemirror.storage import Database, MirrorMessage
 
 
-class EventProcessor(CopyEventMessage):
+# Matches t.me/c/{peer_id}/{msg_id} (private) and t.me/{username}/{msg_id} (public).
+# Trailing ?query or #fragment allowed; extra path segments (threads) are NOT matched.
+_TG_MSG_LINK_RE = re.compile(
+    r"https?://t\.me/(?:c/(\d+)|([a-zA-Z][a-zA-Z0-9_]*))/(\d+)(?:[?#][^\s]*)?$",
+    re.IGNORECASE,
+)
+
+
+class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     GENERAL_TOPIC_ID = 1
 
     def __init__(
@@ -55,6 +64,128 @@ class EventProcessor(CopyEventMessage):
                 self._logger.error(e, exc_info=True)
 
         return wrapper
+
+    async def _resolve_username_to_channel_id(
+        self: "EventProcessor",
+        username: str,
+        source_chat_id: int,
+        message: EventMessage,
+    ) -> Optional[int]:
+        """Resolve a t.me channel username to a full Telethon channel ID.
+
+        Fast path: if the username matches the source channel itself, return
+        source_chat_id without any network call.
+        Fallback: client.get_entity() (uses entity cache; one API call on first use).
+        Returns None on any resolution error.
+        """
+        source_chat = getattr(message, "_chat", None)
+        source_username = getattr(source_chat, "username", None)
+        if source_username and source_username.lower() == username.lower():
+            return source_chat_id
+        try:
+            entity = await self._client.get_entity(username)
+            return utils.get_peer_id(entity)
+        except Exception:
+            return None
+
+    async def _try_rewrite_tg_link(
+        self: "EventProcessor",
+        url: str,
+        source_chat_id: int,
+        message: EventMessage,
+    ) -> Optional[str]:
+        """Parse a t.me message URL and return a rewritten URL pointing to the mirror.
+
+        Returns None if the URL doesn't match, the referenced channel isn't
+        configured, or the referenced message hasn't been mirrored yet.
+        """
+        m = _TG_MSG_LINK_RE.match(url)
+        if not m:
+            return None
+        peer_id_str, username, msg_id_str = m.group(1), m.group(2), m.group(3)
+        msg_id = int(msg_id_str)
+
+        if peer_id_str:
+            # t.me/c/{peer_id}/{msg_id} — private/supergroup channel
+            referenced_channel_id = utils.get_peer_id(
+                types.PeerChannel(int(peer_id_str))
+            )
+        else:
+            # t.me/{username}/{msg_id} — public channel
+            referenced_channel_id = await self._resolve_username_to_channel_id(
+                username, source_chat_id, message
+            )
+            if referenced_channel_id is None:
+                return None
+
+        # Find configured targets for the referenced source channel
+        target_map = self._chat_mapping.get(referenced_channel_id, {})
+        if not target_map:
+            return None
+
+        mirrors = await self._database.get_messages(msg_id, referenced_channel_id)
+        mirror = next(
+            (mm for mm in mirrors if mm.mirror_channel in target_map), None
+        )
+        if mirror is None:
+            return None  # Not yet mirrored — leave link unchanged
+
+        outgoing_peer_id = utils.resolve_id(mirror.mirror_channel)[0]
+        return f"https://t.me/c/{outgoing_peer_id}/{mirror.mirror_id}"
+
+    async def _rewrite_links(
+        self: "EventProcessor",
+        message: EventMessage,
+        source_chat_id: int,
+    ) -> None:
+        """Rewrite t.me message links in entities to point to their mirrors.
+
+        MessageEntityTextUrl: only entity.url is updated (no text change).
+        MessageEntityUrl: URL text is replaced in-place; entity offsets are
+        adjusted via update_entities_params (same pattern as UrlMessageFilter).
+        """
+        if not message.entities:
+            return
+
+        has_url_entity = any(
+            isinstance(e, types.MessageEntityUrl) for e in message.entities
+        )
+        surrogate_text = utils.add_surrogate(message.message) if has_url_entity else None
+
+        for entity in message.entities:
+            if isinstance(entity, types.MessageEntityTextUrl):
+                new_url = await self._try_rewrite_tg_link(
+                    entity.url, source_chat_id, message
+                )
+                if new_url is not None:
+                    entity.url = new_url
+
+            elif isinstance(entity, types.MessageEntityUrl):
+                if not surrogate_text:
+                    continue
+                old_url = utils.del_surrogate(
+                    surrogate_text[entity.offset : entity.offset + entity.length]
+                )
+                new_url = await self._try_rewrite_tg_link(
+                    old_url, source_chat_id, message
+                )
+                if new_url is not None:
+                    new_surrogate = utils.add_surrogate(new_url)
+                    surrogate_text = (
+                        surrogate_text[: entity.offset]
+                        + new_surrogate
+                        + surrogate_text[entity.offset + entity.length :]
+                    )
+                    diff = len(new_surrogate) - entity.length
+                    self.update_entities_params(
+                        message.entities,
+                        entity.offset,
+                        entity.offset + entity.length,
+                        diff,
+                    )
+
+        if surrogate_text:
+            message.message = utils.del_surrogate(surrogate_text)
 
     @__handle_exceptions
     async def new_message(
@@ -122,9 +253,14 @@ class EventProcessor(CopyEventMessage):
                     )
                     continue
 
+                message_copy = self.copy_message(message)
+                # Rewrite internal t.me links BEFORE filters can strip them (copy mode only)
+                if config.mode == "copy":
+                    await self._rewrite_links(message_copy, chat_id)
+
                 filtered_message: EventMessage
                 filter_action, filtered_message = await config.filters.process(
-                    self.copy_message(message), events.NewMessage.Event
+                    message_copy, events.NewMessage.Event
                 )
 
                 if filter_action is FilterAction.DISCARD or filter_action is False:
@@ -283,9 +419,15 @@ class EventProcessor(CopyEventMessage):
                     )
                     continue
 
+                album_copy = self.copy_album(album)
+                # Rewrite internal t.me links BEFORE filters can strip them (copy mode only)
+                if config.mode == "copy":
+                    for msg in album_copy:
+                        await self._rewrite_links(msg, chat_id)
+
                 filtered_album: EventAlbumMessage
                 filter_action, filtered_album = await config.filters.process(
-                    self.copy_album(album), events.Album.Event
+                    album_copy, events.Album.Event
                 )
 
                 if filter_action is FilterAction.DISCARD or filter_action is False:
@@ -298,11 +440,14 @@ class EventProcessor(CopyEventMessage):
                 idxs: List[int] = []
                 files: List[types.TypeMessageMedia] = []
                 captions: List[str] = []
+                album_entities: List[List[types.TypeMessageEntity]] = []
                 for incoming_message in filtered_album:
                     idxs.append(incoming_message.id)
                     files.append(incoming_message.media)
-                    # Pass unparsed text, since: https://github.com/LonamiWebs/Telethon/issues/3065
-                    captions.append(incoming_message.text)
+                    # Use raw message text with explicit formatting_entities to avoid
+                    # double-parsing (workaround for github.com/LonamiWebs/Telethon/issues/3065)
+                    captions.append(incoming_message.message or "")
+                    album_entities.append(incoming_message.entities or [])
 
                 outgoing_topic_reply = (
                     reply_to_messages.get(outgoing_chat) is not None
@@ -317,6 +462,7 @@ class EventProcessor(CopyEventMessage):
                             entity=outgoing_chat,
                             caption=captions,
                             file=files,
+                            formatting_entities=album_entities,
                             reply_to=reply_to_messages.get(outgoing_chat)
                             if outgoing_topic_reply or config.to_topic_id is None
                             else config.to_topic_id,
@@ -342,18 +488,22 @@ class EventProcessor(CopyEventMessage):
                     # Strip captions > 1024 chars, send them as separate text messages
                     texts_to_send = []
                     safe_captions = []
+                    safe_entities = []
                     for i, caption in enumerate(captions):
                         if len(caption) > 1024:
-                            texts_to_send.append((caption, filtered_album[i].entities))
+                            texts_to_send.append((caption, album_entities[i]))
                             safe_captions.append("")
+                            safe_entities.append([])
                         else:
                             safe_captions.append(caption)
+                            safe_entities.append(album_entities[i])
                     try:
                         outgoing_messages = await send_file(
                             self._client,
                             entity=outgoing_chat,
                             caption=safe_captions,
                             file=files,
+                            formatting_entities=safe_entities,
                             reply_to=reply_to_messages.get(outgoing_chat)
                             if outgoing_topic_reply or config.to_topic_id is None
                             else config.to_topic_id,

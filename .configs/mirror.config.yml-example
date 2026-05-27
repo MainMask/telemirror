@@ -9,6 +9,7 @@ filters:
         ? t.me
       # whitelist: !!set   # keep these URLs even if they match blacklist
       #   ? example.com
+      #   ? t.me/c/        # prefix: preserve private channel message links (internal mirrors)
       # placeholder: "***" # replacement text for removed URLs, default "***"
       # filter_mention: false  # also filter @mentions
   - SkipUrlFilter:

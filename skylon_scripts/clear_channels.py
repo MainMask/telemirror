@@ -27,13 +27,16 @@ try:
         API_ID,
         API_SYSTEM_VERSION,
         CHAT_MAPPING,
+        DB_URL,
         LOG_LEVEL,
         SESSION_STRING,
+        USE_MEMORY_DB,
     )
 except Exception:
     print("Failed reading .env")
     raise
 
+import psycopg
 from telethon import TelegramClient, errors, utils
 from telethon.sessions import StringSession
 
@@ -101,6 +104,8 @@ async def purge(
         batch.clear()
 
     async for msg in client.iter_messages(channel_id):
+        if msg.action is not None:  # MessageService (channel created, pin, etc.) — skip
+            continue
         if topic_id is not None and _get_msg_topic(msg) != topic_id:
             continue
         batch.append(msg.id)
@@ -112,6 +117,66 @@ async def purge(
     action = "Найдено (dry-run)" if dry_run else "Удалено"
     logger.info(f"[{label}] {action}: {deleted} сообщений")
     return deleted
+
+
+async def _reset_checkpoints(
+    cleared_targets: Dict[int, Set[Optional[int]]],
+    dry_run: bool,
+    logger: logging.Logger,
+) -> None:
+    """Сбрасывает past_mode чекпоинты для очищенных целевых каналов."""
+    pairs = [
+        (src, tgt)
+        for src, tgt_map in CHAT_MAPPING.items()
+        for tgt in tgt_map
+        if tgt in cleared_targets
+    ]
+    if not pairs:
+        return
+
+    if dry_run:
+        logger.info(f"(dry-run) Было бы сброшено {len(pairs)} чекпоинт(ов): {pairs}")
+        return
+
+    if USE_MEMORY_DB:
+        return  # in-memory чекпоинты не переживают перезапуск
+
+    async with await psycopg.AsyncConnection.connect(DB_URL) as conn:
+        async with conn.cursor() as cur:
+            for src, tgt in pairs:
+                await cur.execute(
+                    "DELETE FROM past_mode_checkpoint "
+                    "WHERE source_channel = %s AND target_channel = %s",
+                    (src, tgt),
+                )
+                logger.info(f"[checkpoint] сброшен: {src}→{tgt}")
+
+
+async def _clear_bindings(
+    cleared_targets: Dict[int, Set[Optional[int]]],
+    dry_run: bool,
+    logger: logging.Logger,
+) -> None:
+    """Удаляет записи binding_id для очищенных целевых каналов."""
+    target_ids = list(cleared_targets.keys())
+    if not target_ids:
+        return
+
+    if dry_run:
+        logger.info(f"(dry-run) Было бы очищено binding_id для {len(target_ids)} канала(ов): {target_ids}")
+        return
+
+    if USE_MEMORY_DB:
+        return
+
+    async with await psycopg.AsyncConnection.connect(DB_URL) as conn:
+        async with conn.cursor() as cur:
+            for tgt in target_ids:
+                await cur.execute(
+                    "DELETE FROM binding_id WHERE mirror_channel = %s",
+                    (tgt,),
+                )
+                logger.info(f"[binding_id] очищен: {tgt}")
 
 
 async def _run(logger: logging.Logger, dry_run: bool) -> None:
@@ -172,6 +237,9 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
                 logger.error(f"[{label}] Ошибка: {e}")
     finally:
         await client.disconnect()
+
+    await _reset_checkpoints(targets, dry_run, logger)
+    await _clear_bindings(targets, dry_run, logger)
 
     action = "Найдено (dry-run)" if dry_run else "Итого удалено"
     logger.info(f"{action}: {total} сообщений во всех каналах.")

@@ -12,6 +12,7 @@
 import asyncio
 import logging
 import sys
+from copy import deepcopy
 from pathlib import Path
 from time import monotonic
 from typing import List, Optional
@@ -38,6 +39,7 @@ except Exception:
 
 from telethon import TelegramClient, errors, utils
 from telethon.sessions import StringSession
+from telethon.tl import types
 
 from telemirror._patch import patch_input_media_with_spoiler
 from telemirror.mirroring import EventProcessor
@@ -118,9 +120,10 @@ async def _replay_direction(
         # full_history: только reverse=True
         iter_total = total
 
-    # Один EventProcessor на направление — переиспользует существующую логику фильтров и отправки
+    # Full CHAT_MAPPING is needed so _try_rewrite_tg_link can resolve cross-channel links.
+    # Override only the current source to this single direction to keep routing correct.
     processor = EventProcessor(
-        chat_mapping={source_id: {target_id: [cfg]}},
+        chat_mapping={**CHAT_MAPPING, source_id: {target_id: [cfg]}},
         database=database,
         client=client,
         logger=logger,
@@ -178,6 +181,81 @@ async def _replay_direction(
     logger.info(f"{prefix}: завершено. Обработано {processed} сообщений/альбомов.")
 
 
+async def _edit_links_pass(
+    client: TelegramClient,
+    database: Database,
+    directions: List,
+    logger: logging.Logger,
+) -> None:
+    """Второй проход: редактирует уже отправленные сообщения, в которых
+    перекрёстные ссылки не были переписаны при первом проходе."""
+    for source_id, target_id, cfg in directions:
+        if cfg.mode != "copy":
+            continue
+
+        prefix = f"[EditPass] {source_id}→{target_id}"
+        processor = EventProcessor(
+            chat_mapping={**CHAT_MAPPING, source_id: {target_id: [cfg]}},
+            database=database,
+            client=client,
+            logger=logger,
+        )
+
+        all_mirrors = await database.get_all_messages_for_channel(source_id)
+        mirrors = [m for m in all_mirrors if m.mirror_channel == target_id]
+        if not mirrors:
+            continue
+
+        edited = 0
+        for mirror in mirrors:
+            try:
+                src_msg = await client.get_messages(source_id, ids=mirror.original_id)
+            except Exception as e:
+                logger.warning(f"{prefix}: не удалось получить {mirror.original_id}: {e}")
+                continue
+
+            if not src_msg or not src_msg.entities:
+                continue
+            if not any(
+                isinstance(e, (types.MessageEntityTextUrl, types.MessageEntityUrl))
+                for e in src_msg.entities
+            ):
+                continue
+
+            msg_copy = processor.copy_message(src_msg)
+            entities_before = deepcopy(msg_copy.entities)
+            text_before = msg_copy.message
+            await processor._rewrite_links(msg_copy, source_id)
+
+            text_changed = msg_copy.message != text_before
+            url_changed = any(
+                getattr(a, "url", None) != getattr(b, "url", None)
+                for a, b in zip(msg_copy.entities or [], entities_before or [])
+            )
+            if not text_changed and not url_changed:
+                continue
+
+            try:
+                await client.edit_message(
+                    entity=target_id,
+                    message=mirror.mirror_id,
+                    text=msg_copy.message,
+                    formatting_entities=msg_copy.entities,
+                )
+                edited += 1
+                logger.info(f"{prefix}: исправлена ссылка в {mirror.original_id}→{mirror.mirror_id}")
+                if cfg.send_delay:
+                    await asyncio.sleep(cfg.send_delay)
+            except Exception as e:
+                logger.warning(
+                    f"{prefix}: ошибка редактирования {mirror.mirror_id}: "
+                    f"{type(e).__name__}: {e}"
+                )
+
+        if edited:
+            logger.info(f"{prefix}: исправлено {edited} сообщени(ий)")
+
+
 async def _run(logger: logging.Logger) -> None:
     logger.warning(
         "past_mode.py использует тот же SESSION_STRING, что и живой сервис. "
@@ -214,7 +292,7 @@ async def _run(logger: logging.Logger) -> None:
         device_model=API_DEVICE_MODEL,
         system_version=API_SYSTEM_VERSION,
         app_version=API_APP_VERSION,
-        flood_sleep_threshold=60,  # Telethon auto-sleep для FloodWait ≤60s
+        flood_sleep_threshold=300,  # Telethon auto-sleep для FloodWait ≤300s (как в main.py)
     )
     client.parse_mode = "markdown"
     await client.connect()
@@ -231,6 +309,10 @@ async def _run(logger: logging.Logger) -> None:
             except errors.FloodWaitError as e:
                 logger.warning(f"FloodWait {e.seconds}s при получении истории, ждём...")
                 await asyncio.sleep(e.seconds)
+
+        # Second pass: fix cross-channel links that couldn't be resolved during mirroring
+        logger.info("Второй проход: исправление перекрёстных ссылок...")
+        await _edit_links_pass(client, database, directions, logger)
     finally:
         await client.disconnect()
 

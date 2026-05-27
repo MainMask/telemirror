@@ -84,6 +84,8 @@ filters:
         # ? bit.ly      # short-link services
         # ? cutt.ly
         # ? tinyurl.com
+      whitelist: !!set
+        ? t.me/c/       # preserve private channel message links (internal mirrors)
 
   # 2. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
   #    Prefix with r'...' to use a regex instead of a plain word.
@@ -1032,7 +1034,8 @@ directions:
   to:
   - -1003858997927
   past_mode:
-    last_n: 10
+    last_n: 15
+    send_delay: 2.0
 - from:
   - -1002577016412
   to:
@@ -1053,3 +1056,6 @@ directions:
   - -1002969598305
   to:
   - -1003972046470
+  past_mode:
+    last_n: 40
+    send_delay: 2.0
