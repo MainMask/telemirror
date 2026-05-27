@@ -122,6 +122,21 @@ class Database(Protocol):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_all_messages_for_channel(
+        self: "Database", original_channel: int
+    ) -> List[MirrorMessage]:
+        """
+        Returns all `MirrorMessage` objects for a given source channel
+
+        Args:
+            original_channel (`int`): Source channel ID
+
+        Returns:
+            List[MirrorMessage]
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_past_mode_checkpoint(
         self: "Database", source: int, target: int
     ) -> Optional[int]:
@@ -246,6 +261,16 @@ class InMemoryDatabase(Database):
         """
         for idx in original_ids:
             self.__storage.pop(self.__build_message_key(idx, original_channel), None)
+
+    async def get_all_messages_for_channel(
+        self: "InMemoryDatabase", original_channel: int
+    ) -> List[MirrorMessage]:
+        return [
+            m
+            for msgs in self.__storage.values()
+            for m in msgs
+            if m.original_channel == original_channel
+        ]
 
     async def get_past_mode_checkpoint(
         self: "InMemoryDatabase", source: int, target: int
@@ -466,6 +491,21 @@ class PostgresDatabase(Database):
                     original_ids,
                 ),
             )
+
+    async def get_all_messages_for_channel(
+        self: "PostgresDatabase", original_channel: int
+    ) -> List[MirrorMessage]:
+        async with self.__pg_cursor() as cursor:
+            cursor.row_factory = class_row(MirrorMessage)
+            await cursor.execute(
+                """
+                SELECT original_id, original_channel, mirror_id, mirror_channel
+                FROM binding_id
+                WHERE original_channel = %s
+                """,
+                (original_channel,),
+            )
+            return await cursor.fetchall()
 
     async def __create_tables_if_not_exists(self: "PostgresDatabase"):
         """Create tables if not exists"""
