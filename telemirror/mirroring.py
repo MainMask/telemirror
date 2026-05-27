@@ -803,7 +803,8 @@ class Mirroring:
                 except Exception as e:
                     self._logger.error(
                         f"[Sync broadcast]: failed, live mirroring will continue. "
-                        f"{type(e).__name__}: {e}"
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True,
                     )
 
             await client.run_until_disconnected()
