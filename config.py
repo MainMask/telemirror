@@ -137,6 +137,8 @@ BROADCAST_CHANNEL: Optional[int] = int(_bc) if _bc else None
 _tc = config("TECH_CHANNEL", default=None)
 TECH_CHANNEL: Optional[int] = int(_tc) if _tc else None
 
+_LIVE_SEND_DELAY: float = config("SEND_DELAY", default=0.5, cast=float)
+
 
 @dataclass(frozen=True)
 class PastModeConfig:
@@ -267,6 +269,7 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
                         to_topic_id=target_topic_id,
                         mode=direction.get("mode", yaml_config.get("mode", "copy")),
                         past_mode=build_past_mode(direction.get("past_mode")),
+                        send_delay=direction.get("send_delay", _LIVE_SEND_DELAY),
                     )
                 )
 
@@ -317,6 +320,7 @@ else:
                             from_topic_id=source_topic_id,
                             to_topic_id=target_topic_id,
                             past_mode=past_mode,
+                            send_delay=_LIVE_SEND_DELAY,
                         )
                     )
 

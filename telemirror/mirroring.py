@@ -963,6 +963,7 @@ class Telemirror:
             device_model=api_device_model,
             system_version=api_system_version,
             app_version=api_app_version,
+            flood_sleep_threshold=300,
         )
         # Set up default parse mode as markdown
         recv_client.parse_mode = send_client.parse_mode = "markdown"
