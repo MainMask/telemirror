@@ -853,6 +853,7 @@ class Telemirror:
             api_device_model (`str`, optional): Telegram API device model. Defaults to `platform.uname().release`
             api_system_version (`str`, optional): Telegram API system version. Defaults to `platform.uname().machine`
             api_app_version (`str`, optional): Telegram API app version. Defaults to `telethon.version.__version__`
+            broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup. Defaults to None.
         """
         patch_input_media_with_spoiler()
         set_album_event_timeout(delay_sec=1.01)
