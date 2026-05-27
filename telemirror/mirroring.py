@@ -667,12 +667,6 @@ class Mirroring:
             client=sender,
             logger=logger,
         )
-        self._handlers = EventHandlers(
-            client=receiver,
-            chats=list(chat_mapping.keys()),
-            processor=self._processor,
-        )
-
         self._logger = logger
 
     async def run(self: "Mirroring") -> None:
@@ -806,6 +800,12 @@ class Mirroring:
                         f"{type(e).__name__}: {e}",
                         exc_info=True,
                     )
+
+            self._handlers = EventHandlers(
+                client=self._receiver,
+                chats=list(self._chat_mapping.keys()),
+                processor=self._processor,
+            )
 
             await client.run_until_disconnected()
         except (errors.UserDeactivatedBanError, errors.UserDeactivatedError):
