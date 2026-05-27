@@ -575,6 +575,7 @@ class TelegramLogHandler(logging.Handler):
         """Runs in the event-loop thread — dict ops are safe here."""
         if self._cooldown_until.get(text, 0) > self._loop.time():
             return  # в окне подавления
+        self._cooldown_until.pop(text, None)  # cooldown истёк — очищаем
 
         self._counts[text] = self._counts.get(text, 0) + 1
 
