@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from telethon import TelegramClient, errors, events, utils
 from telethon.sessions import StringSession
@@ -704,11 +704,12 @@ class Mirroring:
         - Deletes mirror messages whose originals no longer exist in the source channel.
         """
         bc = self._broadcast_channel
+        bc_peer_id = utils.resolve_id(bc)[0]
         self._logger.info(f"[Sync broadcast]: starting sync for channel#{bc}")
 
         # 1. Fetch all current source messages (oldest → newest)
         # Skip MessageService/MessageEmpty — only regular messages can be forwarded
-        source_messages: Dict[int, Any] = {}
+        source_messages: Dict[int, types.Message] = {}
         async for msg in client.iter_messages(bc, reverse=True):
             if isinstance(msg, types.Message):
                 source_messages[msg.id] = msg
@@ -723,30 +724,30 @@ class Mirroring:
             await self._processor.delete_message(bc, deleted)
 
         # 3. Send missing / edit existing — with album grouping (same as past_mode.py)
-        pending_album: List = []
+        pending_album: List[types.Message] = []
         pending_gid: Optional[int] = None
+
+        def _msg_link(msg_id: int) -> str:
+            return f"https://t.me/c/{bc_peer_id}/{msg_id}"
 
         async def flush_album() -> None:
             nonlocal pending_album, pending_gid
             if not pending_album:
                 return
             first = pending_album[0]
-            link = f"https://t.me/c/{utils.resolve_id(bc)[0]}/{first.id}"
             if await self._database.get_messages(first.id, bc):
                 for msg in pending_album:
-                    msg_link = f"https://t.me/c/{utils.resolve_id(bc)[0]}/{msg.id}"
-                    await self._processor.edit_message(bc, msg, msg_link)
+                    await self._processor.edit_message(bc, msg, _msg_link(msg.id))
             else:
-                await self._processor.new_album(bc, pending_album, link)
+                await self._processor.new_album(bc, pending_album, _msg_link(first.id))
             pending_album.clear()
             pending_gid = None
 
-        async def process_single(msg: Any) -> None:
-            link = f"https://t.me/c/{utils.resolve_id(bc)[0]}/{msg.id}"
+        async def process_single(msg: types.Message) -> None:
             if await self._database.get_messages(msg.id, bc):
-                await self._processor.edit_message(bc, msg, link)
+                await self._processor.edit_message(bc, msg, _msg_link(msg.id))
             else:
-                await self._processor.new_message(bc, msg, link)
+                await self._processor.new_message(bc, msg, _msg_link(msg.id))
 
         for msg in source_messages.values():
             gid = getattr(msg, "grouped_id", None)

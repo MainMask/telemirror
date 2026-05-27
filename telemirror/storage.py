@@ -265,11 +265,12 @@ class InMemoryDatabase(Database):
     async def get_all_messages_for_channel(
         self: "InMemoryDatabase", original_channel: int
     ) -> List[MirrorMessage]:
+        prefix = f"{original_channel}:"
         return [
             m
-            for msgs in self.__storage.values()
+            for key, msgs in self.__storage.items()
+            if key.startswith(prefix)
             for m in msgs
-            if m.original_channel == original_channel
         ]
 
     async def get_past_mode_checkpoint(
