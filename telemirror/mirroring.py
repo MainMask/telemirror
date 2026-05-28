@@ -71,13 +71,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         source_chat_id: int,
         message: EventMessage,
     ) -> Optional[int]:
-        """Resolve a t.me channel username to a full Telethon channel ID.
-
-        Fast path: if the username matches the source channel itself, return
-        source_chat_id without any network call.
-        Fallback: client.get_entity() (uses entity cache; one API call on first use).
-        Returns None on any resolution error.
-        """
+        """Resolve t.me username to Telethon peer ID; fast-path if it's the source channel."""
         source_chat = getattr(message, "_chat", None)
         source_username = getattr(source_chat, "username", None)
         if source_username and source_username.lower() == username.lower():
@@ -94,11 +88,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         source_chat_id: int,
         message: EventMessage,
     ) -> Optional[str]:
-        """Parse a t.me message URL and return a rewritten URL pointing to the mirror.
-
-        Returns None if the URL doesn't match, the referenced channel isn't
-        configured, or the referenced message hasn't been mirrored yet.
-        """
+        """Rewrite a t.me message URL to its mirror equivalent, or return None."""
         m = _TG_MSG_LINK_RE.match(url)
         if not m:
             return None
@@ -138,12 +128,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         message: EventMessage,
         source_chat_id: int,
     ) -> None:
-        """Rewrite t.me message links in entities to point to their mirrors.
-
-        MessageEntityTextUrl: only entity.url is updated (no text change).
-        MessageEntityUrl: URL text is replaced in-place; entity offsets are
-        adjusted via update_entities_params (same pattern as UrlMessageFilter).
-        """
+        """Rewrite t.me message links in entities to point to their mirrors."""
         if not message.entities:
             return
 

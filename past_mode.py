@@ -187,13 +187,16 @@ async def _edit_links_pass(
     directions: List,
     logger: logging.Logger,
 ) -> None:
-    """Второй проход: редактирует уже отправленные сообщения, в которых
-    перекрёстные ссылки не были переписаны при первом проходе."""
+    """Второй проход: исправляет перекрёстные ссылки в уже отправленных сообщениях."""
     for source_id, target_id, cfg in directions:
         if cfg.mode != "copy":
             continue
 
         prefix = f"[EditPass] {source_id}→{target_id}"
+        mirrors = await database.get_messages_for_channel_pair(source_id, target_id)
+        if not mirrors:
+            continue
+
         processor = EventProcessor(
             chat_mapping={**CHAT_MAPPING, source_id: {target_id: [cfg]}},
             database=database,
@@ -201,19 +204,15 @@ async def _edit_links_pass(
             logger=logger,
         )
 
-        all_mirrors = await database.get_all_messages_for_channel(source_id)
-        mirrors = [m for m in all_mirrors if m.mirror_channel == target_id]
-        if not mirrors:
+        mirror_map = {m.original_id: m for m in mirrors}
+        try:
+            src_messages = await client.get_messages(source_id, ids=list(mirror_map.keys()))
+        except Exception as e:
+            logger.warning(f"{prefix}: не удалось получить сообщения batch: {e}")
             continue
 
         edited = 0
-        for mirror in mirrors:
-            try:
-                src_msg = await client.get_messages(source_id, ids=mirror.original_id)
-            except Exception as e:
-                logger.warning(f"{prefix}: не удалось получить {mirror.original_id}: {e}")
-                continue
-
+        for src_msg in src_messages:
             if not src_msg or not src_msg.entities:
                 continue
             if not any(
@@ -222,6 +221,7 @@ async def _edit_links_pass(
             ):
                 continue
 
+            mirror = mirror_map[src_msg.id]
             msg_copy = processor.copy_message(src_msg)
             entities_before = deepcopy(msg_copy.entities)
             text_before = msg_copy.message
@@ -244,8 +244,8 @@ async def _edit_links_pass(
                 )
                 edited += 1
                 logger.info(f"{prefix}: исправлена ссылка в {mirror.original_id}→{mirror.mirror_id}")
-                if cfg.send_delay:
-                    await asyncio.sleep(cfg.send_delay)
+                if cfg.past_mode.send_delay:
+                    await asyncio.sleep(cfg.past_mode.send_delay)
             except Exception as e:
                 logger.warning(
                     f"{prefix}: ошибка редактирования {mirror.mirror_id}: "
