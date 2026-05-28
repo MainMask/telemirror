@@ -87,6 +87,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         url: str,
         source_chat_id: int,
         message: EventMessage,
+        fallback_link_url: Optional[str] = None,
     ) -> Optional[str]:
         """Rewrite a t.me message URL to its mirror equivalent, or return None."""
         m = _TG_MSG_LINK_RE.match(url)
@@ -106,19 +107,19 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 username, source_chat_id, message
             )
             if referenced_channel_id is None:
-                return None
+                return fallback_link_url
 
         # Find configured targets for the referenced source channel
         target_map = self._chat_mapping.get(referenced_channel_id, {})
         if not target_map:
-            return None
+            return fallback_link_url
 
         mirrors = await self._database.get_messages(msg_id, referenced_channel_id)
         mirror = next(
             (mm for mm in mirrors if mm.mirror_channel in target_map), None
         )
         if mirror is None:
-            return None  # Not yet mirrored — leave link unchanged
+            return fallback_link_url
 
         outgoing_peer_id = utils.resolve_id(mirror.mirror_channel)[0]
         return f"https://t.me/c/{outgoing_peer_id}/{mirror.mirror_id}"
@@ -127,6 +128,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         self: "EventProcessor",
         message: EventMessage,
         source_chat_id: int,
+        fallback_link_url: Optional[str] = None,
     ) -> None:
         """Rewrite t.me message links in entities to point to their mirrors."""
         if not message.entities:
@@ -135,12 +137,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         has_url_entity = any(
             isinstance(e, types.MessageEntityUrl) for e in message.entities
         )
-        surrogate_text = utils.add_surrogate(message.message) if has_url_entity else None
+        surrogate_text = utils.add_surrogate(message.message or "") if has_url_entity else None
 
         for entity in message.entities:
             if isinstance(entity, types.MessageEntityTextUrl):
                 new_url = await self._try_rewrite_tg_link(
-                    entity.url, source_chat_id, message
+                    entity.url, source_chat_id, message, fallback_link_url
                 )
                 if new_url is not None:
                     entity.url = new_url
@@ -152,7 +154,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     surrogate_text[entity.offset : entity.offset + entity.length]
                 )
                 new_url = await self._try_rewrite_tg_link(
-                    old_url, source_chat_id, message
+                    old_url, source_chat_id, message, fallback_link_url
                 )
                 if new_url is not None:
                     new_surrogate = utils.add_surrogate(new_url)
@@ -241,7 +243,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 message_copy = self.copy_message(message)
                 # Rewrite internal t.me links BEFORE filters can strip them (copy mode only)
                 if config.mode == "copy":
-                    await self._rewrite_links(message_copy, chat_id)
+                    await self._rewrite_links(message_copy, chat_id, config.fallback_link_url)
 
                 filtered_message: EventMessage
                 filter_action, filtered_message = await config.filters.process(
@@ -408,7 +410,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 # Rewrite internal t.me links BEFORE filters can strip them (copy mode only)
                 if config.mode == "copy":
                     for msg in album_copy:
-                        await self._rewrite_links(msg, chat_id)
+                        await self._rewrite_links(msg, chat_id, config.fallback_link_url)
 
                 filtered_album: EventAlbumMessage
                 filter_action, filtered_album = await config.filters.process(

@@ -172,6 +172,7 @@ class DirectionConfig:
     mode: Literal["copy", "forward"] = "copy"
     past_mode: Optional[PastModeConfig] = None
     send_delay: float = 0.0
+    fallback_link_url: Optional[str] = None
 
     def __repr__(self) -> str:
         return (
@@ -285,6 +286,9 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
                         mode=direction.get("mode", yaml_config.get("mode", "copy")),
                         past_mode=build_past_mode(direction.get("past_mode")),
                         send_delay=direction.get("send_delay", _LIVE_SEND_DELAY),
+                        fallback_link_url=direction.get(
+                            "fallback_link_url", yaml_config.get("fallback_link_url")
+                        ),
                     )
                 )
 

@@ -1,3 +1,6 @@
+# (Optional) Fallback URL for cross-channel links that cannot be resolved to a mirror
+# fallback_link_url: "https://t.me/yourchannel"
+
 # (Optional) Global filters, will be applied in order
 filters:
   - ForwardFormatFilter: # Filter name under telemirror/messagefilters.py

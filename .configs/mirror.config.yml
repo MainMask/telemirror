@@ -1,6 +1,7 @@
 # Global settings
 disable_edit: false      # edits in source sync to mirror (stop-words block the update, not delete)
 disable_delete: true     # deletions in source do NOT delete mirrored posts
+fallback_link_url: "https://t.me/Archonum"  # substitute for unresolvable cross-channel links
 
 # Global filters — applied in order to every direction
 filters:
@@ -86,6 +87,7 @@ filters:
         # ? tinyurl.com
       whitelist: !!set
         ? t.me/c/       # preserve private channel message links (internal mirrors)
+        ? t.me/archonum # preserve fallback link
 
   # 2. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
   #    Prefix with r'...' to use a regex instead of a plain word.
