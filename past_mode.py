@@ -45,6 +45,8 @@ from telemirror._patch import patch_input_media_with_spoiler
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import Database, InMemoryDatabase, PostgresDatabase
 
+_LOG_EVERY = 25  # логировать прогресс каждые N сообщений/альбомов
+
 
 def _configure_logging(log_level: str) -> logging.Logger:
     formatter = logging.Formatter(
@@ -77,16 +79,59 @@ def _strategy_label(pm) -> str:
     return "full_history"
 
 
+def _format_duration(seconds: float) -> str:
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}ч"
+    if seconds >= 60:
+        return f"{seconds / 60:.0f}мин"
+    return f"{seconds:.0f}с"
+
+
 def _log_progress(
     logger: logging.Logger, prefix: str, processed: int, total: int, start_time: float
 ) -> None:
     elapsed = monotonic() - start_time
     if total > 0:
         pct = processed / total * 100.0
-        eta = f", ETA {elapsed / processed * (total - processed):.0f}s" if processed else ""
+        eta = f", ETA {elapsed / processed * (total - processed):.0f}s" if processed >= 3 else ""
         logger.info(f"{prefix}: {processed}/{total} ({pct:.1f}%){eta}")
     else:
         logger.info(f"{prefix}: обработано {processed}")
+
+
+async def _integrity_check(
+    database: Database,
+    source_id: int,
+    target_id: int,
+    logger: logging.Logger,
+) -> tuple[Optional[int], int]:
+    """Проверяет чекпоинт, возвращает (скорректированный checkpoint, кол-во зеркал в БД)."""
+    prefix = f"[PastMode] {source_id}→{target_id}"
+    checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)
+    if checkpoint is None:
+        return None, 0
+
+    mirrors = await database.get_messages_for_channel_pair(source_id, target_id)
+    mirror_count = len(mirrors)
+    logger.info(f"{prefix}: чекпоинт={checkpoint}, зеркал в БД={mirror_count}")
+
+    if mirror_count == 0:
+        logger.warning(
+            f"{prefix}: чекпоинт={checkpoint} есть, но зеркала не найдены "
+            "(возможно, все сообщения отфильтрованы или проблема с БД)"
+        )
+        return checkpoint, 0
+
+    max_mirrored = max(m.original_id for m in mirrors)
+    if checkpoint < max_mirrored:
+        logger.warning(
+            f"{prefix}: checkpoint={checkpoint} < max_mirrored={max_mirrored}, "
+            f"откат checkpoint до {max_mirrored}"
+        )
+        await database.set_past_mode_checkpoint(source_id, target_id, max_mirrored)
+        return max_mirrored, mirror_count
+
+    return checkpoint, mirror_count
 
 
 async def _replay_direction(
@@ -101,7 +146,7 @@ async def _replay_direction(
     prefix = f"[PastMode] {source_id}→{target_id}"
     logger.info(f"{prefix}: старт (стратегия={_strategy_label(pm)})")
 
-    checkpoint: Optional[int] = await database.get_past_mode_checkpoint(source_id, target_id)
+    checkpoint, mirrors_done = await _integrity_check(database, source_id, target_id, logger)
     if checkpoint:
         logger.info(f"{prefix}: продолжение с message_id={checkpoint}")
 
@@ -126,7 +171,19 @@ async def _replay_direction(
         elif pm.since_date is not None:
             iter_kwargs["offset_date"] = pm.since_date
         # full_history: только reverse=True
-        iter_total = total
+        iter_total = (
+            max(0, pm.last_n - mirrors_done)
+            if pm.last_n is not None and checkpoint is not None
+            else total
+        )
+
+    if iter_total > 0:
+        eta_str = (
+            f", не менее ≈{_format_duration(iter_total * pm.send_delay)} (только send_delay, без учёта загрузки)"
+            if pm.send_delay > 0
+            else ""
+        )
+        logger.info(f"{prefix}: ~{iter_total} сообщений к обработке{eta_str}")
 
     # Full CHAT_MAPPING is needed so _try_rewrite_tg_link can resolve cross-channel links.
     # Override only the current source to this single direction to keep routing correct.
@@ -151,7 +208,8 @@ async def _replay_direction(
         await processor.new_album(source_id, pending_album, link)
         await database.set_past_mode_checkpoint(source_id, target_id, first.id)
         processed += 1
-        _log_progress(logger, prefix, processed, iter_total, start_time)
+        if processed == 1 or processed % _LOG_EVERY == 0:
+            _log_progress(logger, prefix, processed, iter_total, start_time)
         await asyncio.sleep(pm.send_delay)
         pending_album = []
         pending_gid = None
@@ -162,7 +220,8 @@ async def _replay_direction(
         await processor.new_message(source_id, msg, link)
         await database.set_past_mode_checkpoint(source_id, target_id, msg.id)
         processed += 1
-        _log_progress(logger, prefix, processed, iter_total, start_time)
+        if processed == 1 or processed % _LOG_EVERY == 0:
+            _log_progress(logger, prefix, processed, iter_total, start_time)
         await asyncio.sleep(pm.send_delay)
 
     async def handle_msg(msg) -> None:
