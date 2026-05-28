@@ -1,7 +1,6 @@
 # Global settings
 disable_edit: false      # edits in source sync to mirror (stop-words block the update, not delete)
 disable_delete: true     # deletions in source do NOT delete mirrored posts
-fallback_link_url: "https://t.me/Archonum"  # substitute for unresolvable cross-channel links
 
 # Global filters — applied in order to every direction
 filters:
@@ -95,19 +94,7 @@ filters:
         ? t.me/piratVPN
         ? t.me/Sovetnik1000
 
-  # 2. Remove blacklisted URLs from message text (replace with ***)
-  - UrlMessageFilter:
-      placeholder: "https://t.me/Archonum"
-      blacklist: !!set
-        ? t.me          # Telegram invite/channel links — remove or comment out as needed
-        # ? bit.ly      # short-link services
-        # ? cutt.ly
-        # ? tinyurl.com
-      whitelist: !!set
-        ? t.me/c/       # preserve private channel message links (internal mirrors)
-        ? t.me/archonum # preserve fallback link
-
-  # 3. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
+  # 2. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
   #    Prefix with r'...' to use a regex instead of a plain word.
   - SkipWithKeywordsFilter:
       keywords: !!set
@@ -124,7 +111,7 @@ filters:
         ? "Максимус"
         ? "Maximus"
 
-  # 4. Replace words/phrases inline (case preserved, whole-word match by default)
+  # 3. Replace words/phrases inline (case preserved, whole-word match by default)
   #    Prefix key with r'...' to use a regex; value supports back-references.
   - KeywordReplaceFilter:
       keywords:
