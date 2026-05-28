@@ -47,17 +47,25 @@ from telemirror.storage import Database, InMemoryDatabase, PostgresDatabase
 
 
 def _configure_logging(log_level: str) -> logging.Logger:
+    formatter = logging.Formatter(
+        "%(levelname)-5s %(asctime)s [%(filename)s:%(lineno)d]:%(name)s: %(message)s"
+    )
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(formatter)
+
     logger = logging.getLogger("past_mode")
     logger.setLevel(log_level)
     if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setLevel(logging.DEBUG)
-        handler.setFormatter(
-            logging.Formatter(
-                "%(levelname)-5s %(asctime)s [%(filename)s:%(lineno)d]:%(name)s: %(message)s"
-            )
-        )
         logger.addHandler(handler)
+
+    # Telethon's reconnection messages go through its own logger — attach our handler
+    # so they appear with timestamps alongside our progress logs.
+    telethon_logger = logging.getLogger("telethon")
+    telethon_logger.setLevel(logging.WARNING)
+    if not telethon_logger.handlers:
+        telethon_logger.addHandler(handler)
+
     return logger
 
 
@@ -225,7 +233,7 @@ async def _edit_links_pass(
             msg_copy = processor.copy_message(src_msg)
             entities_before = deepcopy(msg_copy.entities)
             text_before = msg_copy.message
-            await processor._rewrite_links(msg_copy, source_id)
+            await processor._rewrite_links(msg_copy, source_id, cfg.fallback_link_url)
 
             text_changed = msg_copy.message != text_before
             url_changed = any(
@@ -285,6 +293,9 @@ async def _run(logger: logging.Logger) -> None:
 
     patch_input_media_with_spoiler()
 
+    _CONN_RETRIES = 20
+    _RETRY_DELAY = 3  # секунд между попытками переподключения
+
     client = TelegramClient(
         StringSession(SESSION_STRING),
         API_ID,
@@ -293,6 +304,11 @@ async def _run(logger: logging.Logger) -> None:
         system_version=API_SYSTEM_VERSION,
         app_version=API_APP_VERSION,
         flood_sleep_threshold=300,  # Telethon auto-sleep для FloodWait ≤300s (как в main.py)
+        connection_retries=_CONN_RETRIES,
+        retry_delay=_RETRY_DELAY,
+    )
+    logger.info(
+        f"При обрыве соединения: до {_CONN_RETRIES} попыток с задержкой {_RETRY_DELAY}s между ними"
     )
     client.parse_mode = "markdown"
     await client.connect()
