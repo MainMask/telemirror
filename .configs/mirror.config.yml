@@ -77,7 +77,25 @@ filters:
         -1003183399976: {}
         -1003465993418: {}
 
-  # 1. Remove blacklisted URLs from message text (replace with ***)
+  # 1. Block messages containing competitor channel links (URL entities — both hyperlinks and bare URLs)
+  - SkipWithUrlFilter:
+      blacklist: !!set
+        ? t.me/deskladchina
+        ? t.me/xpiratovich
+        ? t.me/piratlinks
+        ? t.me/daime
+        ? t.me/pirat
+        ? t.me/kitpaymentbot
+        ? t.me/alliance
+        ? t.me/privateinc
+        ? t.me/skladprivate
+        ? t.me/piratnotes
+        ? t.me/piratovichfeed
+        ? t.me/alliance1000
+        ? t.me/piratVPN
+        ? t.me/Sovetnik1000
+
+  # 2. Remove blacklisted URLs from message text (replace with ***)
   - UrlMessageFilter:
       placeholder: "https://t.me/Archonum"
       blacklist: !!set
@@ -89,7 +107,7 @@ filters:
         ? t.me/c/       # preserve private channel message links (internal mirrors)
         ? t.me/archonum # preserve fallback link
 
-  # 2. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
+  # 3. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
   #    Prefix with r'...' to use a regex instead of a plain word.
   - SkipWithKeywordsFilter:
       keywords: !!set
@@ -105,20 +123,15 @@ filters:
         ? "Альянс"
         ? "Максимус"
         ? "Maximus"
-        ? "r'@daime'"
-        ? "r'@Sovetnik1000'"
-        ? "r'@deskladchina'"
-        ? "r'@piratlinks'"
-        ? "r'@xpiratovich'"
 
-  # 3. Replace words/phrases inline (case preserved, whole-word match by default)
+  # 4. Replace words/phrases inline (case preserved, whole-word match by default)
   #    Prefix key with r'...' to use a regex; value supports back-references.
   - KeywordReplaceFilter:
       keywords:
         "Alliance": "Archonum"
         "r'@alliance1000'": "@MainMask"
+        "r'@daime'": "@MainMask"
         "r'@kitpaymentbot'": "@ArchonumBot"
-        # "OldBrand": "NewBrand"
 
 broadcast_targets:
   # every 2nd channel (25 of 50)
