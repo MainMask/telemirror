@@ -147,7 +147,7 @@ async def _replay_direction(
     logger.info(f"{prefix}: старт (стратегия={_strategy_label(pm)})")
 
     checkpoint, mirrors_done = await _integrity_check(database, source_id, target_id, logger)
-    if checkpoint:
+    if checkpoint is not None:
         logger.info(f"{prefix}: продолжение с message_id={checkpoint}")
 
     try:
@@ -206,7 +206,7 @@ async def _replay_direction(
         first = pending_album[0]
         link = f"https://t.me/c/{utils.resolve_id(source_id)[0]}/{first.id}"
         await processor.new_album(source_id, pending_album, link)
-        await database.set_past_mode_checkpoint(source_id, target_id, first.id)
+        await database.set_past_mode_checkpoint(source_id, target_id, pending_album[-1].id)
         processed += 1
         if processed == 1 or processed % _LOG_EVERY == 0:
             _log_progress(logger, prefix, processed, iter_total, start_time)
@@ -394,6 +394,8 @@ async def _run(logger: logging.Logger) -> None:
         await _edit_links_pass(client, database, directions, logger)
     finally:
         await client.disconnect()
+        if hasattr(database, "connection_pool"):
+            await database.connection_pool.close()
 
 
 def main() -> None:

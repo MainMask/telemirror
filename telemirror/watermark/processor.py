@@ -5,6 +5,7 @@ import math
 import os
 import random
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 _template_cache: dict[str, tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = {}
 _lama: Optional[object] = None
+_lama_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -113,9 +115,11 @@ def _detect_watermark(
 def _get_lama():
     global _lama
     if _lama is None:
-        from simple_lama_inpainting import SimpleLama
-        os.environ.setdefault("LAMA_DEVICE", "cpu")
-        _lama = SimpleLama()
+        with _lama_lock:
+            if _lama is None:
+                from simple_lama_inpainting import SimpleLama
+                os.environ.setdefault("LAMA_DEVICE", "cpu")
+                _lama = SimpleLama()
     return _lama
 
 
@@ -230,8 +234,8 @@ def stamp_watermark_on_image(
     a = wm.getchannel("A").point(lambda v: int(v * config.stamp_opacity))
     wm.putalpha(a)
 
-    x = random.randint(10, img_w - wm_w - 10)
-    y = random.randint(10, img_h - wm_h - 10)
+    x = random.randint(10, max(10, img_w - wm_w - 10))
+    y = random.randint(10, max(10, img_h - wm_h - 10))
     img.paste(wm, (x, y), wm)
 
     out = io.BytesIO()
@@ -257,8 +261,8 @@ def stamp_watermark_on_video(
     wm_w = int(fw * config.stamp_scale)
     wm_h = int(wm_orig.height * wm_w / wm_orig.width)
 
-    x = random.randint(10, fw - wm_w - 10)
-    y = random.randint(10, fh - wm_h - 10)
+    x = random.randint(10, max(10, fw - wm_w - 10))
+    y = random.randint(10, max(10, fh - wm_h - 10))
 
     filter_complex = (
         f"[1:v]scale={wm_w}:{wm_h},format=rgba,"
