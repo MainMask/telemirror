@@ -74,3 +74,11 @@ directions:
           keywords: !!set
             ? "stopword"     # treat keyword as word
             ? "r'badword.*'" # treat keyword as regex expr
+      # - AllowWithKeywordsFilter:   # pass ONLY messages that contain at least one keyword
+      #     keywords: !!set
+      #       ? "allowed_word"
+      # - WatermarkRemovalFilter:    # remove/replace static channel watermarks (Linux/Docker only)
+      #     channels:
+      #       -1001585626790:        # source channel ID
+      #         template_path: "/data/watermarks/channel_wm.png"
+      #         match_threshold: 0.75  # detection sensitivity (0.0–1.0)

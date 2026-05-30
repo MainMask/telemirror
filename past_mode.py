@@ -382,6 +382,10 @@ async def _run(logger: logging.Logger) -> None:
             try:
                 await _replay_direction(client, database, source_id, target_id, cfg, logger)
             except errors.FloodWaitError as e:
+                # Telethon auto-sleeps for FloodWait ≤300s (flood_sleep_threshold).
+                # This branch fires only for >300s waits during iter_messages.
+                # The current direction is skipped; checkpoint is saved, so re-running
+                # past_mode.py will resume from where it left off.
                 logger.warning(f"FloodWait {e.seconds}s при получении истории, ждём...")
                 await asyncio.sleep(e.seconds)
 

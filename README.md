@@ -270,3 +270,39 @@ Use the provided [Dockerfile](Dockerfile) — it includes all dependencies (ffmp
     ```
 
 > ⚠️ **Note:** Watermark removal (LaMa inpainting) does **not** work on macOS — PyTorch does not publish binary wheels for Intel Mac, and Apple Silicon wheels are unavailable for Python 3.13. Photos are forwarded as-is (without removing the source watermark). Watermark removal works only on Linux via Docker.
+
+## Optional features
+
+The following environment variables (and their YAML equivalents) extend the base functionality. All are optional. See [.env-example](.env-example) and [.configs/mirror.config.yml-example](.configs/mirror.config.yml-example) for full examples.
+
+| Variable | Default | Description |
+|---|---|---|
+| `BROADCAST_CHANNEL` | — | Channel ID whose messages are broadcast to **all** configured targets on startup (full sync) and live. |
+| `BROADCAST_TARGETS` | all targets | Comma-separated whitelist of targets for broadcast (`-100id` or `-100id#topic_id`). When unset, goes to all targets. |
+| `BROADCAST_SEND_DELAY` | `0.5` | Delay (seconds) between sends during broadcast sync. |
+| `TECH_CHANNEL` | — | Channel ID that receives WARNING+ log alerts and incoming DM notifications. |
+| `SEND_DELAY` | `0.5` | Delay (seconds) between sends for live mirroring directions. |
+| `PAST_MODE` | — | Replay past messages on startup (env-mode only). Values: `last_n=N`, `full_history`, `since_date=YYYY-MM-DDTHH:MM:SS`. |
+
+> ⚠️ `USE_MEMORY_DB=true` is incompatible with `BROADCAST_CHANNEL` if the broadcast channel has more than 100 messages — use PostgreSQL for reliable broadcast sync.
+
+## Replaying past messages (`past_mode.py`)
+
+`past_mode.py` replays a channel's history through the mirror pipeline for directions that have `past_mode:` configured in the YAML config (or `PAST_MODE=` in env-mode).
+
+```bash
+# Stop main.py first — both use the same SESSION_STRING
+python past_mode.py
+```
+
+Progress is checkpointed after each message: if interrupted, re-running resumes from where it left off. A second pass rewrites cross-channel links in already-sent messages.
+
+## Utility scripts (`skylon_scripts/`)
+
+> ⚠️ All scripts use the same `SESSION_STRING` as the main service. Stop `main.py` before running them.
+
+| Script | Description |
+|---|---|
+| `skylon_scripts/setup_mirrors.py` | Interactive wizard for creating donor/recipient channel pairs and generating the YAML config. |
+| `skylon_scripts/clear_channels.py` | Purges all messages in recipient channels/topics and resets past_mode checkpoints. Supports `--dry-run`. |
+| `skylon_scripts/rename_emoji.py` | Bulk-renames Archonum recipient channel titles (replaces 🏴‍☠️ with 🗝). |

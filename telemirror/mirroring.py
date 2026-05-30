@@ -314,7 +314,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             entity=outgoing_chat,
                             message=text,
                             formatting_entities=entities,
-                            reply_to=config.to_topic_id,
+                            reply_to=outgoing_message.id,
+                            reply_to_topic_id=config.to_topic_id,
                         )
                     except Exception as split_err:
                         self._logger.error(
@@ -504,7 +505,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                                 entity=outgoing_chat,
                                 message=text,
                                 formatting_entities=entities,
-                                reply_to=config.to_topic_id,
+                                reply_to=outgoing_messages[0].id,
+                                reply_to_topic_id=config.to_topic_id,
                             )
                     except Exception as split_err:
                         self._logger.error(
@@ -1001,7 +1003,7 @@ class Mirroring:
                     while not connection_task.done() and not client.is_connected():
                         await asyncio.sleep(0)
 
-                    await asyncio.wait_for(connection_task, timeout=client._timeout)
+                    await asyncio.wait_for(connection_task, timeout=30)
                 except asyncio.TimeoutError as e:
                     raise RuntimeError(
                         "Timeout error while connecting to Telegram server, "
@@ -1028,7 +1030,7 @@ class Mirroring:
                     )
 
             if self._tech_channel:
-                logging.getLogger().addHandler(
+                logging.getLogger("telemirror").addHandler(
                     TelegramLogHandler(client, self._tech_channel)
                 )
 

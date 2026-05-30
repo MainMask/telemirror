@@ -64,6 +64,12 @@ async def run_telemirror(
 
     if use_memory_db:
         database = InMemoryDatabase()
+        if broadcast_channel:
+            logger.warning(
+                "USE_MEMORY_DB=true with BROADCAST_CHANNEL: InMemoryDatabase holds at most 100 "
+                "entries — broadcast sync may re-send already-mirrored messages on restart "
+                "if channel history exceeds 100 messages. Use PostgreSQL for reliable sync."
+            )
     else:
         database = await PostgresDatabase(connection_string=db_uri)
 
