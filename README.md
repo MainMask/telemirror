@@ -305,4 +305,4 @@ Progress is checkpointed after each message: if interrupted, re-running resumes 
 |---|---|
 | `skylon_set/setup_mirrors.py` | Interactive wizard for creating donor/recipient channel pairs and generating the YAML config. |
 | `skylon_set/clear_channels.py` | Purges all messages in recipient channels/topics and resets past_mode checkpoints. Supports `--dry-run`. |
-| `skylon_set/rename_emoji.py` | Bulk-renames Archonum recipient channel titles (replaces 🏴‍☠️ with 🗝). |
+| `skylon_set/rename_emoji.py` | Bulk-renames Archonum recipient channel titles (replaces 🗝 with ⚜️). |
