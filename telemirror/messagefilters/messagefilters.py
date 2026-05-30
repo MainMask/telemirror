@@ -516,6 +516,10 @@ class SkipWithUrlFilter(MessageFilter):
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]
     ) -> FilterResult[EventMessage]:
+        if isinstance(message.media, types.MessageMediaWebPage):
+            url = getattr(getattr(message.media, "webpage", None), "url", None)
+            if url and self._matches(url):
+                return FilterResult(FilterAction.DISCARD, message)
         surrogate = utils.add_surrogate(message.message or "")
         for entity in message.entities or []:
             if isinstance(entity, types.MessageEntityTextUrl):

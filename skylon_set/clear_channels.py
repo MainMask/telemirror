@@ -181,7 +181,7 @@ async def _clear_bindings(
 
 async def _run(logger: logging.Logger, dry_run: bool) -> None:
     logger.warning(
-        "purge_targets.py использует тот же SESSION_STRING, что и живой сервис. "
+        "clear_channels.py использует тот же SESSION_STRING, что и живой сервис. "
         "Убедитесь, что main.py НЕ запущен."
     )
 

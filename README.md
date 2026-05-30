@@ -297,12 +297,12 @@ python past_mode.py
 
 Progress is checkpointed after each message: if interrupted, re-running resumes from where it left off. A second pass rewrites cross-channel links in already-sent messages.
 
-## Utility scripts (`skylon_scripts/`)
+## Utility scripts (`skylon_set/`)
 
 > ⚠️ All scripts use the same `SESSION_STRING` as the main service. Stop `main.py` before running them.
 
 | Script | Description |
 |---|---|
-| `skylon_scripts/setup_mirrors.py` | Interactive wizard for creating donor/recipient channel pairs and generating the YAML config. |
-| `skylon_scripts/clear_channels.py` | Purges all messages in recipient channels/topics and resets past_mode checkpoints. Supports `--dry-run`. |
-| `skylon_scripts/rename_emoji.py` | Bulk-renames Archonum recipient channel titles (replaces 🏴‍☠️ with 🗝). |
+| `skylon_set/setup_mirrors.py` | Interactive wizard for creating donor/recipient channel pairs and generating the YAML config. |
+| `skylon_set/clear_channels.py` | Purges all messages in recipient channels/topics and resets past_mode checkpoints. Supports `--dry-run`. |
+| `skylon_set/rename_emoji.py` | Bulk-renames Archonum recipient channel titles (replaces 🏴‍☠️ with 🗝). |

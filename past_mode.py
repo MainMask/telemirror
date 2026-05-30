@@ -273,7 +273,13 @@ async def _edit_links_pass(
 
         mirror_map = {m.original_id: m for m in mirrors}
         try:
-            src_messages = await client.get_messages(source_id, ids=list(mirror_map.keys()))
+            _ids = list(mirror_map.keys())
+            _BATCH = 100
+            src_messages = []
+            for _i in range(0, len(_ids), _BATCH):
+                src_messages.extend(
+                    await client.get_messages(source_id, ids=_ids[_i : _i + _BATCH])
+                )
         except Exception as e:
             logger.warning(f"{prefix}: не удалось получить сообщения batch: {e}")
             continue
