@@ -482,11 +482,11 @@ class AllowWithKeywordsFilter(SkipWithKeywordsFilter):
 
 
 class SkipWithUrlFilter(MessageFilter):
-    """Skip message if it contains a URL entity matching the blacklist.
+    """Skip message if it contains a URL matching the blacklist.
 
-    Checks MessageEntityTextUrl (entity.url), MessageEntityUrl (bare URL text),
-    and MessageEntityMention (@username). Matching is case-insensitive,
-    scheme-independent, and prefix-based
+    Checks MessageMediaWebPage (link preview URL), MessageEntityTextUrl (entity.url),
+    MessageEntityUrl (bare URL text), and MessageEntityMention (@username).
+    Matching is case-insensitive, scheme-independent, and prefix-based
     (e.g. blacklisting "t.me/channel" also blocks "t.me/channel/42").
 
     Args:
