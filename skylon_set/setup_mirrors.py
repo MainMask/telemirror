@@ -160,6 +160,10 @@ async def safe_call(client, fn):
             return None
         except (ConnectionError, OSError) as e:
             print(f"Соединение потеряно ({e}), жду 10с...")
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
             await asyncio.sleep(10)
 
 
