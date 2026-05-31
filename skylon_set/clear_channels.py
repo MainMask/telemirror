@@ -39,6 +39,7 @@ except Exception:
 import psycopg
 from telethon import TelegramClient, errors, utils
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import DeleteHistoryRequest
 
 GENERAL_TOPIC_ID = 1
 DELETE_BATCH = 100
@@ -235,6 +236,16 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
             except Exception as e:
                 label = f"{channel_id}#{topic_id}" if topic_id is not None else str(channel_id)
                 logger.error(f"[{label}] Ошибка: {e}")
+
+        if dry_run:
+            logger.info(f"(dry-run) Было бы вызвано DeleteHistory для {len(targets)} канала(ов)")
+        else:
+            for channel_id in targets:
+                try:
+                    await client(DeleteHistoryRequest(channel=channel_id, max_id=0, for_everyone=True))
+                    logger.info(f"[{channel_id}] DeleteHistory выполнен")
+                except Exception as e:
+                    logger.error(f"[{channel_id}] DeleteHistory ошибка: {e}")
 
         await _reset_checkpoints(targets, dry_run, logger)
         await _clear_bindings(targets, dry_run, logger)
