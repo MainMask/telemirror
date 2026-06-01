@@ -117,8 +117,8 @@ filters:
   - KeywordReplaceFilter:
       keywords:
         "Alliance": "Archonum"
-        "r'@alliance1000'": "@MainMask"
-        "r'@daime'": "@MainMask"
+        "r'@alliance1000'": "@Archonor"
+        "r'@daime'": "@Archonor"
         "r'@kitpaymentbot'": "@ArchonumBot"
 
 broadcast_targets:
