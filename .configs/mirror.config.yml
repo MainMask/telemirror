@@ -94,6 +94,7 @@ filters:
         ? t.me/alliance1000
         ? t.me/piratVPN
         ? t.me/Sovetnik1000
+        ? t.me/maximusdesklad
 
   # 2. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
   #    Prefix with r'...' to use a regex instead of a plain word.
