@@ -178,6 +178,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     async def new_message(
         self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
     ):
+        if message.action is not None:
+            self._logger.info(
+                f"[New message]: {message_link} is a service message, skipping"
+            )
+            return
+
         restricted_saving_content: bool = message.chat and message.chat.noforwards
 
         outgoing_chats = self._chat_mapping.get(chat_id)

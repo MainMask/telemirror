@@ -457,7 +457,7 @@ class SkipWithKeywordsFilter(WordBoundaryRegex, MessageFilter):
     ) -> FilterResult[EventMessage]:
         return FilterResult(
             FilterAction.CONTINUE
-            if self._lookup_regex.search(message.message) is None
+            if self._lookup_regex.search(message.message or "") is None
             else FilterAction.DISCARD,
             message,
         )
@@ -475,7 +475,7 @@ class AllowWithKeywordsFilter(SkipWithKeywordsFilter):
     ) -> FilterResult[EventMessage]:
         return FilterResult(
             FilterAction.CONTINUE
-            if self._lookup_regex.search(message.message) is not None
+            if self._lookup_regex.search(message.message or "") is not None
             else FilterAction.DISCARD,
             message,
         )
