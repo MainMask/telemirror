@@ -26,7 +26,6 @@ def test_single_insert_batch_for_fanout(monkeypatch):
 
     batches = []
     real_insert_batch = db.insert_batch
-    real_insert = db.insert
 
     async def spy_batch(entities):
         batches.append(list(entities))

@@ -956,6 +956,10 @@ class Mirroring:
         A message is marked synced regardless of send outcome; a rare failed
         first-time send won't auto-retry — clear the `broadcast_sync` rows for
         the channel to force a full re-sync.
+
+        `broadcast_sync` is keyed by source channel, not by target: a broadcast
+        target added later is NOT backfilled by this sync (clear the rows to
+        re-send everything).
         """
         bc = self._broadcast_channel
         bc_peer_id = utils.resolve_id(bc)[0]
@@ -981,7 +985,7 @@ class Mirroring:
                 await self._processor.new_message(bc, msg, _msg_link(msg.id))
                 await self._database.set_broadcast_sync(bc, msg.id, ets)
                 sent += 1
-            elif ets is not None and ets > (synced[msg.id] or 0):
+            elif ets is not None and ets > (synced.get(msg.id) or 0):
                 await self._processor.edit_message(bc, msg, _msg_link(msg.id))
                 await self._database.set_broadcast_sync(bc, msg.id, ets)
                 edited += 1
@@ -1079,8 +1083,10 @@ class Mirroring:
                     "try restart or get a new session key (run login.py)"
                 )
 
-            _handle = f" (@{me.username})" if getattr(me, "username", None) else ""
-            self._logger.info(f"Logged in as {utils.get_display_name(me)}{_handle}")
+            at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
+            self._logger.info(
+                f"Logged in as {utils.get_display_name(me)}{at_username}"
+            )
 
             if self._broadcast_channel:
                 try:
