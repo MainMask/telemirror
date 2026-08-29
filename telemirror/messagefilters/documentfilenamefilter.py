@@ -1,7 +1,6 @@
 import logging
 import os
 import re
-import tempfile
 import time
 from collections import OrderedDict
 from typing import Optional, Type
@@ -9,13 +8,10 @@ from typing import Optional, Type
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
+from ._media import UPLOAD_LIMIT_BYTES, downloaded_tempfile, filename_of
 from .base import FilterAction, FilterResult, MessageFilter
 
 logger = logging.getLogger(__name__)
-
-# Telegram upload limit for accounts without a Premium subscription.
-# Larger files can't be re-uploaded through this session, so they're left as-is.
-_NON_PREMIUM_UPLOAD_LIMIT_BYTES = 2 * 1024**3
 
 # During a broadcast fan-out the same message is filtered once per target.
 # Cache the re-uploaded document (keyed by its source id) so the download +
@@ -116,14 +112,7 @@ class DocumentFilenameFilter(MessageFilter):
             return FilterResult(FilterAction.CONTINUE, message)
 
         doc = media.document
-        old_name = next(
-            (
-                a.file_name
-                for a in doc.attributes
-                if isinstance(a, types.DocumentAttributeFilename)
-            ),
-            None,
-        )
+        old_name = filename_of(doc)
         if old_name is None:
             return FilterResult(FilterAction.CONTINUE, message)
 
@@ -136,7 +125,7 @@ class DocumentFilenameFilter(MessageFilter):
             message.media = cached
             return FilterResult(FilterAction.CONTINUE, message)
 
-        if doc.size > _NON_PREMIUM_UPLOAD_LIMIT_BYTES:
+        if doc.size > UPLOAD_LIMIT_BYTES:
             logger.info(
                 "DocumentFilenameFilter: skipping rename of %.2f GB file (chat_id=%s) — "
                 "exceeds the ~2GB upload limit for accounts without Telegram Premium",
@@ -152,15 +141,13 @@ class DocumentFilenameFilter(MessageFilter):
             for a in doc.attributes
         ]
 
-        tmp_path = None
         try:
-            with tempfile.NamedTemporaryFile(
-                suffix=os.path.splitext(new_name)[1], delete=False
-            ) as f:
-                tmp_path = f.name
-
-            await message._client.download_media(message=message, file=tmp_path)
-            handle = await message._client.upload_file(tmp_path, file_name=new_name)
+            async with downloaded_tempfile(
+                message, suffix=os.path.splitext(new_name)[1]
+            ) as tmp_path:
+                handle = await message._client.upload_file(
+                    tmp_path, file_name=new_name
+                )
             uploaded = types.InputMediaUploadedDocument(
                 file=handle, mime_type=doc.mime_type, attributes=attributes
             )
@@ -173,8 +160,5 @@ class DocumentFilenameFilter(MessageFilter):
                 "DocumentFilenameFilter: rename failed (chat_id=%s), sending original",
                 message.chat_id,
             )
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
 
         return FilterResult(FilterAction.CONTINUE, message)

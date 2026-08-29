@@ -7,12 +7,9 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import yaml
-from telethon import TelegramClient
-from telethon.errors import ChannelPrivateError, FloodWaitError
-from telethon.sessions import StringSession
 from telethon.tl.functions.channels import (
     CreateChannelRequest,
     CreateForumTopicRequest,
@@ -25,18 +22,7 @@ from telethon.tl.functions.channels import (
 )
 from telethon.tl.types import ChatPhotoEmpty, InputChatUploadedPhoto
 
-try:
-    from config import (
-        API_APP_VERSION,
-        API_DEVICE_MODEL,
-        API_HASH,
-        API_ID,
-        API_SYSTEM_VERSION,
-        SESSION_STRING,
-    )
-except Exception:
-    print("Failed reading .env")
-    raise
+from skylon_set._common import entity_type, make_client, safe_call
 
 CONFIG_PATH = Path(".configs/mirror.config.yml")
 
@@ -119,14 +105,6 @@ def full_id(entity) -> int:
     return int(f"-100{entity.id}")
 
 
-def entity_type(entity) -> str:
-    if getattr(entity, "megagroup", False):
-        return "supergroup"
-    if getattr(entity, "broadcast", False):
-        return "channel"
-    return "other"
-
-
 def get_all_donors(dialogs) -> list:
     return sorted(
         [d for d in dialogs if has_de_sklad(d.title or "")],
@@ -137,34 +115,6 @@ def get_all_donors(dialogs) -> list:
 def build_recipient_index(dialogs) -> dict:
     """title → dialog for all Archonum-named dialogs (last wins on collision)."""
     return {d.title: d for d in dialogs if "Archonum" in (d.title or "")}
-
-
-async def safe_call(client, fn):
-    while True:
-        try:
-            if not client.is_connected():
-                print("Переподключаюсь...")
-                await client.connect()
-            result = await fn()
-            await asyncio.sleep(0.5)
-            return result
-        except FloodWaitError as e:
-            print(f"FloodWait: ждём {e.seconds}с...")
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-            await asyncio.sleep(e.seconds)
-        except ChannelPrivateError as e:
-            print(f"  Нет доступа, пропускаю: {e}")
-            return None
-        except (ConnectionError, OSError) as e:
-            print(f"Соединение потеряно ({e}), жду 10с...")
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-            await asyncio.sleep(10)
 
 
 async def get_premium_status(client) -> bool:
@@ -662,14 +612,7 @@ async def run_full_cycle(client):
 async def main():
     action = show_menu()
 
-    client = TelegramClient(
-        session=StringSession(SESSION_STRING),
-        api_id=API_ID,
-        api_hash=API_HASH,
-        device_model=API_DEVICE_MODEL,
-        system_version=API_SYSTEM_VERSION,
-        app_version=API_APP_VERSION,
-    )
+    client = make_client()
     await client.start()
 
     try:

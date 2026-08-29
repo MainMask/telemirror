@@ -1,19 +1,15 @@
 import logging
 import mimetypes
 import os
-import tempfile
 from typing import Type
 
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
+from ._media import UPLOAD_LIMIT_BYTES, downloaded_tempfile, filename_of
 from .base import FilterAction, FilterResult, MessageFilter
 
 logger = logging.getLogger(__name__)
-
-# Telegram upload limit for accounts without a Premium subscription.
-# Larger files can't be re-uploaded through this session and are skipped.
-_NON_PREMIUM_UPLOAD_LIMIT_BYTES = 2 * 1024**3
 
 
 class RestrictSavingContentBypassFilter(MessageFilter):
@@ -39,7 +35,7 @@ class RestrictSavingContentBypassFilter(MessageFilter):
             doc = message.media.document
             if not isinstance(doc, types.Document):
                 return FilterResult(FilterAction.DISCARD, message)
-            if doc.size > _NON_PREMIUM_UPLOAD_LIMIT_BYTES:
+            if doc.size > UPLOAD_LIMIT_BYTES:
                 logger.info(
                     "RestrictSavingContentBypassFilter: skipping %.2f GB file (chat_id=%s) — "
                     "exceeds the ~2GB upload limit for accounts without Telegram Premium",
@@ -71,32 +67,17 @@ class RestrictSavingContentBypassFilter(MessageFilter):
 
     async def _process_document(self, message: EventMessage) -> None:
         doc = message.media.document
-        filename = next(
-            (
-                a.file_name
-                for a in doc.attributes
-                if isinstance(a, types.DocumentAttributeFilename)
-            ),
-            None,
-        )
+        filename = filename_of(doc)
         suffix = (
             os.path.splitext(filename)[1]
             if filename
             else (mimetypes.guess_extension(doc.mime_type) or "")
         )
 
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                tmp_path = f.name
-
-            await message._client.download_media(message=message, file=tmp_path)
+        async with downloaded_tempfile(message, suffix=suffix) as tmp_path:
             handle = await message._client.upload_file(
                 tmp_path, file_name=filename or os.path.basename(tmp_path)
             )
             message.media = types.InputMediaUploadedDocument(
                 file=handle, mime_type=doc.mime_type, attributes=doc.attributes
             )
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)

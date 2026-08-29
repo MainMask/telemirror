@@ -174,6 +174,29 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         if surrogate_text:
             message.message = utils.del_surrogate(surrogate_text)
 
+    def _matches_from_topic(
+        self: "EventProcessor", config: DirectionConfig, message: EventMessage
+    ) -> bool:
+        """True if `message`'s incoming topic matches `config.from_topic_id`
+        (or `config` isn't topic-scoped).
+
+        message: topic_id = message.reply_to.reply_to_msg_id
+        reply:   topic_id = message.reply_to.reply_to_top_id
+        general topic: topic_id = 1
+        """
+        if config.from_topic_id is None:
+            return True
+        if message.reply_to is None:
+            return config.from_topic_id == EventProcessor.GENERAL_TOPIC_ID
+        if message.reply_to.forum_topic:
+            incoming_topic_id = (
+                message.reply_to.reply_to_top_id
+                or message.reply_to.reply_to_msg_id
+            )
+        else:
+            incoming_topic_id = EventProcessor.GENERAL_TOPIC_ID
+        return config.from_topic_id == incoming_topic_id
+
     @__handle_exceptions
     async def new_message(
         self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
@@ -212,28 +235,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         for outgoing_chat, configs in outgoing_chats.items():
             for config in configs:
-                if config.from_topic_id is not None:
-                    if (
-                        message.reply_to is None
-                        and config.from_topic_id != EventProcessor.GENERAL_TOPIC_ID
-                    ):
-                        continue
-
-                    # message: topic_id = message.reply_to.reply_to_msg_id
-                    # reply: topic_id = message.reply_to.reply_to_top_id
-                    # general topic: topic_id = 1
-                    incoming_topic_id = (
-                        (
-                            message.reply_to.reply_to_top_id
-                            if message.reply_to.reply_to_top_id
-                            else message.reply_to.reply_to_msg_id
-                        )
-                        if message.reply_to and message.reply_to.forum_topic
-                        else EventProcessor.GENERAL_TOPIC_ID
-                    )
-
-                    if config.from_topic_id != incoming_topic_id:
-                        continue
+                if not self._matches_from_topic(config, message):
+                    continue
 
                 if restricted_saving_content and (
                     not config.filters.restricted_content_allowed
@@ -256,7 +259,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     message_copy, events.NewMessage.Event
                 )
 
-                if filter_action is FilterAction.DISCARD or filter_action is False:
+                if filter_action is FilterAction.DISCARD:
                     self._logger.info(
                         f"[New message]: Message {message_link} was skipped "
                         f"by the filter for chat#{outgoing_chat}"
@@ -378,29 +381,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         for outgoing_chat, configs in outgoing_chats.items():
             for config in configs:
-                if config.from_topic_id is not None:
-                    if (
-                        incoming_first_message.reply_to is None
-                        and config.from_topic_id != EventProcessor.GENERAL_TOPIC_ID
-                    ):
-                        continue
-
-                    # message: topic_id = message.reply_to.reply_to_msg_id
-                    # reply: topic_id = message.reply_to.reply_to_top_id
-                    # general topic: topic_id = 1
-                    incoming_topic_id = (
-                        (
-                            incoming_first_message.reply_to.reply_to_top_id
-                            if incoming_first_message.reply_to.reply_to_top_id
-                            else incoming_first_message.reply_to.reply_to_msg_id
-                        )
-                        if incoming_first_message.reply_to
-                        and incoming_first_message.reply_to.forum_topic
-                        else EventProcessor.GENERAL_TOPIC_ID
-                    )
-
-                    if config.from_topic_id != incoming_topic_id:
-                        continue
+                if not self._matches_from_topic(config, incoming_first_message):
+                    continue
 
                 if restricted_saving_content and (
                     not config.filters.restricted_content_allowed
@@ -424,7 +406,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     album_copy, events.Album.Event
                 )
 
-                if filter_action is FilterAction.DISCARD or filter_action is False:
+                if filter_action is FilterAction.DISCARD:
                     self._logger.info(
                         f"[New album]: Message {album_link} was skipped "
                         f"by the filter for chat#{outgoing_chat}"
@@ -578,7 +560,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 filter_action, filtered_message = await config.filters.process(
                     self.copy_message(message), events.MessageEdited.Event
                 )
-                if filter_action is FilterAction.DISCARD or filter_action is False:
+                if filter_action is FilterAction.DISCARD:
                     self._logger.info(
                         f"[Edit message]: Message {message_link} was skipped "
                         f"by the filter for chat#{outgoing_message.mirror_channel}"

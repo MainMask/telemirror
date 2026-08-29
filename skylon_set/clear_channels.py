@@ -20,44 +20,23 @@ from typing import Dict, Optional, Set
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
-    from config import (
-        API_APP_VERSION,
-        API_DEVICE_MODEL,
-        API_HASH,
-        API_ID,
-        API_SYSTEM_VERSION,
-        CHAT_MAPPING,
-        DB_URL,
-        LOG_LEVEL,
-        SESSION_STRING,
-        USE_MEMORY_DB,
-    )
+    from config import CHAT_MAPPING, DB_URL, LOG_LEVEL, USE_MEMORY_DB
 except Exception:
     print("Failed reading .env")
     raise
 
 import psycopg
 from telethon import TelegramClient, errors, utils
-from telethon.sessions import StringSession
 from telethon.tl.functions.channels import DeleteHistoryRequest
+
+from skylon_set._common import configure_logging, make_client
 
 GENERAL_TOPIC_ID = 1
 DELETE_BATCH = 100
 
 
 def _configure_logging(log_level: str) -> logging.Logger:
-    logger = logging.getLogger("purge_targets")
-    logger.setLevel(log_level)
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setLevel(logging.DEBUG)
-        handler.setFormatter(
-            logging.Formatter(
-                "%(levelname)-5s %(asctime)s [%(filename)s:%(lineno)d]:%(name)s: %(message)s"
-            )
-        )
-        logger.addHandler(handler)
-    return logger
+    return configure_logging("purge_targets", log_level)
 
 
 def _get_msg_topic(msg) -> int:
@@ -217,15 +196,7 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
             logger.info("Отменено.")
             return
 
-    client = TelegramClient(
-        StringSession(SESSION_STRING),
-        API_ID,
-        API_HASH,
-        device_model=API_DEVICE_MODEL,
-        system_version=API_SYSTEM_VERSION,
-        app_version=API_APP_VERSION,
-        flood_sleep_threshold=60,
-    )
+    client = make_client(flood_sleep_threshold=60)
     client.parse_mode = "markdown"
     await client.connect()
 
