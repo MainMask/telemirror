@@ -20,8 +20,16 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 _template_cache: dict[str, tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = {}
+_stamp_cache: dict[str, "Image.Image"] = {}
 _lama: Optional[object] = None
 _lama_lock = threading.Lock()
+
+
+def _load_stamp(path: str) -> "Image.Image":
+    """Decoded RGBA stamp image, cached by path (callers only .resize()/read it)."""
+    if path not in _stamp_cache:
+        _stamp_cache[path] = Image.open(path).convert("RGBA")
+    return _stamp_cache[path]
 
 
 @dataclass(frozen=True)
@@ -35,6 +43,15 @@ class ChannelWatermarkConfig:
     stamp_watermark_path: str = _DEFAULT_STAMP
     stamp_opacity: float = 0.55
     stamp_scale: float = 0.35
+
+    def __post_init__(self) -> None:
+        # YAML values arrive as strings; coerce so they never reach an ffmpeg
+        # filtergraph or a numpy call verbatim.
+        for field in ("match_threshold", "scale_min", "scale_max",
+                      "stamp_opacity", "stamp_scale"):
+            object.__setattr__(self, field, float(getattr(self, field)))
+        for field in ("scale_steps", "inpaint_dilate_px"):
+            object.__setattr__(self, field, int(getattr(self, field)))
 
 
 def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
@@ -224,7 +241,7 @@ def stamp_watermark_on_image(
     config: ChannelWatermarkConfig,
 ) -> bytes:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-    wm = Image.open(config.stamp_watermark_path).convert("RGBA")
+    wm = _load_stamp(config.stamp_watermark_path)
 
     img_w, img_h = img.size
     wm_w = int(img_w * config.stamp_scale)
@@ -257,7 +274,7 @@ def stamp_watermark_on_video(
         logger.warning("Could not read video dimensions: %s", video_path)
         return False
 
-    wm_orig = Image.open(config.stamp_watermark_path)
+    wm_orig = _load_stamp(config.stamp_watermark_path)
     wm_w = int(fw * config.stamp_scale)
     wm_h = int(wm_orig.height * wm_w / wm_orig.width)
 

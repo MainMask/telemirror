@@ -6,7 +6,13 @@ from typing import Type
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
-from ._media import UPLOAD_LIMIT_BYTES, downloaded_tempfile, filename_of
+from ._media import (
+    UPLOAD_LIMIT_BYTES,
+    ReuploadCache,
+    downloaded_tempfile,
+    filename_of,
+    source_media_id,
+)
 from .base import FilterAction, FilterResult, MessageFilter
 
 logger = logging.getLogger(__name__)
@@ -21,6 +27,10 @@ class RestrictSavingContentBypassFilter(MessageFilter):
     subject to this restriction and is passed through unchanged.
     """
 
+    def __init__(self) -> None:
+        # Re-send one re-upload to all fan-out targets (keyed by source id).
+        self._cache = ReuploadCache()
+
     @property
     def restricted_content_allowed(self) -> bool:
         return True
@@ -30,6 +40,13 @@ class RestrictSavingContentBypassFilter(MessageFilter):
     ) -> FilterResult[EventMessage]:
         if not (message.chat and message.chat.noforwards and message.media):
             return FilterResult(FilterAction.CONTINUE, message)
+
+        key = source_media_id(message.media)
+        if key is not None:
+            cached = self._cache.get(key)
+            if cached is not None:
+                message.media = cached
+                return FilterResult(FilterAction.CONTINUE, message)
 
         if isinstance(message.media, types.MessageMediaDocument):
             doc = message.media.document
@@ -46,9 +63,11 @@ class RestrictSavingContentBypassFilter(MessageFilter):
 
         try:
             if isinstance(message.media, types.MessageMediaPhoto):
-                await self._process_photo(message)
+                new_media = await self._process_photo(message)
             elif isinstance(message.media, types.MessageMediaDocument):
-                await self._process_document(message)
+                new_media = await self._process_document(message)
+            else:
+                new_media = None
         except Exception:
             logger.exception(
                 "RestrictSavingContentBypassFilter: bypass failed (chat_id=%s)",
@@ -56,16 +75,20 @@ class RestrictSavingContentBypassFilter(MessageFilter):
             )
             return FilterResult(FilterAction.DISCARD, message)
 
+        if new_media is not None:
+            message.media = new_media
+            if key is not None:
+                self._cache.put(key, new_media)
+
         return FilterResult(FilterAction.CONTINUE, message)
 
-    async def _process_photo(self, message: EventMessage) -> None:
+    async def _process_photo(self, message: EventMessage):
         photo_bytes: bytes = await message._client.download_media(
             message=message, file=bytes
         )
-        handle = await message._client.upload_file(photo_bytes, file_name="photo.jpg")
-        message.media = handle
+        return await message._client.upload_file(photo_bytes, file_name="photo.jpg")
 
-    async def _process_document(self, message: EventMessage) -> None:
+    async def _process_document(self, message: EventMessage):
         doc = message.media.document
         filename = filename_of(doc)
         suffix = (
@@ -78,6 +101,6 @@ class RestrictSavingContentBypassFilter(MessageFilter):
             handle = await message._client.upload_file(
                 tmp_path, file_name=filename or os.path.basename(tmp_path)
             )
-        message.media = types.InputMediaUploadedDocument(
+        return types.InputMediaUploadedDocument(
             file=handle, mime_type=doc.mime_type, attributes=doc.attributes
         )

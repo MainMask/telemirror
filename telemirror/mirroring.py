@@ -933,61 +933,77 @@ class Mirroring:
     async def _sync_broadcast_channel(
         self: "Mirroring", client: TelegramClient
     ) -> None:
-        """Full sync of broadcast channel to all recipient channels/topics on startup.
+        """Startup catch-up sync of the broadcast channel.
 
-        - Sends messages missing from DB to all configured targets.
-        - Edits messages already in DB (picks up source edits).
-        - Deletes mirror messages whose originals no longer exist in the source channel.
+        Idempotent: a message is (re-)processed only when it is new or its
+        ``edit_date`` advanced past what was last synced (`broadcast_sync`
+        table). A restart on an already-synced channel does ~0 API calls.
+
+        - Sends messages not yet mirrored.
+        - Edits mirrors whose source was edited while the bot was offline.
+        - Deletes mirrors whose source no longer exists.
+
+        Streams `iter_messages` in one pass — only message IDs are held in
+        memory, never the full history.
+
+        A message is marked synced regardless of send outcome; a rare failed
+        first-time send won't auto-retry — clear the `broadcast_sync` rows for
+        the channel to force a full re-sync.
         """
         bc = self._broadcast_channel
         bc_peer_id = utils.resolve_id(bc)[0]
         self._logger.info(f"[Sync broadcast]: starting sync for channel#{bc}")
 
-        # 1. Fetch all current source messages (oldest → newest)
-        # Skip MessageService/MessageEmpty — only regular messages can be forwarded
-        source_messages: Dict[int, types.Message] = {}
-        async for msg in client.iter_messages(bc, reverse=True):
-            if isinstance(msg, types.Message):
-                source_messages[msg.id] = msg
+        synced = await self._database.get_broadcast_sync(bc)  # {msg_id: edit_ts|None}
+        seen: set[int] = set()
+        sent = edited = 0
 
-        # 2. Remove mirrors for messages deleted from source
-        all_db = await self._database.get_all_messages_for_channel(bc)
-        mirrored_ids = {m.original_id for m in all_db}
-        deleted = list(mirrored_ids - source_messages.keys())
-        if deleted:
-            self._logger.info(
-                f"[Sync broadcast]: deleting {len(deleted)} removed message(s)"
-            )
-            await self._processor.delete_message(bc, deleted)
-            mirrored_ids -= set(deleted)
-
-        # 3. Send missing / edit existing — with album grouping (same as past_mode.py)
         pending_album: List[types.Message] = []
         pending_gid: Optional[int] = None
 
         def _msg_link(msg_id: int) -> str:
             return f"https://t.me/c/{bc_peer_id}/{msg_id}"
 
-        async def flush_album() -> None:
-            nonlocal pending_gid
-            if not pending_album:
-                return
-            first = pending_album[0]
-            if first.id in mirrored_ids:
-                for msg in pending_album:
-                    await self._processor.edit_message(bc, msg, _msg_link(msg.id))
-            else:
-                await self._processor.new_album(bc, pending_album, _msg_link(first.id))
-            pending_album.clear()
-            pending_gid = None
+        def _edit_ts(msg: types.Message) -> Optional[int]:
+            return int(msg.edit_date.timestamp()) if msg.edit_date else None
 
         async def process_single(msg: types.Message) -> None:
-            if msg.id in mirrored_ids:
-                await self._processor.edit_message(bc, msg, _msg_link(msg.id))
-            else:
+            nonlocal sent, edited
+            ets = _edit_ts(msg)
+            if msg.id not in synced:
                 await self._processor.new_message(bc, msg, _msg_link(msg.id))
+                await self._database.set_broadcast_sync(bc, msg.id, ets)
+                sent += 1
+            elif ets is not None and ets > (synced[msg.id] or 0):
+                await self._processor.edit_message(bc, msg, _msg_link(msg.id))
+                await self._database.set_broadcast_sync(bc, msg.id, ets)
+                edited += 1
 
-        for msg in source_messages.values():
+        async def flush_album() -> None:
+            nonlocal pending_gid, sent, edited
+            if not pending_album:
+                return
+            album = list(pending_album)
+            pending_album.clear()
+            pending_gid = None
+            first = album[0]
+            if first.id not in synced:
+                await self._processor.new_album(bc, album, _msg_link(first.id))
+                for m in album:
+                    await self._database.set_broadcast_sync(bc, m.id, _edit_ts(m))
+                sent += 1
+            else:
+                for m in album:
+                    ets = _edit_ts(m)
+                    if ets is not None and ets > (synced.get(m.id) or 0):
+                        await self._processor.edit_message(bc, m, _msg_link(m.id))
+                        await self._database.set_broadcast_sync(bc, m.id, ets)
+                        edited += 1
+
+        async for msg in client.iter_messages(bc, reverse=True):
+            if not isinstance(msg, types.Message):
+                continue
+            seen.add(msg.id)
             gid = getattr(msg, "grouped_id", None)
             if gid is not None:
                 if gid != pending_gid:
@@ -997,11 +1013,19 @@ class Mirroring:
             else:
                 await flush_album()
                 await process_single(msg)
-
         await flush_album()
 
+        deleted = list(synced.keys() - seen)
+        if deleted:
+            self._logger.info(
+                f"[Sync broadcast]: deleting {len(deleted)} removed message(s)"
+            )
+            await self._processor.delete_message(bc, deleted)
+            await self._database.delete_broadcast_sync(bc, deleted)
+
         self._logger.info(
-            f"[Sync broadcast]: done, {len(source_messages)} message(s) processed"
+            f"[Sync broadcast]: done — {sent} sent, {edited} edited, "
+            f"{len(deleted)} deleted"
         )
 
     async def __connect_client(self: "Mirroring", client: TelegramClient) -> None:
@@ -1048,7 +1072,8 @@ class Mirroring:
                     "try restart or get a new session key (run login.py)"
                 )
 
-            self._logger.info(f"Logged in as {utils.get_display_name(me)} ({me.phone})")
+            _handle = f" (@{me.username})" if getattr(me, "username", None) else ""
+            self._logger.info(f"Logged in as {utils.get_display_name(me)}{_handle}")
 
             if self._broadcast_channel:
                 try:

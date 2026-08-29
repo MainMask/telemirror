@@ -1,12 +1,12 @@
 # (Optional) Fallback URL for cross-channel links that cannot be resolved to a mirror
 # fallback_link_url: "https://t.me/yourchannel"
 
-# (Optional) Global filters, will be applied in order
+# (Optional) Global filters, applied in order. Ordering rule: cheap "skip" filters
+# that only read text/entities go FIRST, so a message they drop never pays for the
+# work of the transforming / media filters below them.
 filters:
-  - ForwardFormatFilter: # Filter name from telemirror/messagefilters/
-      # Filters arguments
-      format: "{message_text}\n\nForwarded from [{channel_name}]({message_link})"
-  - EmptyMessageFilter
+  - SkipUrlFilter:
+      skip_mention: false
   - UrlMessageFilter:
       blacklist: !!set
         ? t.me
@@ -15,8 +15,9 @@ filters:
       #   ? t.me/c/        # prefix: preserve private channel message links (internal mirrors)
       # placeholder: "***" # replacement text for removed URLs, default "***"
       # filter_mention: false  # also filter @mentions
-  - SkipUrlFilter:
-      skip_mention: false
+  - ForwardFormatFilter: # Filter name from telemirror/messagefilters/
+      # Filters arguments
+      format: "{message_text}\n\nForwarded from [{channel_name}]({message_link})"
 
 # (Optional) Global settings
 disable_edit: true
@@ -63,6 +64,10 @@ directions:
           blacklist: !!set      # block messages containing links to these channels
             ? t.me/channel_a
             ? t.me/channel_b
+      - SkipWithKeywordsFilter:      # drop early, before the transforming filters below
+          keywords: !!set
+            ? "stopword"     # treat keyword as word
+            ? "r'badword.*'" # treat keyword as regex expr
       - UrlMessageFilter:
           blacklist: !!set
             ? t.me
@@ -70,10 +75,6 @@ directions:
           keywords:
             "google.com": "bing.com"       # treat keyword as word
             "r'google\\.com.*'": "bing.com" # treat keyword as regex expr
-      - SkipWithKeywordsFilter:
-          keywords: !!set
-            ? "stopword"     # treat keyword as word
-            ? "r'badword.*'" # treat keyword as regex expr
       # - AllowWithKeywordsFilter:   # pass ONLY messages that contain at least one keyword
       #     keywords: !!set
       #       ? "allowed_word"

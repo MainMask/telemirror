@@ -1,23 +1,20 @@
 import logging
 import os
 import re
-import time
-from collections import OrderedDict
 from typing import Optional, Type
 
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
-from ._media import UPLOAD_LIMIT_BYTES, downloaded_tempfile, filename_of
+from ._media import (
+    UPLOAD_LIMIT_BYTES,
+    ReuploadCache,
+    downloaded_tempfile,
+    filename_of,
+)
 from .base import FilterAction, FilterResult, MessageFilter
 
 logger = logging.getLogger(__name__)
-
-# During a broadcast fan-out the same message is filtered once per target.
-# Cache the re-uploaded document (keyed by its source id) so the download +
-# upload happens once per file instead of once per target.
-_REUPLOAD_CACHE_SIZE = 16
-_REUPLOAD_CACHE_TTL = 300  # seconds
 
 
 class DocumentFilenameFilter(MessageFilter):
@@ -54,9 +51,7 @@ class DocumentFilenameFilter(MessageFilter):
                 flags=re.IGNORECASE,
             )
 
-        self._reupload_cache: OrderedDict[
-            int, tuple[float, types.InputMediaUploadedDocument]
-        ] = OrderedDict()
+        self._cache = ReuploadCache()
 
     def _rename(self, name: str) -> str:
         stem, ext = os.path.splitext(name)
@@ -71,27 +66,6 @@ class DocumentFilenameFilter(MessageFilter):
             stem = f"{self._prefix} - {stem}" if stem else self._prefix
 
         return f"{stem}{ext}"
-
-    def _cached_media(
-        self, doc_id: int
-    ) -> Optional[types.InputMediaUploadedDocument]:
-        entry = self._reupload_cache.get(doc_id)
-        if entry is None:
-            return None
-        cached_at, media = entry
-        if time.monotonic() - cached_at > _REUPLOAD_CACHE_TTL:
-            del self._reupload_cache[doc_id]
-            return None
-        self._reupload_cache.move_to_end(doc_id)
-        return media
-
-    def _cache_media(
-        self, doc_id: int, media: types.InputMediaUploadedDocument
-    ) -> None:
-        self._reupload_cache[doc_id] = (time.monotonic(), media)
-        self._reupload_cache.move_to_end(doc_id)
-        while len(self._reupload_cache) > _REUPLOAD_CACHE_SIZE:
-            self._reupload_cache.popitem(last=False)
 
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]
@@ -120,7 +94,7 @@ class DocumentFilenameFilter(MessageFilter):
         if new_name == old_name:
             return FilterResult(FilterAction.CONTINUE, message)
 
-        cached = self._cached_media(doc.id)
+        cached = self._cache.get(doc.id)
         if cached is not None:
             message.media = cached
             return FilterResult(FilterAction.CONTINUE, message)
@@ -154,7 +128,7 @@ class DocumentFilenameFilter(MessageFilter):
             message.media = uploaded
             # An upload handle can be re-sent to several chats, so a broadcast
             # fan-out reuses it instead of re-uploading once per target.
-            self._cache_media(doc.id, uploaded)
+            self._cache.put(doc.id, uploaded)
         except Exception:
             logger.exception(
                 "DocumentFilenameFilter: rename failed (chat_id=%s), sending original",
