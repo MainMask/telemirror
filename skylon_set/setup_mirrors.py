@@ -391,14 +391,14 @@ async def step_verify(client):
 
 # ── Шаг 4: Собрать конфиг ────────────────────────────────────────────────────
 
-def write_directions(config_path: Path, directions: list) -> "Path | None":
+def write_directions(config_path: Path, directions: list) -> Path | None:
     """Записывает `directions` в конфиг, сохраняя остальные ключи.
 
     Если файл существует — делает `.bak` и возвращает путь к нему.
     """
     config_path.parent.mkdir(parents=True, exist_ok=True)
     existing: dict = {}
-    backup: "Path | None" = None
+    backup: Path | None = None
     if config_path.exists():
         with open(config_path, encoding="utf-8") as f:
             existing = yaml.safe_load(f) or {}
@@ -407,7 +407,9 @@ def write_directions(config_path: Path, directions: list) -> "Path | None":
 
     existing["directions"] = directions
     with open(config_path, "w", encoding="utf-8") as f:
-        yaml.dump(existing, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        yaml.safe_dump(
+            existing, f, allow_unicode=True, default_flow_style=False, sort_keys=False
+        )
     return backup
 
 

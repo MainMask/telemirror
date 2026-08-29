@@ -7,6 +7,8 @@ from typing import Optional
 
 from telethon.tl import types
 
+from ..hints import EventMessage
+
 # Telegram upload limit for accounts without a Premium subscription.
 # Larger files can't be re-uploaded through this session.
 UPLOAD_LIMIT_BYTES = 2 * 1024**3
@@ -25,7 +27,7 @@ def filename_of(document: types.Document) -> Optional[str]:
 
 
 @asynccontextmanager
-async def downloaded_tempfile(message, suffix: str = ""):
+async def downloaded_tempfile(message: EventMessage, suffix: str = ""):
     """Download ``message``'s media to a temp file, yield its path, always clean up."""
     tmp_path = None
     try:

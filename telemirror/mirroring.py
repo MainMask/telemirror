@@ -29,6 +29,13 @@ _TG_MSG_LINK_RE = re.compile(
 )
 
 
+def _consume_task_result(task: asyncio.Task) -> None:
+    """Retrieve a done task's result so asyncio doesn't log
+    'Task exception was never retrieved' for a fire-and-forget task."""
+    if not task.cancelled():
+        task.exception()
+
+
 class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     GENERAL_TOPIC_ID = 1
 
@@ -1018,9 +1025,7 @@ class Mirroring:
                     # Connected — don't block on the task settling; just make sure
                     # its eventual result/exception is consumed.
                     if not connection_task.done():
-                        connection_task.add_done_callback(
-                            lambda t: t.cancelled() or t.exception()
-                        )
+                        connection_task.add_done_callback(_consume_task_result)
                 else:
                     try:
                         # Not connected: either surface connect() errors or fail

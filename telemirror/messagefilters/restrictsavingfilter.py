@@ -78,6 +78,6 @@ class RestrictSavingContentBypassFilter(MessageFilter):
             handle = await message._client.upload_file(
                 tmp_path, file_name=filename or os.path.basename(tmp_path)
             )
-            message.media = types.InputMediaUploadedDocument(
-                file=handle, mime_type=doc.mime_type, attributes=doc.attributes
-            )
+        message.media = types.InputMediaUploadedDocument(
+            file=handle, mime_type=doc.mime_type, attributes=doc.attributes
+        )
