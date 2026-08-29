@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
-    from config import (  # noqa: F401  (re-exported for scripts)
+    from config import (
         API_APP_VERSION,
         API_DEVICE_MODEL,
         API_HASH,
@@ -44,9 +44,7 @@ def make_client(**extra_kwargs) -> TelegramClient:
     )
 
 
-def configure_logging(
-    name: str, level: str, *, attach_telethon: bool = False
-) -> logging.Logger:
+def configure_logging(name: str, level: str) -> logging.Logger:
     """Attach a stdout handler with the project log format to ``name``."""
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(logging.DEBUG)
@@ -56,12 +54,6 @@ def configure_logging(
     logger.setLevel(level)
     if not logger.handlers:
         logger.addHandler(handler)
-
-    if attach_telethon:
-        telethon_logger = logging.getLogger("telethon")
-        telethon_logger.setLevel(logging.WARNING)
-        if not telethon_logger.handlers:
-            telethon_logger.addHandler(handler)
 
     return logger
 

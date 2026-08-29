@@ -35,12 +35,8 @@ GENERAL_TOPIC_ID = 1
 DELETE_BATCH = 100
 
 
-def _configure_logging(log_level: str) -> logging.Logger:
-    return configure_logging("purge_targets", log_level)
-
-
 def _get_msg_topic(msg) -> int:
-    """Возвращает topic_id сообщения (логика из mirroring.py:101-108)."""
+    """topic_id сообщения (та же логика, что EventProcessor._matches_from_topic)."""
     if msg.reply_to and msg.reply_to.forum_topic:
         return msg.reply_to.reply_to_top_id or msg.reply_to.reply_to_msg_id
     return GENERAL_TOPIC_ID
@@ -248,7 +244,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logger = _configure_logging(LOG_LEVEL)
+    logger = configure_logging("purge_targets", LOG_LEVEL)
     try:
         asyncio.run(_run(logger, args.dry_run))
     except KeyboardInterrupt:

@@ -10,14 +10,26 @@ from telethon.tl import types
 
 
 def run(coro):
-    """Execute a coroutine to completion and return its result."""
-    return asyncio.new_event_loop().run_until_complete(coro)
+    """Execute a coroutine (or awaitable) to completion and return its result."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        # cancel/drain leftover tasks so loop.close() stays quiet
+        leftover = asyncio.all_tasks(loop)
+        for task in leftover:
+            task.cancel()
+        if leftover:
+            loop.run_until_complete(
+                asyncio.gather(*leftover, return_exceptions=True)
+            )
+        loop.close()
 
 
 def make_message(text="", entities=None, media=None, channel_id=1000):
     """Build a minimal ``types.Message`` usable as filter input.
 
-    ``message.chat_id`` resolves from ``peer_id`` to ``-100{channel_id}``.
+    ``message.chat_id`` is derived from ``peer_id`` by Telethon.
     """
     return types.Message(
         id=1,

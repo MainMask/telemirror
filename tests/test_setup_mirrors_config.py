@@ -1,16 +1,8 @@
 """A8: build-config must preserve hand-maintained keys and back up the old file."""
 
-import importlib.util
-import sys
-from pathlib import Path
-
 import yaml
 
-_MOD = Path(__file__).resolve().parent.parent / "skylon_set" / "setup_mirrors.py"
-_spec = importlib.util.spec_from_file_location("setup_mirrors", _MOD)
-setup_mirrors = importlib.util.module_from_spec(_spec)
-sys.modules["setup_mirrors"] = setup_mirrors
-_spec.loader.exec_module(setup_mirrors)
+from skylon_set import setup_mirrors
 
 
 def test_write_directions_preserves_other_keys_and_backs_up(tmp_path):

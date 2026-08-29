@@ -718,7 +718,6 @@ class TelegramLogHandler(logging.Handler):
         self._prune_cooldowns()
         if self._cooldown_until.get(text, 0) > self._loop.time():
             return  # в окне подавления
-        self._cooldown_until.pop(text, None)  # cooldown истёк — очищаем
 
         self._counts[text] = self._counts.get(text, 0) + 1
 
@@ -1015,7 +1014,14 @@ class Mirroring:
                         break
                     await asyncio.sleep(0.05)
 
-                if not client.is_connected():
+                if client.is_connected():
+                    # Connected — don't block on the task settling; just make sure
+                    # its eventual result/exception is consumed.
+                    if not connection_task.done():
+                        connection_task.add_done_callback(
+                            lambda t: t.cancelled() or t.exception()
+                        )
+                else:
                     try:
                         # Not connected: either surface connect() errors or fail
                         # on the remaining budget instead of spinning forever.
