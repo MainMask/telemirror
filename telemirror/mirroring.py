@@ -240,6 +240,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         if isinstance(message.media, types.MessageMediaPoll):
             message.media.poll.quiz = None
 
+        inserted: List[MirrorMessage] = []
+
         for outgoing_chat, configs in outgoing_chats.items():
             for config in configs:
                 if not self._matches_from_topic(config, message):
@@ -347,7 +349,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     continue
 
                 if outgoing_message:
-                    await self._database.insert(
+                    inserted.append(
                         MirrorMessage(
                             original_id=filtered_message.id,
                             original_channel=chat_id,
@@ -358,6 +360,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
                 if config.send_delay:
                     await asyncio.sleep(config.send_delay)
+
+        if inserted:
+            await self._database.insert_batch(inserted)
 
     @__handle_exceptions
     async def new_album(
@@ -789,7 +794,9 @@ class EventHandlers:
     ) -> None:
         """Notify tech_channel about incoming private messages."""
         sender_obj = await event.get_sender()
-        name = utils.get_display_name(sender_obj)
+        # sender-controlled — collapse whitespace and cap length so it can't
+        # break or spam the tech-channel message.
+        name = " ".join((utils.get_display_name(sender_obj) or "").split())[:100]
         username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "нет"
         msg = f"📩 Личное сообщение от {name} ({username})"
         await self._sender.send_message(self._tech_channel, msg)

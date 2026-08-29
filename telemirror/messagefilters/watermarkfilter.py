@@ -13,7 +13,7 @@ from ..watermark.processor import (
     async_stamp_watermark_on_image,
     async_stamp_watermark_on_video,
 )
-from ._media import ReuploadCache, source_media_id
+from ._media import UPLOAD_LIMIT_BYTES, ReuploadCache, source_media_id
 from .base import FilterAction, FilterResult, MessageFilter
 
 logger = logging.getLogger(__name__)
@@ -62,9 +62,17 @@ class WatermarkRemovalFilter(MessageFilter):
             handle = await self._process_photo(message, config)
         elif isinstance(message.media, types.MessageMediaDocument):
             doc = message.media.document
-            if isinstance(doc, types.Document) and any(
+            is_video = isinstance(doc, types.Document) and any(
                 isinstance(a, types.DocumentAttributeVideo) for a in doc.attributes
-            ):
+            )
+            if is_video and doc.size > UPLOAD_LIMIT_BYTES:
+                logger.info(
+                    "WatermarkRemovalFilter: skipping %.2f GB video (chat_id=%s) — "
+                    "exceeds the ~2GB re-upload limit; forwarded as-is",
+                    doc.size / 1024**3,
+                    message.chat_id,
+                )
+            elif is_video:
                 handle = await self._process_video(message, config)
 
         if handle is not None:
