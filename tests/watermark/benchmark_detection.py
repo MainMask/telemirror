@@ -1,8 +1,9 @@
-"""
+"""Manual watermark-detection accuracy benchmark (not a pytest test).
+
 Usage:
-  python test_batch.py [<image_or_dir>] [--debug] [--threshold FLOAT]
-  python test_batch.py
-  python test_batch.py photo.jpg --debug
+  python tests/watermark/benchmark_detection.py [<image_or_dir>] [--debug] [--threshold FLOAT]
+  python tests/watermark/benchmark_detection.py
+  python tests/watermark/benchmark_detection.py photo.jpg --debug
 """
 import argparse
 import os

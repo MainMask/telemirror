@@ -441,6 +441,26 @@ async def step_verify(client):
 
 # ── Шаг 4: Собрать конфиг ────────────────────────────────────────────────────
 
+def write_directions(config_path: Path, directions: list) -> "Path | None":
+    """Записывает `directions` в конфиг, сохраняя остальные ключи.
+
+    Если файл существует — делает `.bak` и возвращает путь к нему.
+    """
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    backup: "Path | None" = None
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
+            existing = yaml.safe_load(f) or {}
+        backup = config_path.with_suffix(config_path.suffix + ".bak")
+        backup.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    existing["directions"] = directions
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(existing, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    return backup
+
+
 async def step_build_config(client):
     print("\n=== ШАГ 4: СБОРКА КОНФИГА ===\n")
     dialogs = await client.get_dialogs()
@@ -503,9 +523,11 @@ async def step_build_config(client):
 
             print(f"OK (форум): '{donor.title}' → '{rec.title}'")
 
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump({"directions": directions}, f, allow_unicode=True, default_flow_style=False)
+    # Обновляем только ключ `directions`, сохраняя filters / broadcast_* /
+    # disable_* и прочие ручные настройки существующего конфига.
+    backup = write_directions(CONFIG_PATH, directions)
+    if backup:
+        print(f"Бэкап прежнего конфига: {backup}")
 
     ch = sum(1 for d in directions if "#" not in str(d["from"][0]))
     tp = len(directions) - ch
