@@ -1,7 +1,7 @@
 {
     "name": "TeleMirror",
     "description": "Telegram message forwarder (client API)",
-    "repository": "https://github.com/khoben/telemirror",
+    "repository": "https://github.com/MainMask/telemirror",
     "keywords": [
         "python",
         "telegram",
@@ -24,7 +24,7 @@
             "description": "Mapping between source and target channels (with their IDs (-100...)). Example: [-100source1,-100source2:-100target];[-100source3:-100target2];"
         },
         "YAML_CONFIG_ENV": {
-            "description": "(Optional) YAML filter configuration string content, other filter settings (REMOVE_URLS, REMOVE_URLS_LIST, REMOVE_URLS_WL, DISABLE_DELETE and DISABLE_EDIT) from env will be ignored",
+            "description": "(Optional) Single-line YAML mirror config; overrides CHAT_MAPPING and the REMOVE_URLS*/DISABLE_* vars",
             "required": false
         },
         "REMOVE_URLS": {
@@ -53,6 +53,42 @@
         "USE_MEMORY_DB": {
             "description": "Use an in-memory database instead of Postgres DB (true or false). Defaults to false",
             "value": "false",
+            "required": false
+        },
+        "PAST_MODE": {
+            "description": "(Optional) Replay history on startup: last_n=N | full_history | since_date=YYYY-MM-DDTHH:MM:SS",
+            "required": false
+        },
+        "BROADCAST_CHANNEL": {
+            "description": "(Optional) Channel ID whose messages are synced to all configured targets on startup and live",
+            "required": false
+        },
+        "BROADCAST_TARGETS": {
+            "description": "(Optional) Comma-separated whitelist of broadcast targets (-100id or -100id#topic_id)",
+            "required": false
+        },
+        "BROADCAST_SEND_DELAY": {
+            "description": "(Optional) Delay in seconds between sends during broadcast sync. Defaults to 0.5",
+            "required": false
+        },
+        "TECH_CHANNEL": {
+            "description": "(Optional) Channel ID that receives WARNING+ log alerts and DM notifications",
+            "required": false
+        },
+        "SEND_DELAY": {
+            "description": "(Optional) Delay in seconds between sends for live mirroring. Defaults to 0.5",
+            "required": false
+        },
+        "API_SYSTEM_VERSION": {
+            "description": "(Optional) Telegram client system version override (anti-ban)",
+            "required": false
+        },
+        "API_DEVICE_MODEL": {
+            "description": "(Optional) Telegram client device model override (anti-ban)",
+            "required": false
+        },
+        "API_APP_VERSION": {
+            "description": "(Optional) Telegram client app version override (anti-ban)",
             "required": false
         },
         "LOG_LEVEL": {
