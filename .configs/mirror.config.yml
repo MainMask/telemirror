@@ -130,6 +130,16 @@ filters:
         "r'@daime'": "@Archonor"
         "r'@kitpaymentbot'": "@ArchonumBot"
 
+  # 5. Rename mirrored document files: prepend "@CitadelOS - " and strip promo
+  #    fragments from the filename. Must stay after RestrictSavingContentBypassFilter
+  #    (patches the already re-uploaded file in place; re-uploads plain reference
+  #    documents itself).
+  - DocumentFilenameFilter:
+      prefix: "@CitadelOS"
+      remove:
+        - "@openfrm"
+        - "openfrm"
+
 broadcast_channel: -1003926294676
 
 broadcast_targets:
