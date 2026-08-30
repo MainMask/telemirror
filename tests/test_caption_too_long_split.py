@@ -1,9 +1,14 @@
 """Regression: on the MediaCaptionTooLongError split path, a media message that
 was actually delivered must be tracked in the DB even when the follow-up text
-send fails (only the text tail is allowed to be lost)."""
+send fails (only the text tail is allowed to be lost).
+
+Also: a FloodWait raised while (re)sending the *media* on that split path must
+propagate (past_mode retries without advancing the checkpoint), whereas a
+FloodWait on the *text tail* is swallowed like any other tail failure."""
 
 import logging
 
+import pytest
 from telethon.tl import types
 
 import telemirror.mirroring as mirroring
@@ -81,3 +86,78 @@ def test_new_album_tracks_media_when_caption_tail_fails(monkeypatch):
 
     tracked = run(db.get_messages(1, SOURCE)) + run(db.get_messages(2, SOURCE))
     assert sorted(m.mirror_id for m in tracked) == [901, 902]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [mirroring.errors.FloodWaitError, mirroring.errors.FloodPremiumWaitError],
+)
+def test_new_message_flood_on_media_retry_propagates(monkeypatch, exc):
+    db = run(InMemoryDatabase())
+    calls = []
+
+    async def fake_send_message(client, entity, message, **kw):
+        calls.append(message)
+        if len(calls) == 1:  # first attempt with caption
+            raise mirroring.errors.MediaCaptionTooLongError(request=None)
+        raise exc(request=None)  # media-only retry floods
+
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    msg = make_message("x" * 1100, media=types.MessageMediaUnsupported(), channel_id=1000)
+    with pytest.raises(exc):
+        run(_proc(db).new_message(SOURCE, msg, "link"))
+
+    assert run(db.get_messages(msg.id, SOURCE)) == []
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [mirroring.errors.FloodWaitError, mirroring.errors.FloodPremiumWaitError],
+)
+def test_new_message_flood_on_text_tail_is_swallowed(monkeypatch, exc):
+    db = run(InMemoryDatabase())
+    calls = []
+
+    async def fake_send_message(client, entity, message, **kw):
+        calls.append(message)
+        if len(calls) == 1:
+            raise mirroring.errors.MediaCaptionTooLongError(request=None)
+        if len(calls) == 2:  # media-only retry succeeds
+            return types.Message(id=778, peer_id=types.PeerChannel(1), message="")
+        raise exc(request=None)  # text tail floods — tail is allowed to be lost
+
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    msg = make_message("x" * 1100, media=types.MessageMediaUnsupported(), channel_id=1000)
+    run(_proc(db).new_message(SOURCE, msg, "link"))
+
+    assert [m.mirror_id for m in run(db.get_messages(msg.id, SOURCE))] == [778]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [mirroring.errors.FloodWaitError, mirroring.errors.FloodPremiumWaitError],
+)
+def test_new_album_flood_on_media_retry_propagates(monkeypatch, exc):
+    db = run(InMemoryDatabase())
+    send_file_calls = []
+
+    async def fake_send_file(client, entity, caption, file, **kw):
+        send_file_calls.append(caption)
+        if len(send_file_calls) == 1:
+            raise mirroring.errors.MediaCaptionTooLongError(request=None)
+        raise exc(request=None)  # split-caption retry floods
+
+    monkeypatch.setattr(mirroring, "send_file", fake_send_file)
+
+    album = [
+        make_message("x" * 1100, media=types.MessageMediaUnsupported(), channel_id=1000),
+        make_message("y", media=types.MessageMediaUnsupported(), channel_id=1000),
+    ]
+    album[1].id = 2
+    with pytest.raises(exc):
+        run(_proc(db).new_album(SOURCE, album, "link"))
+
+    assert run(db.get_messages(1, SOURCE)) == []
+    assert run(db.get_messages(2, SOURCE)) == []

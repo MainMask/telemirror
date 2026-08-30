@@ -45,6 +45,26 @@ Full read ×2. Tests: 126 green, `pyflakes` + `ruff` clean.
   the media is tracked, only the text tail is lost. Tests:
   `tests/test_caption_too_long_split.py`.
 
+### Fixed in pass 8 (whole-project sweep re-run on explicit request)
+- **P2** `new_message` / `new_album`, `MediaCaptionTooLongError` split path: the
+  inner `except Exception as split_err` also caught `FloodWaitError` /
+  `FloodPremiumWaitError` raised while (re)sending the *media* — the outer flood
+  handler only covers the first send. In past_mode this swallowed the flood and
+  the checkpoint advanced past an un-mirrored message (same class as the pass-7
+  `RestrictSavingContentBypassFilter` fix). Now the media (re)send has its own
+  `except (FloodWaitError, FloodPremiumWaitError)` → `flush_inserted()` (new_message
+  only) + `raise`; the text/caption tail keeps its broad `except` → swallow (the
+  tail is still allowed to be lost). Tests: `tests/test_caption_too_long_split.py`
+  (`..._flood_on_media_retry_propagates`, `..._flood_on_text_tail_is_swallowed`).
+- **P3 → fixed** `new_album` tracking: `original_id=idxs[message_index]` over
+  `enumerate(outgoing_messages)` positionally zips the sent messages against the
+  source ids. A count mismatch from `send_file` meant either an `IndexError`
+  (swallowed by `__handle_exceptions` → the whole album untracked) or rows mapped
+  to the wrong `original_id` (a later edit/delete of source X hits mirror Y). Now
+  guarded: on `len(outgoing_messages) != len(idxs)` the album is left untracked
+  with an explicit `[New album]: ... NOT tracked` error log instead of a
+  wrong/partial write. Test: `tests/test_new_album_index_guard.py`.
+
 ### Missing regression tests added for past-pass bugs
 - `tests/test_mirroring_signoff.py`:
   - a `noforwards` source with copy-mode filters that don't allow restricted
@@ -60,12 +80,26 @@ Full read ×2. Tests: 126 green, `pyflakes` + `ruff` clean.
 - `_sync_broadcast_channel`: a message missing from `iter_messages` due to an API
   hiccup is treated as a source deletion → the mirror is deleted.
 - `new_album` ~line 569: `idxs[message_index]` over `enumerate(outgoing_messages)`
-  assumes `send_file` returns messages of equal count and order; a mismatch →
-  possible `IndexError` / skipped tracking.
+  still assumes the returned messages are in the same *order* as the source items
+  when the *counts* match (the count-mismatch case is now guarded — see above).
 - `new_album` forward mode: `is_list_like(outgoing_messages)` — a single-message
   `forward_messages` response would not be tracked.
 - `new_message` ~line 387: `original_id=filtered_message.id` — works
   (`copy_message` preserves `.id`), but `message.id` would read clearer.
+- (pass 8) `edit_message`: the `except Exception` around `client.edit_message`
+  also swallows a `FloodWait` > 300s — the edit is silently skipped. No message
+  loss (the mirror is already delivered) and no checkpoint move; consistent with
+  the "edits are best-effort" stance elsewhere.
+- (pass 8) `delete_message`: a `FloodWait` (or any error) on `delete_messages` is
+  logged, then `delete_messages_batch` drops the DB rows anyway → the mirror
+  message survives as an orphan with no way to retry the delete. Over-retention,
+  not loss; the source message is already gone.
+- (pass 8) `_sync_broadcast_channel` runs (line ~1138) before `EventHandlers` is
+  constructed (~1146); on a first-time / post-downtime sync that takes a long
+  time, live updates in non-broadcast source channels during that window may be
+  missed. Startup-only, and the sync itself is idempotent. Not re-verified
+  against Telethon's actual update-buffering behaviour — raise to P2 if a normal
+  path is shown to drop updates.
 
 ---
 
@@ -259,6 +293,17 @@ Full read ×2. Tests: 143 green, `pyflakes` + `ruff` clean.
 - `EmptyMessageFilter`/`SkipAllFilter` override `process`, and their
   `_process_message` is `raise NotImplementedError` — fine, since `process` never
   delegates.
+- (pass 8) `_compile_keyword` raw branch (`r'...'`): the pattern is compiled and
+  run against every message body with no size / ReDoS guard. The pattern comes
+  from the operator's own config, so this is self-inflicted; noted only.
+- (pass 8) `SkipWithKeywordsFilter` / `AllowWithKeywordsFilter`: the final
+  `re.compile("|".join(...))` over the combined alternation is not wrapped in the
+  contextual `ValueError` that per-element `_compile_keyword` gets — a broken raw
+  element surfaces as a bare `re.error`.
+- (pass 8) `KeywordReplaceFilter._apply_rule`: for a plain (non-`r'...'`) keyword
+  the replacement string is still passed through `match.expand`, so a literal
+  replacement containing `\1` / `\g<0>` / a stray backslash is reinterpreted
+  rather than inserted verbatim. Needs an unusual config to hit.
 
 ---
 
