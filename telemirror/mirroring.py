@@ -953,19 +953,33 @@ class Mirroring:
         Streams `iter_messages` in one pass — only message IDs are held in
         memory, never the full history.
 
+        When `broadcast_sync` is empty (first run after it was added) it is
+        seeded from the `messages` table so previously mirrored posts are not
+        re-sent.
+
         A message is marked synced regardless of send outcome; a rare failed
         first-time send won't auto-retry — clear the `broadcast_sync` rows for
-        the channel to force a full re-sync.
+        the channel (and its `messages` rows, or they are re-seeded) to force a
+        full re-sync.
 
         `broadcast_sync` is keyed by source channel, not by target: a broadcast
-        target added later is NOT backfilled by this sync (clear the rows to
-        re-send everything).
+        target added later is NOT backfilled by this sync.
         """
         bc = self._broadcast_channel
         bc_peer_id = utils.resolve_id(bc)[0]
         self._logger.info(f"[Sync broadcast]: starting sync for channel#{bc}")
 
         synced = await self._database.get_broadcast_sync(bc)  # {msg_id: edit_ts|None}
+        if not synced:
+            # First run after `broadcast_sync` was introduced: seed it from the
+            # messages already mirrored by earlier runs so this sync doesn't
+            # re-send the whole channel history.
+            for original_id in {
+                m.original_id
+                for m in await self._database.get_all_messages_for_channel(bc)
+            }:
+                await self._database.set_broadcast_sync(bc, original_id, None)
+            synced = await self._database.get_broadcast_sync(bc)
         seen: set[int] = set()
         sent = edited = 0
 

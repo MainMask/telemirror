@@ -7,7 +7,7 @@ import logging
 from telethon.tl import types
 
 from telemirror.mirroring import Mirroring
-from telemirror.storage import InMemoryDatabase
+from telemirror.storage import InMemoryDatabase, MirrorMessage
 from tests.conftest import run
 
 BC = -1001111111111
@@ -85,6 +85,18 @@ def test_first_sync_sends_all_and_records():
     calls = _sync(db, [_msg(1), _msg(2), _msg(3)])
     assert calls == [("new", 1), ("new", 2), ("new", 3)]
     assert set(run(db.get_broadcast_sync(BC))) == {1, 2, 3}
+
+
+def test_empty_broadcast_sync_is_seeded_from_existing_mirrors():
+    # First run after `broadcast_sync` was added: messages already mirrored by
+    # the old sync must not be re-sent.
+    db = run(InMemoryDatabase())
+    run(
+        db.insert_batch(
+            [MirrorMessage(mid, BC, mid + 500, -1002222222222) for mid in (1, 2)]
+        )
+    )
+    assert _sync(db, [_msg(1), _msg(2), _msg(3)]) == [("new", 3)]
 
 
 def test_restart_is_a_noop():
