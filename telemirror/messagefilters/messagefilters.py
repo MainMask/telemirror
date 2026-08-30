@@ -255,6 +255,14 @@ class ForwardFormatFilter(ChannelName, MessageLink, MessageFilter):
     def __init__(self, format: str = DEFAULT_FORMAT) -> None:
         self._format = format
 
+        if self.MESSAGE_PLACEHOLDER not in format:
+            # Without it `_process_message` finds offset -1, drops the original
+            # body and shifts header entities by a bogus diff.
+            raise ValueError(
+                f"ForwardFormatFilter: format must contain "
+                f"{self.MESSAGE_PLACEHOLDER}: {format!r}"
+            )
+
         try:
             probe = self._format.format(
                 channel_name="", message_link="", sender_title="",

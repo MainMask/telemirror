@@ -363,7 +363,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"Error while sending split message to chat#{outgoing_chat}. "
                             f"{type(split_err).__name__}: {split_err}"
                         )
-                        continue
+                        # Fall through: the media message may already be sent —
+                        # it must still be tracked (only the text tail is lost).
                 except (errors.FloodWaitError, errors.FloodPremiumWaitError):
                     # Let a >threshold FloodWait propagate: past_mode's retry
                     # wrapper handles it without advancing the checkpoint past
@@ -549,7 +550,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"Error while sending split album to chat#{outgoing_chat}. "
                             f"{type(split_err).__name__}: {split_err}"
                         )
-                        continue
+                        # Fall through: the album may already be sent — it must
+                        # still be tracked (only the caption tails are lost).
                 except (errors.FloodWaitError, errors.FloodPremiumWaitError):
                     # See new_message: propagate to past_mode's retry wrapper
                     # (in live mode this aborts the rest of the fan-out).

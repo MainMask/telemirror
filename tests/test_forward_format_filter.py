@@ -17,7 +17,9 @@ def test_valid_formats_accepted():
     ForwardFormatFilter("{message_text} — {sender_title} {sender_username}")
 
 
-@pytest.mark.parametrize("bad", ["{oops}", "{", "}", "{message_text} {0}"])
+@pytest.mark.parametrize(
+    "bad", ["{oops}", "{", "}", "{message_text} {0}", "from [{channel_name}]({message_link})"]
+)
 def test_invalid_format_rejected(bad):
     with pytest.raises(ValueError):
         ForwardFormatFilter(bad)
