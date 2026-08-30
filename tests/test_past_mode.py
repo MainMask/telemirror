@@ -3,6 +3,8 @@
 
 import logging
 
+from telethon.tl import types
+
 import past_mode
 from config import DirectionConfig, PastModeConfig
 from telemirror.messagefilters import EmptyMessageFilter
@@ -55,8 +57,6 @@ def test_integrity_keeps_healthy_checkpoint():
 # --- _replay_direction ----------------------------------------------------
 
 def _msg(mid, grouped_id=None):
-    from telethon.tl import types
-
     return types.Message(
         id=mid, peer_id=types.PeerChannel(1), message=f"m{mid}", grouped_id=grouped_id
     )

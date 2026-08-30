@@ -2,6 +2,7 @@ import pytest
 from telethon import events
 from telethon.tl import types
 
+from telemirror.messagefilters.base import FilterAction
 from telemirror.messagefilters.messagefilters import (
     AllowWithKeywordsFilter,
     KeywordReplaceFilter,
@@ -63,8 +64,6 @@ def test_empty_keywords_rejected(cls):
 
 
 def test_skip_with_keywords_still_works():
-    from telemirror.messagefilters.base import FilterAction
-
     f = SkipWithKeywordsFilter({"spam"})
     action, _ = _process(f, make_message("this is spam"))
     assert action is FilterAction.DISCARD

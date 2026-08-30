@@ -217,6 +217,8 @@ async def _replay_direction(
         if use_buffer
         else client.iter_messages(source_id, **iter_kwargs)
     )
+    # iter_message_groups drops non-Message items (service messages): they produce
+    # no mirror, so they no longer advance the checkpoint (same as _sync_broadcast_channel).
     async for group in iter_message_groups(source):
         if isinstance(group, list):
             await process_album(group)
