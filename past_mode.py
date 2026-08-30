@@ -389,8 +389,7 @@ async def _run(logger: logging.Logger) -> None:
             await client.send_message(TECH_CHANNEL, full if len(full) <= 4096 else header)
     finally:
         await client.disconnect()
-        if hasattr(database, "connection_pool"):
-            await database.connection_pool.close()
+        await database.close()
 
 
 def main() -> None:

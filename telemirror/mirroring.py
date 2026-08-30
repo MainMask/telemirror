@@ -377,7 +377,15 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     await asyncio.sleep(config.send_delay)
 
         if inserted:
-            await self._database.insert_batch(inserted)
+            try:
+                await self._database.insert_batch(inserted)
+            except Exception as e:
+                # Messages are already sent; without their DB rows a later
+                # edit/delete can't reach them and a resync may duplicate them.
+                self._logger.error(
+                    f"{len(inserted)} message(s) sent but NOT tracked in DB "
+                    f"({message_link}): {type(e).__name__}: {e}"
+                )
 
     @__handle_exceptions
     async def new_album(
@@ -1108,6 +1116,13 @@ class Mirroring:
                 f"Logged in as {utils.get_display_name(me)}{at_username}"
             )
 
+            # Attach before the broadcast sync so its warnings/errors also reach
+            # the tech channel.
+            if self._tech_channel:
+                logging.getLogger("telemirror").addHandler(
+                    TelegramLogHandler(client, self._tech_channel)
+                )
+
             if self._broadcast_channel:
                 try:
                     await self._sync_broadcast_channel(client)
@@ -1117,11 +1132,6 @@ class Mirroring:
                         f"{type(e).__name__}: {e}",
                         exc_info=True,
                     )
-
-            if self._tech_channel:
-                logging.getLogger("telemirror").addHandler(
-                    TelegramLogHandler(client, self._tech_channel)
-                )
 
             self._handlers = EventHandlers(
                 client=self._receiver,

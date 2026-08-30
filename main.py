@@ -67,7 +67,10 @@ async def run_telemirror(
         broadcast_channel=broadcast_channel,
         tech_channel=tech_channel,
     )
-    await telemirror.run()
+    try:
+        await telemirror.run()
+    finally:
+        await database.close()
 
 
 def main():

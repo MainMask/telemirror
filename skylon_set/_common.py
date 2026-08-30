@@ -57,13 +57,16 @@ def entity_type(entity) -> str:
     return "other"
 
 
-async def safe_call(client, fn, *, skip_errors: tuple = ()):
+async def safe_call(client, fn, *, skip_errors: tuple = (), max_retries: int = 20):
     """Call ``fn()`` with reconnect + FloodWait handling.
 
     ``ChannelPrivateError`` and any type in ``skip_errors`` are treated as
-    "no access" and return ``None``. Retries reconnect/FloodWait forever.
+    "no access" and return ``None``. FloodWait is always waited out; transport
+    errors (``ConnectionError``/``OSError``) are retried up to ``max_retries``
+    times, then re-raised so a dead session doesn't hang the script forever.
     """
     skip = (ChannelPrivateError, *skip_errors)
+    transport_attempts = 0
     while True:
         try:
             if not client.is_connected():
@@ -83,7 +86,11 @@ async def safe_call(client, fn, *, skip_errors: tuple = ()):
             print(f"  Нет доступа, пропускаю: {e}")
             return None
         except (ConnectionError, OSError) as e:
-            print(f"Соединение потеряно ({e}), жду 10с...")
+            transport_attempts += 1
+            if transport_attempts > max_retries:
+                print(f"Соединение потеряно ({e}), исчерпаны {max_retries} попыток — прерываю.")
+                raise
+            print(f"Соединение потеряно ({e}), жду 10с... ({transport_attempts}/{max_retries})")
             try:
                 await client.disconnect()
             except Exception:
