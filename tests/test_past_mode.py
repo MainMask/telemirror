@@ -159,6 +159,37 @@ def test_replay_floodwait_does_not_advance_checkpoint(monkeypatch, exc):
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 1
 
 
+@pytest.mark.parametrize(
+    "exc", [errors.FloodWaitError, errors.FloodPremiumWaitError]
+)
+def test_replay_with_retry_waits_out_flood(monkeypatch, exc):
+    """_replay_with_retry sleeps and retries on either flood type (past_mode's
+    retry loop must cover FloodPremiumWaitError, not just FloodWaitError)."""
+    attempts = []
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
+
+    async def fake_replay(client, database, source_id, target_id, cfg, logger):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise exc(request=None)
+
+    monkeypatch.setattr(past_mode, "_replay_direction", fake_replay)
+
+    run(
+        past_mode._replay_with_retry(
+            object(), run(InMemoryDatabase()), SRC, TGT,
+            _cfg(PastModeConfig(full_history=True, send_delay=0)), _LOG,
+        )
+    )
+    assert len(attempts) == 2
+    assert len(slept) == 1
+
+
 def test_replay_resumes_from_checkpoint(monkeypatch):
     db = run(InMemoryDatabase())
     run(db.set_past_mode_checkpoint(SRC, TGT, 2))

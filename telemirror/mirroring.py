@@ -247,6 +247,19 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         inserted: List[MirrorMessage] = []
 
+        async def flush_inserted() -> None:
+            if not inserted:
+                return
+            try:
+                await self._database.insert_batch(inserted)
+            except Exception as e:
+                # Messages are already sent; without their DB rows a later
+                # edit/delete can't reach them and a resync may duplicate them.
+                self._logger.error(
+                    f"{len(inserted)} message(s) sent but NOT tracked in DB "
+                    f"({message_link}): {type(e).__name__}: {e}"
+                )
+
         for outgoing_chat, configs in outgoing_chats.items():
             for config in configs:
                 if not self._matches_from_topic(config, message):
@@ -357,7 +370,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     # this un-sent message. In live mode there is no retry, so
                     # this aborts the rest of the fan-out for this message — an
                     # accepted trade-off (a >300s wait means the account is
-                    # already heavily limited).
+                    # already heavily limited). Persist what was already sent
+                    # to earlier targets before unwinding.
+                    await flush_inserted()
                     raise
                 except Exception as e:
                     self._logger.error(
@@ -379,16 +394,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 if config.send_delay:
                     await asyncio.sleep(config.send_delay)
 
-        if inserted:
-            try:
-                await self._database.insert_batch(inserted)
-            except Exception as e:
-                # Messages are already sent; without their DB rows a later
-                # edit/delete can't reach them and a resync may duplicate them.
-                self._logger.error(
-                    f"{len(inserted)} message(s) sent but NOT tracked in DB "
-                    f"({message_link}): {type(e).__name__}: {e}"
-                )
+        await flush_inserted()
 
     @__handle_exceptions
     async def new_album(
