@@ -448,7 +448,7 @@ if BROADCAST_CHANNEL:
                 raise ValueError(
                     f"BROADCAST_TARGETS: invalid entry {_item!r} — "
                     "expected 'channel_id' or 'channel_id#topic_id'"
-                )
+                ) from None
     else:
         for _src, _targets in CHAT_MAPPING.items():
             if _src == BROADCAST_CHANNEL:

@@ -10,9 +10,22 @@ from ..mixins import (
     MappedChannelName,
     MessageLink,
     UpdateEntitiesParams,
-    WordBoundaryRegex,
 )
 from .base import FilterAction, FilterResult, MessageFilter
+
+
+def _compile_keyword(keyword: str) -> "re.Pattern[str]":
+    """Compile one keyword rule: ``r'...'`` is a raw regex, anything else is a
+    word-boundary literal match. Raises ``ValueError`` (not a bare ``re.error``)
+    on a broken pattern so config mistakes fail fast with context."""
+    if keyword.startswith("r'"):
+        src = keyword.removeprefix("r'").removesuffix("'")
+    else:
+        src = rf"\b{re.escape(keyword)}\b"
+    try:
+        return re.compile(src, flags=re.IGNORECASE)
+    except re.error as e:
+        raise ValueError(f"invalid keyword pattern {keyword!r}: {e}") from e
 
 
 class EmptyMessageFilter(MessageFilter):
@@ -386,7 +399,7 @@ class MappedNameForwardFormat(MappedChannelName, ForwardFormatFilter):
         ForwardFormatFilter.__init__(self, format)
 
 
-class KeywordReplaceFilter(UpdateEntitiesParams, WordBoundaryRegex, MessageFilter):
+class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
     """Filter that maps keywords
     Args:
         keywords (dict[str, str]): Keywords map
@@ -396,17 +409,11 @@ class KeywordReplaceFilter(UpdateEntitiesParams, WordBoundaryRegex, MessageFilte
         # (compiled pattern, surrogate replacement, is_regex)
         self._rules: list[tuple[re.Pattern[str], str, bool]] = []
         for k, v in keywords.items():
-            is_regex = k.startswith("r'")
-            pattern = (
-                k.removeprefix("r'").removesuffix("'")
-                if is_regex
-                else f"{self.BOUNDARY_REGEX}{re.escape(k)}{self.BOUNDARY_REGEX}"
-            )
             self._rules.append(
                 (
-                    re.compile(pattern, flags=re.IGNORECASE),
+                    _compile_keyword(k),
                     utils.add_surrogate(v),
-                    is_regex,
+                    k.startswith("r'"),  # is_regex: keeps configured casing
                 )
             )
 
@@ -470,7 +477,7 @@ class KeywordReplaceFilter(UpdateEntitiesParams, WordBoundaryRegex, MessageFilte
         return regex.sub(repl, text)
 
 
-class SkipWithKeywordsFilter(WordBoundaryRegex, MessageFilter):
+class SkipWithKeywordsFilter(MessageFilter):
     """Skips message if some keyword found
 
     Args:
@@ -486,12 +493,7 @@ class SkipWithKeywordsFilter(WordBoundaryRegex, MessageFilter):
                 f"{type(self).__name__} requires a non-empty keywords set"
             )
         self._lookup_regex = re.compile(
-            "|".join(
-                k.removeprefix("r'").removesuffix("'")
-                if k.startswith("r'")
-                else f"{self.BOUNDARY_REGEX}{re.escape(k)}{self.BOUNDARY_REGEX}"
-                for k in keywords
-            ),
+            "|".join(_compile_keyword(k).pattern for k in keywords),
             flags=re.IGNORECASE,
         )
 
@@ -552,7 +554,7 @@ class SkipWithUrlFilter(MessageFilter):
     def _matches(self, url: str) -> bool:
         norm = self._normalize(url)
         return any(
-            norm == b or norm.startswith(b + "/") or norm.startswith(b + "?")
+            norm == b or norm.startswith((f"{b}/", f"{b}?"))
             for b in self._blacklist
         )
 

@@ -957,10 +957,8 @@ class Mirroring:
     def stringify_config(self: "Mirroring") -> str:
         """Stringify mirror config"""
         mirror_mapping = "\n".join(
-            [
-                f"{source} -> {', '.join(map(lambda x: f'{x} [{targets[x]}]', targets))}"
-                for (source, targets) in self._chat_mapping.items()
-            ]
+            f"{source} -> {', '.join(f'{t} [{cfgs}]' for t, cfgs in targets.items())}"
+            for source, targets in self._chat_mapping.items()
         )
 
         return f"Mirror mapping: \n{mirror_mapping}\nUsing database: {self._database}\n"

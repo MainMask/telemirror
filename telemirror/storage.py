@@ -654,7 +654,7 @@ class PostgresDatabase(Database):
                 (source,),
             )
             rows = await cursor.fetchall()
-        return {mid: ets for mid, ets in rows}
+        return dict(rows)
 
     async def set_broadcast_sync(
         self: "PostgresDatabase", source: int, message_id: int, edit_ts: Optional[int]

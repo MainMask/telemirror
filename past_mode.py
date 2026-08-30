@@ -284,7 +284,9 @@ async def _edit_links_pass(
             text_changed = msg_copy.message != text_before
             url_changed = any(
                 getattr(a, "url", None) != getattr(b, "url", None)
-                for a, b in zip(msg_copy.entities or [], entities_before or [])
+                for a, b in zip(
+                    msg_copy.entities or [], entities_before or [], strict=False
+                )
             )
             if not text_changed and not url_changed:
                 continue

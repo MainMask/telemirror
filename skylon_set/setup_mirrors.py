@@ -337,7 +337,7 @@ async def step_verify(client):
 
     extras = []
     any_dupe = False
-    for key, dlgs in groups.items():
+    for dlgs in groups.values():
         if len(dlgs) <= 1:
             continue
         any_dupe = True

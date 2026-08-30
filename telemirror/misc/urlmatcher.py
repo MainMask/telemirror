@@ -100,8 +100,9 @@ class UrlMatcher:
             or full_url in self._whitelist
             or any(
                 full_url == w
-                or full_url.startswith(w if w.endswith("/") else f"{w}/")
-                or full_url.startswith(f"{w}?")
+                or full_url.startswith(
+                    (w if w.endswith("/") else f"{w}/", f"{w}?")
+                )
                 for w in self._whitelist
             )
         ):

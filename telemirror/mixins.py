@@ -98,14 +98,6 @@ class CopyEventMessage:
         return [self.copy_message(message) for message in album]
 
 
-class WordBoundaryRegex:
-    """
-    Word boundary regex
-    """
-
-    BOUNDARY_REGEX = r"\b"
-
-
 class UpdateEntitiesParams:
     def update_entities_params(
         self,

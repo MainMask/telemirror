@@ -811,7 +811,7 @@ async def send_file(
 
         # Check that formatting_entities list is valid
         if all(utils.is_list_like(obj) for obj in formatting_entities):
-            formatting_entities = formatting_entities
+            pass  # already a sequence of entity-lists
         elif utils.is_list_like(formatting_entities):
             formatting_entities = [formatting_entities]
         else:

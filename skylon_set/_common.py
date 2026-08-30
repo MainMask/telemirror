@@ -5,6 +5,7 @@ entity classification and logging setup; this module is the single source.
 """
 
 import asyncio
+import contextlib
 import logging
 import sys
 from pathlib import Path
@@ -77,10 +78,8 @@ async def safe_call(client, fn, *, skip_errors: tuple = (), max_retries: int = 2
             return result
         except FloodWaitError as e:
             print(f"FloodWait: ждём {e.seconds}с...")
-            try:
+            with contextlib.suppress(Exception):
                 await client.disconnect()
-            except Exception:
-                pass
             await asyncio.sleep(e.seconds)
         except skip as e:
             print(f"  Нет доступа, пропускаю: {e}")
@@ -91,8 +90,6 @@ async def safe_call(client, fn, *, skip_errors: tuple = (), max_retries: int = 2
                 print(f"Соединение потеряно ({e}), исчерпаны {max_retries} попыток — прерываю.")
                 raise
             print(f"Соединение потеряно ({e}), жду 10с... ({transport_attempts}/{max_retries})")
-            try:
+            with contextlib.suppress(Exception):
                 await client.disconnect()
-            except Exception:
-                pass
             await asyncio.sleep(10)
