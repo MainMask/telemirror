@@ -14,7 +14,7 @@ from ..mixins import (
 from .base import FilterAction, FilterResult, MessageFilter
 
 
-def _compile_keyword(keyword: str) -> "re.Pattern[str]":
+def _compile_keyword(keyword: str) -> re.Pattern[str]:
     """Compile one keyword rule: ``r'...'`` is a raw regex, anything else is a
     word-boundary literal match. Raises ``ValueError`` (not a bare ``re.error``)
     on a broken pattern so config mistakes fail fast with context."""

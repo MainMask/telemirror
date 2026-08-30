@@ -130,7 +130,10 @@ def test_replay_last_n_buffer_oldest_first(monkeypatch):
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 10
 
 
-def test_replay_floodwait_does_not_advance_checkpoint(monkeypatch):
+@pytest.mark.parametrize(
+    "exc", [errors.FloodWaitError, errors.FloodPremiumWaitError]
+)
+def test_replay_floodwait_does_not_advance_checkpoint(monkeypatch, exc):
     """A FloodWait raised while sending must propagate (not be swallowed) so the
     checkpoint stays put and the un-sent message is retried."""
     calls = []
@@ -142,11 +145,11 @@ def test_replay_floodwait_does_not_advance_checkpoint(monkeypatch):
         async def new_message(self, chat, msg, link):
             calls.append(msg.id)
             if msg.id == 2:
-                raise errors.FloodWaitError(request=None)
+                raise exc(request=None)
 
     monkeypatch.setattr(past_mode, "EventProcessor", Rec)
     db = run(InMemoryDatabase())
-    with pytest.raises(errors.FloodWaitError):
+    with pytest.raises(exc):
         run(
             past_mode._replay_direction(
                 FakeClient([_msg(1), _msg(2), _msg(3)]), db, SRC, TGT,

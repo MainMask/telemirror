@@ -69,7 +69,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         async def wrapper(self: "EventProcessor", *args, **kw):
             try:
                 return await fn(self, *args, **kw)
-            except errors.FloodWaitError:
+            except (errors.FloodWaitError, errors.FloodPremiumWaitError):
                 # A >threshold FloodWait must reach past_mode's retry wrapper so
                 # the checkpoint isn't advanced past an un-sent message.
                 raise
@@ -351,10 +351,13 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"{type(split_err).__name__}: {split_err}"
                         )
                         continue
-                except errors.FloodWaitError:
+                except (errors.FloodWaitError, errors.FloodPremiumWaitError):
                     # Let a >threshold FloodWait propagate: past_mode's retry
                     # wrapper handles it without advancing the checkpoint past
-                    # this un-sent message.
+                    # this un-sent message. In live mode there is no retry, so
+                    # this aborts the rest of the fan-out for this message — an
+                    # accepted trade-off (a >300s wait means the account is
+                    # already heavily limited).
                     raise
                 except Exception as e:
                     self._logger.error(
@@ -541,8 +544,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"{type(split_err).__name__}: {split_err}"
                         )
                         continue
-                except errors.FloodWaitError:
-                    # See new_message: propagate to past_mode's retry wrapper.
+                except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+                    # See new_message: propagate to past_mode's retry wrapper
+                    # (in live mode this aborts the rest of the fan-out).
                     raise
                 except Exception as e:
                     self._logger.error(
