@@ -4,7 +4,7 @@ Loads environment(.env)/config.yaml config
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Dict, List, Literal, Optional
 from urllib.parse import quote
 
@@ -161,11 +161,22 @@ _LIVE_SEND_DELAY: float = config("SEND_DELAY", default=0.5, cast=float)
 @dataclass(frozen=True)
 class PastModeConfig:
     send_delay: float = 0.5
+    # Accepts datetime/date/ISO-string on input; normalized to datetime in __post_init__.
     since_date: Optional[datetime] = None
     last_n: Optional[int] = None
     full_history: bool = False
 
     def __post_init__(self) -> None:
+        # YAML auto-parses an unquoted `since_date` into a `datetime` (or a bare
+        # date into `date`); normalize any of datetime/date/ISO-string to datetime.
+        if self.since_date is not None and not isinstance(self.since_date, datetime):
+            coerced = (
+                datetime.combine(self.since_date, datetime.min.time())
+                if isinstance(self.since_date, date)
+                else datetime.fromisoformat(self.since_date)
+            )
+            object.__setattr__(self, "since_date", coerced)
+
         n = sum([self.since_date is not None, self.last_n is not None, self.full_history])
         if n != 1:
             raise ValueError(
@@ -248,7 +259,7 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
             return None
         return PastModeConfig(
             send_delay=pm.get("send_delay", 0.5),
-            since_date=datetime.fromisoformat(pm["since_date"]) if "since_date" in pm else None,
+            since_date=pm.get("since_date"),
             last_n=pm.get("last_n"),
             full_history=pm.get("full_history", False),
         )

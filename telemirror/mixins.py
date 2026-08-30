@@ -3,6 +3,7 @@ from typing import List, Optional
 from telethon import types, utils
 
 from .hints import EventAlbumMessage, EventMessage
+from .misc.links import private_message_link
 
 
 class MappedChannelName:
@@ -27,7 +28,7 @@ class MessageLink:
             if hasattr(message.chat, "username") and message.chat.username:
                 link = f"https://t.me/{message.chat.username}/{message.id}"
             else:
-                link = f"https://t.me/c/{message.chat.id}/{message.id}"
+                link = private_message_link(message.chat_id, message.id)
             return link
         return None
 
@@ -139,7 +140,9 @@ class UpdateEntitiesParams:
                 # Before with partial overlap
                 entity.length -= (entity.offset + entity.length) - start
             elif start < entity.offset < end and entity.offset + entity.length > end:
-                # After with partial overlap
+                # After with partial overlap: the replaced span ate the entity's
+                # head — keep only the tail that lies past `end`
+                entity.length -= end - entity.offset
                 entity.offset = end + diff
             elif (
                 start < entity.offset < end

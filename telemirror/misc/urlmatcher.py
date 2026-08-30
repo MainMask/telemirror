@@ -29,7 +29,11 @@ class UrlMatcher:
         r"(?:https?:\/\/)?(www\.)?[-\w@:%.\+~#=]{1,256}\.[\w]{2,4}\b([-\w@:%\+.~#?&//=]*)"
     )
 
-    def __init__(self, blacklist: Set[str] = set(), whitelist: Set[str] = set()):
+    def __init__(
+        self,
+        blacklist: Optional[Set[str]] = None,
+        whitelist: Optional[Set[str]] = None,
+    ):
         """UrlMatcher
 
         Args:
@@ -40,8 +44,8 @@ class UrlMatcher:
                 URLs that will be NOT matched.
                 Will be applied after the `blacklist`. Defaults to set().
         """
-        self._blacklist = {v.lower() for v in blacklist}
-        self._whitelist = {v.lower() for v in whitelist}
+        self._blacklist = {v.lower() for v in blacklist or set()}
+        self._whitelist = {v.lower() for v in whitelist or set()}
 
     def search(self, text: str) -> List[Tuple[int, int]]:
         """Search for matched URLs within text

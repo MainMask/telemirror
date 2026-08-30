@@ -39,3 +39,10 @@ def test_search_returns_spans():
 
 def test_match_none_is_false():
     assert UrlMatcher(blacklist={"t.me"}).match(None) is False
+
+
+def test_default_matchers_are_independent():
+    a = UrlMatcher()
+    b = UrlMatcher()
+    a._blacklist.add("t.me")
+    assert b._blacklist == set()
