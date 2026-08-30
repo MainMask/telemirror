@@ -7,6 +7,10 @@ from skylon_set._common import safe_call
 from tests.conftest import run
 
 
+async def _noop(*_a, **_kw):
+    pass
+
+
 class _Client:
     def is_connected(self):
         return True
@@ -39,7 +43,3 @@ def test_success_returns_result(monkeypatch):
         return 42
 
     assert run(safe_call(_Client(), ok)) == 42
-
-
-async def _noop(*_a, **_kw):
-    pass

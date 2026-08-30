@@ -3,10 +3,9 @@
 
 import logging
 
-from telethon.tl import types
-
 import pytest
 from telethon import errors
+from telethon.tl import types
 
 import past_mode
 from config import DirectionConfig, PastModeConfig
