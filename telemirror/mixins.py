@@ -145,9 +145,11 @@ class UpdateEntitiesParams:
                 entity.length -= end - entity.offset
                 entity.offset = end + diff
             elif (
-                start < entity.offset < end
-                and start < entity.offset + entity.length < end
+                start <= entity.offset < end
+                and start < entity.offset + entity.length <= end
             ):
-                # Fully inside: resize to match entity
+                # Fully inside (may touch either edge; the full-span case is
+                # already handled by the "Before & After" branch above): resize
+                # to match the replacement.
                 entity.offset = start
                 entity.length = (end - start) + diff

@@ -24,7 +24,7 @@ from telethon.tl.types import ChatPhotoEmpty, InputChatUploadedPhoto
 
 from skylon_set._common import entity_type, make_client, safe_call
 
-CONFIG_PATH = Path(".configs/mirror.config.yml")
+CONFIG_PATH = Path(__file__).resolve().parent.parent / ".configs" / "mirror.config.yml"
 
 MENU_ACTIONS = [
     ("full-cycle",   "Полный цикл",        "создать → настроить → проверить → конфиг → финал"),

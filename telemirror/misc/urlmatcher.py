@@ -26,7 +26,7 @@ class UrlMatcher:
     DIGITS = "0123456789"
 
     SEARCH_URL_RE = re.compile(
-        r"(?:https?:\/\/)?(www\.)?[-\w@:%.\+~#=]{1,256}\.[\w]{2,4}\b([-\w@:%\+.~#?&//=]*)"
+        r"(?:https?:\/\/)?(www\.)?[-\w@:%.\+~#=]{1,256}\.[\w]{2,24}\b([-\w@:%\+.~#?&//=]*)"
     )
 
     def __init__(
@@ -98,7 +98,12 @@ class UrlMatcher:
         if self._whitelist and (
             host in self._whitelist
             or full_url in self._whitelist
-            or any(full_url.startswith(w) for w in self._whitelist)
+            or any(
+                full_url == w
+                or full_url.startswith(w if w.endswith("/") else f"{w}/")
+                or full_url.startswith(f"{w}?")
+                for w in self._whitelist
+            )
         ):
             return False
 

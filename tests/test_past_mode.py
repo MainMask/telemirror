@@ -5,6 +5,9 @@ import logging
 
 from telethon.tl import types
 
+import pytest
+from telethon import errors
+
 import past_mode
 from config import DirectionConfig, PastModeConfig
 from telemirror.messagefilters import EmptyMessageFilter
@@ -125,6 +128,33 @@ def test_replay_last_n_buffer_oldest_first(monkeypatch):
     calls, db = _run_replay(monkeypatch, msgs, PastModeConfig(last_n=3, send_delay=0))
     assert calls == [("new", 8), ("new", 9), ("new", 10)]
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 10
+
+
+def test_replay_floodwait_does_not_advance_checkpoint(monkeypatch):
+    """A FloodWait raised while sending must propagate (not be swallowed) so the
+    checkpoint stays put and the un-sent message is retried."""
+    calls = []
+
+    class Rec:
+        def __init__(self, **kw):
+            pass
+
+        async def new_message(self, chat, msg, link):
+            calls.append(msg.id)
+            if msg.id == 2:
+                raise errors.FloodWaitError(request=None)
+
+    monkeypatch.setattr(past_mode, "EventProcessor", Rec)
+    db = run(InMemoryDatabase())
+    with pytest.raises(errors.FloodWaitError):
+        run(
+            past_mode._replay_direction(
+                FakeClient([_msg(1), _msg(2), _msg(3)]), db, SRC, TGT,
+                _cfg(PastModeConfig(full_history=True, send_delay=0)), _LOG,
+            )
+        )
+    assert calls == [1, 2]
+    assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 1
 
 
 def test_replay_resumes_from_checkpoint(monkeypatch):

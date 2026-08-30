@@ -56,7 +56,7 @@ class DocumentFilenameFilter(MessageFilter):
     def _rename(self, name: str) -> str:
         stem, ext = os.path.splitext(name)
 
-        if self._prefix and stem.startswith(self._prefix):
+        if self._prefix and stem.startswith(f"{self._prefix} - "):
             return name
 
         if self._remove_regex is not None:

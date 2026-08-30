@@ -115,7 +115,8 @@ async def _integrity_check(
     if checkpoint < max_mirrored:
         logger.warning(
             f"{prefix}: checkpoint={checkpoint} < max_mirrored={max_mirrored}, "
-            f"откат checkpoint до {max_mirrored}"
+            f"сдвигаю checkpoint вперёд до {max_mirrored} "
+            f"(сообщения между {checkpoint} и {max_mirrored} без зеркал при resume пропускаются)"
         )
         await database.set_past_mode_checkpoint(source_id, target_id, max_mirrored)
         return max_mirrored, mirror_count

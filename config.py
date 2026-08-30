@@ -76,6 +76,19 @@ class Config(AutoConfig):
 
 config = Config()
 
+
+def _channel_id(value, name: str) -> Optional[int]:
+    """Parse a channel-id env/YAML value; empty and ``"0"`` mean "unset"."""
+    if value is None or str(value).strip() in ("", "0"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name}: expected an integer channel id, got {value!r}"
+        ) from None
+
+
 # telegram app id
 API_ID: str = config("API_ID")
 # telegram app hash
@@ -143,7 +156,7 @@ YAML_CONFIG_FILE = "./.configs/mirror.config.yml"
 CHAT_MAPPING: Dict[int, Dict[int, List["DirectionConfig"]]] = {}
 
 _bc = config("BROADCAST_CHANNEL", default=None)
-BROADCAST_CHANNEL: Optional[int] = int(_bc) if _bc else None
+BROADCAST_CHANNEL: Optional[int] = _channel_id(_bc, "BROADCAST_CHANNEL")
 
 _bc_targets_str: Optional[str] = config("BROADCAST_TARGETS", default=None)
 BROADCAST_TARGETS: Optional[List[str]] = (
@@ -153,7 +166,7 @@ BROADCAST_TARGETS: Optional[List[str]] = (
 )
 
 _tc = config("TECH_CHANNEL", default=None)
-TECH_CHANNEL: Optional[int] = int(_tc) if _tc else None
+TECH_CHANNEL: Optional[int] = _channel_id(_tc, "TECH_CHANNEL")
 
 _LIVE_SEND_DELAY: float = config("SEND_DELAY", default=0.5, cast=float)
 
@@ -224,7 +237,9 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
             yaml_config = yaml.safe_load(file)
 
     if "broadcast_channel" in yaml_config:
-        BROADCAST_CHANNEL = int(yaml_config["broadcast_channel"])
+        BROADCAST_CHANNEL = _channel_id(
+            yaml_config["broadcast_channel"], "broadcast_channel"
+        )
 
     if "broadcast_targets" in yaml_config:
         _raw_bt = yaml_config["broadcast_targets"]
@@ -235,7 +250,7 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
         BROADCAST_TARGETS = [str(t) for t in _raw_bt]
 
     if "tech_channel" in yaml_config:
-        TECH_CHANNEL = int(yaml_config["tech_channel"])
+        TECH_CHANNEL = _channel_id(yaml_config["tech_channel"], "tech_channel")
 
     def build_filters(
         filter_config: Optional[dict], default: MessageFilter
@@ -334,14 +349,14 @@ else:
         )
 
         for sources, targets in matches:
-            for source in sources.split(","):
+            for source in filter(None, (s.strip() for s in sources.split(","))):
                 source_topic_id = None
                 if "#" in source:
                     source, source_topic_id = map(int, source.split("#"))
                 else:
                     source = int(source)
 
-                for target in targets.split(","):
+                for target in filter(None, (s.strip() for s in targets.split(","))):
                     target_topic_id = None
                     if "#" in target:
                         target, target_topic_id = map(int, target.split("#"))

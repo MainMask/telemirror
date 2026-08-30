@@ -69,6 +69,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         async def wrapper(self: "EventProcessor", *args, **kw):
             try:
                 return await fn(self, *args, **kw)
+            except errors.FloodWaitError:
+                # A >threshold FloodWait must reach past_mode's retry wrapper so
+                # the checkpoint isn't advanced past an un-sent message.
+                raise
             except Exception as e:
                 self._logger.error(e, exc_info=True)
 
@@ -347,6 +351,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"{type(split_err).__name__}: {split_err}"
                         )
                         continue
+                except errors.FloodWaitError:
+                    # Let a >threshold FloodWait propagate: past_mode's retry
+                    # wrapper handles it without advancing the checkpoint past
+                    # this un-sent message.
+                    raise
                 except Exception as e:
                     self._logger.error(
                         f"Error while sending message to chat#{outgoing_chat}. "
@@ -524,6 +533,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"{type(split_err).__name__}: {split_err}"
                         )
                         continue
+                except errors.FloodWaitError:
+                    # See new_message: propagate to past_mode's retry wrapper.
+                    raise
                 except Exception as e:
                     self._logger.error(
                         f"Error while sending album to chat#{outgoing_chat}. "

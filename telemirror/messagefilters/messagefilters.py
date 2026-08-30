@@ -338,7 +338,11 @@ class ForwardFormatFilter(ChannelName, MessageLink, MessageFilter):
             else:
                 message.entities = pre_formatted_entities
 
-        message.message = pre_formatted_text.format(message_text=message.message or "")
+        # `.replace`, not a second `.format()`: a channel/sender name that itself
+        # contains `{`/`}` would make `str.format` raise KeyError here.
+        message.message = pre_formatted_text.replace(
+            self.MESSAGE_PLACEHOLDER, message.message or ""
+        )
 
         return FilterResult(FilterAction.CONTINUE, message)
 

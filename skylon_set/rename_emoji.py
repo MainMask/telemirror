@@ -17,9 +17,13 @@ NEW_EMOJI = "⚜️"
 def normalize_title(title: str) -> str | None:
     """Return corrected title, or None if no change needed."""
     working = title.replace(OLD_EMOJI, NEW_EMOJI)
-    if NEW_EMOJI not in working or "Archonum" not in working:
+    if NEW_EMOJI not in working:
         return None
     left, _, right = working.partition(NEW_EMOJI)
+    if "Archonum" not in right:
+        # Unexpected layout (brand word before the emoji, or missing) — skip
+        # rather than mangle a live channel title.
+        return None
     _, _, after_archonum = right.partition("Archonum")
     new_title = f"{left.strip()} {NEW_EMOJI} Archonum{after_archonum.rstrip()}"
     return new_title if new_title != title else None

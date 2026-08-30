@@ -25,6 +25,19 @@ def test_whitelist_overrides_blacklist():
     assert m.match("https://t.me/spam") is True
 
 
+def test_whitelist_prefix_needs_path_boundary():
+    m = UrlMatcher(blacklist={"t.me"}, whitelist={"t.me/chan"})
+    assert m.match("https://t.me/chan") is False       # exact
+    assert m.match("https://t.me/chan/42") is False    # path child
+    assert m.match("https://t.me/chanfake/9") is True  # not whitelisted
+
+
+def test_search_matches_long_tld():
+    m = UrlMatcher(blacklist={"promo.company"})
+    text = "join promo.company/deal now"
+    assert [text[s:e] for s, e in m.search(text)] == ["promo.company/deal"]
+
+
 def test_case_insensitive():
     m = UrlMatcher(blacklist={"T.ME"})
     assert m.match("https://t.me/x") is True
