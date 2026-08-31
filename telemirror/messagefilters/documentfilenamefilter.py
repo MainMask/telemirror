@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class DocumentFilenameFilter(MessageFilter):
     """Rewrites the filename of mirrored documents.
 
-    Prepends ``prefix`` and removes unwanted substrings (case-insensitive).
+    Appends ``suffix`` and removes unwanted substrings (case-insensitive).
     Only documents that carry a ``DocumentAttributeFilename`` are affected;
     voice notes, photos, stickers and GIFs have no filename and pass through.
 
@@ -31,14 +31,14 @@ class DocumentFilenameFilter(MessageFilter):
     broadcast fan-out).
 
     Args:
-        prefix (str): text prepended as ``{prefix} - {name}``.
+        suffix (str): text appended as ``{name} - {suffix}``.
         remove (list[str]): substrings stripped from the filename.
     """
 
     def __init__(
-        self, prefix: str = "", remove: Optional[list[str]] = None
+        self, suffix: str = "", remove: Optional[list[str]] = None
     ) -> None:
-        self._prefix = prefix
+        self._suffix = suffix
         self._remove_regex = None
         if remove:
             alternation = "|".join(
@@ -56,16 +56,16 @@ class DocumentFilenameFilter(MessageFilter):
     def _rename(self, name: str) -> str:
         stem, ext = os.path.splitext(name)
 
-        if self._prefix and (
-            stem == self._prefix or stem.startswith(f"{self._prefix} - ")
+        if self._suffix and (
+            stem == self._suffix or stem.endswith(f" - {self._suffix}")
         ):
             return name
 
         if self._remove_regex is not None:
             stem = self._remove_regex.sub("", stem).strip(" _-")
 
-        if self._prefix:
-            stem = f"{self._prefix} - {stem}" if stem else self._prefix
+        if self._suffix:
+            stem = f"{stem} - {self._suffix}" if stem else self._suffix
 
         return f"{stem}{ext}"
 

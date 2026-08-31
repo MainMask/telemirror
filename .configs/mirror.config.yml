@@ -1,216 +1,65 @@
 # Global settings
 disable_edit: false      # edits in source sync to mirror (stop-words block the update, not delete)
 disable_delete: true     # deletions in source do NOT delete mirrored posts
-fallback_link_url: "https://t.me/Archonum"  # substitute for unresolvable cross-channel links
+fallback_link_url: "https://t.me/CitadelOS"  # substitute for unresolvable cross-channel links
 
 # Global filters — applied in order to every direction
 filters:
-  # 1. Block messages containing competitor channel links (URL entities — both hyperlinks and bare URLs)
+  # 1. Block messages that link to promo bots / old-brand channels
+  #    (URL entities — both hyperlinks and bare @mentions)
   - SkipWithUrlFilter:
       blacklist: !!set
-        ? t.me/deskladchina
-        ? t.me/xpiratovich
-        ? t.me/piratlinks
-        ? t.me/daime
-        ? t.me/pirat
-        ? t.me/kitpaymentbot
-        ? t.me/alliance
-        ? t.me/privateinc
-        ? t.me/skladprivate
-        ? t.me/piratnotes
-        ? t.me/piratovichfeed
-        ? t.me/alliance1000
-        ? t.me/piratVPN
-        ? t.me/Sovetnik1000
-        ? t.me/maximusdesklad
+        ? t.me/godolympbot
+        ? t.me/managerfrm
+        ? t.me/mngrfrm
+        ? t.me/openfrm
+        ? t.me/frmtribune
+        ? t.me/svyazfromonacobot
 
   # 2. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
   #    Prefix with r'...' to use a regex instead of a plain word.
   - SkipWithKeywordsFilter:
       keywords: !!set
-        ? "DE SKLAD"
-        ? "DÈ SKLAD"
-        ? "DÉ SKLAD"
-        ? "Pirat"
-        ? "PRIVATE"
-        ? "Парат"
-        ? "Шеф"
-        ? "Пиратович"
-        ? "Юнга"
-        ? "Альянс"
-        ? "Максимус"
-        ? "Maximus"
+        ? "O Λ И M П"
+        ? "Олимп"
+        ? "Золотой билет"
+        ? "r'@godolympbot'"
+        ? "r'@managerfrm'"
+        ? "r'@mngrfrm'"
+        ? "r'@openfrm'"
+        ? "r'@frmtribune'"
+        ? "r'@svyazfromonacobot'"
 
-  # 3. Remove static watermarks from photos and videos, then stamp our own.
-  #    Placed AFTER the cheap text-discard filters (#1, #2) so a message dropped
-  #    by a stop-word / blacklisted link never pays for the media
-  #    download + detection + inpaint + re-upload.
+  # 3. Watermarks on photos/videos — global for every mirrored source:
+  #      stamp_watermark: true   — overlay telemirror/watermark/my_watermark.png
+  #      remove_watermark: false — do NOT detect/inpaint the source's own mark
+  #    Set remove_watermark: true (+ template_path: PNG of the mark) to also strip
+  #    the source's watermark. Optional `channels: [-100..., -100...]` limits which
+  #    sources are processed; omit to cover all. stamp_scale / stamp_opacity —
+  #    0.35 / 0.55 defaults.
   - WatermarkRemovalFilter:
-      channels:
-        -1001350991069: {}
-        -1001585626790: {}
-        -1001608514662: {}
-        -1001616070803: {}
-        -1001620717346: {}
-        -1001625832882: {}
-        -1001668687243: {}
-        -1001669154801: {}
-        -1001679303723: {}
-        -1001683739301: {}
-        -1001684120359: {}
-        -1001707833642: {}
-        -1001711802478: {}
-        -1001721584272: {}
-        -1001723771738: {}
-        -1001733780564: {}
-        -1001745244649: {}
-        -1001753003826: {}
-        -1001810854929: {}
-        -1001838802652: {}
-        -1001855360622: {}
-        -1001868752477: {}
-        -1001895273768: {}
-        -1001921572751: {}
-        -1001939536130: {}
-        -1001990248631: {}
-        -1002021516403: {}
-        -1002029970060: {}
-        -1002035504126: {}
-        -1002040450612: {}
-        -1002048119842: {}
-        -1002088200752: {}
-        -1002118222558: {}
-        -1002137977917: {}
-        -1002145091820: {}
-        -1002251537679: {}
-        -1002300269923: {}
-        -1002335202343: {}
-        -1002384557321: {}
-        -1002393283816: {}
-        -1002414615759: {}
-        -1002446394566: {}
-        -1002468508179: {}
-        -1002476406259: {}
-        -1002492771789: {}
-        -1002514927584: {}
-        -1002566109394: {}
-        -1002577016412: {}
-        -1002581113607: {}
-        -1002590086652: {}
-        -1002652306303: {}
-        -1002664775270: {}
-        -1002673353788: {}
-        -1002694794074: {}
-        -1002699238998: {}
-        -1002707588254: {}
-        -1002709471519: {}
-        -1002714317926: {}
-        -1002854097133: {}
-        -1002877508198: {}
-        -1002879096124: {}
-        -1002969598305: {}
-        -1002973520688: {}
-        -1003001464067: {}
-        -1003014783226: {}
-        -1003107870406: {}
-        -1003183399976: {}
-        -1003465993418: {}
+      remove_watermark: false
+      stamp_watermark: true
 
-  # 4. Bypass Telegram's "restrict saving content" (noforwards) protection —
-  #    placed after the cheap text-discard filters above (so messages skipped by
-  #    them never pay for a media download+reupload) but must stay after
-  #    WatermarkRemovalFilter (it replaces message.media with a freshly
-  #    re-uploaded file, so filters relying on isinstance(media, MessageMediaPhoto/Document)
-  #    against the original media must come before it)
+  # 4. Bypass Telegram's "restrict saving content" (noforwards) protection by
+  #    re-uploading media as a fresh file. Placed after the cheap text-discard
+  #    filters above so a dropped message never pays for a media download+reupload.
+  #    Must stay after WatermarkRemovalFilter (that filter swaps message.media).
   - RestrictSavingContentBypassFilter
 
-  # 5. Replace words/phrases inline (case preserved, whole-word match by default)
-  #    Prefix key with r'...' to use a regex; value supports back-references.
-  - KeywordReplaceFilter:
-      keywords:
-        "Alliance": "Archonum"
-        "r'@alliance1000'": "@Archonor"
-        "r'@daime'": "@Archonor"
-        "r'@kitpaymentbot'": "@ArchonumBot"
-
-  # 6. Rename mirrored document files: prepend "@CitadelOS - " and strip promo
+  # 5. Rename mirrored document files: append " - @CitadelOS" and strip promo
   #    fragments from the filename. Must stay after RestrictSavingContentBypassFilter
   #    (patches the already re-uploaded file in place; re-uploads plain reference
   #    documents itself).
   - DocumentFilenameFilter:
-      prefix: "@CitadelOS"
+      suffix: "@CitadelOS"
       remove:
         - "@openfrm"
         - "openfrm"
 
+# Admin broadcast channel: its posts fan out to every target. Targets not set yet —
+# add `broadcast_targets:` (or entries under `directions:`) before running.
 broadcast_channel: -1003926294676
 
-broadcast_targets:
-  # every 2nd channel (25 of 50)
-  - -1003996214208
-  - -1003989758491
-  - -1003978326379
-  - -1003972046470
-  - -1003967930099
-  - -1003964424162
-  - -1003958776198
-  - -1003956520379
-  - -1003953764480
-  - -1003925863487
-  - -1003922488924
-  - -1003912773897
-  - -1003905432874
-  - -1003898146081
-  - -1003882749963
-  - -1003862709841
-  - -1003858762360
-  - -1003809586561
-  - -1003793775425
-  - -1003751966531
-  - -1003711585217
-  - -1003659636776
-  - -1003617693567
-  - -1003431281885
-  - -1003254785531
-  # every 5th topic (33 of 168)
-  - "-1003994039102#5"
-  - "-1003991366792#2"
-  - "-1003991366792#7"
-  - "-1003959747276#1"
-  - "-1003959747276#6"
-  - "-1003955419666#3"
-  - "-1003955419666#8"
-  - "-1003955419666#13"
-  - "-1003955419666#18"
-  - "-1003949707628#1"
-  - "-1003949707628#7"
-  - "-1003949707628#12"
-  - "-1003949707628#17"
-  - "-1003924801601#4"
-  - "-1003914612695#1"
-  - "-1003914612695#7"
-  - "-1003914612695#12"
-  - "-1003909163394#4"
-  - "-1003862216544#5"
-  - "-1003862216544#10"
-  - "-1003862216544#15"
-  - "-1003841103768#3"
-  - "-1003834870938#3"
-  - "-1003822804534#1"
-  - "-1003822804534#6"
-  - "-1003776646992#1"
-  - "-1003771523484#3"
-  - "-1003755609677#3"
-  - "-1003755609677#8"
-  - "-1003557354705#1"
-  - "-1003557354705#6"
-  - "-1003557354705#11"
-  - "-1003364217355#3"
-
-directions:
-- from:
-  - -1001629147115
-  to:
-  - -1004446125946#3
-  past_mode:
-    full_history: true
+# Mirror directions — none configured yet.
+directions: []

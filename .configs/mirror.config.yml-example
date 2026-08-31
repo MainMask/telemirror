@@ -78,18 +78,19 @@ directions:
       # - AllowWithKeywordsFilter:   # pass ONLY messages that contain at least one keyword
       #     keywords: !!set
       #       ? "allowed_word"
-      # - WatermarkRemovalFilter:    # remove/replace static channel watermarks (Linux/Docker only)
-      #     channels:
-      #       -1001585626790:        # source channel ID
-      #         template_path: "/data/watermarks/channel_wm.png"
-      #         match_threshold: 0.75  # detection sensitivity (0.0–1.0)
+      # - WatermarkRemovalFilter:      # strip the source's watermark and/or stamp your own (Linux/Docker only)
+      #     remove_watermark: true     # detect + inpaint the source's mark (needs template_path)
+      #     stamp_watermark: true      # overlay telemirror/watermark/my_watermark.png
+      #     template_path: "/data/watermarks/channel_wm.png"
+      #     match_threshold: 0.75      # detection sensitivity (0.0–1.0)
+      #     # channels: [-1001585626790, -1009876543210]  # optional: limit to these sources
       # - RestrictSavingContentBypassFilter:  # bypass a source chat's "restrict saving content"
       #                                       # (noforwards) protection by re-uploading media as a
       #                                       # fresh file; requires mode: copy. No arguments.
       #                                       # If used together with WatermarkRemovalFilter, must
       #                                       # come after it (it replaces the message's media).
       # - DocumentFilenameFilter:    # rename mirrored document files; requires mode: copy.
-      #     prefix: "@MyChannel"     #   prepended as "{prefix} - {name}" (skipped if already present)
+      #     suffix: "@MyChannel"     #   appended as "{name} - {suffix}" (skipped if already present)
       #     remove:                  #   substrings stripped from the filename (case-insensitive)
       #       - "@promo"
       #       - "promo"

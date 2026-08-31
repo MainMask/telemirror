@@ -19,7 +19,9 @@ _DEFAULT_STAMP = str(Path(__file__).parent / "my_watermark.png")
 
 logger = logging.getLogger(__name__)
 
-_template_cache: dict[str, tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]] = {}
+_template_cache: dict[
+    str, Optional[tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]
+] = {}
 _stamp_cache: dict[str, "Image.Image"] = {}
 _lama: Optional[object] = None
 _lama_lock = threading.Lock()
@@ -33,13 +35,15 @@ def _load_stamp(path: str) -> "Image.Image":
 
 
 @dataclass(frozen=True)
-class ChannelWatermarkConfig:
+class WatermarkConfig:
     template_path: str = _DEFAULT_TEMPLATE
     match_threshold: float = 0.31
     scale_min: float = 0.2
     scale_max: float = 1.0
     scale_steps: int = 80
     inpaint_dilate_px: int = 6
+    remove_watermark: bool = True
+    stamp_watermark: bool = True
     stamp_watermark_path: str = _DEFAULT_STAMP
     stamp_opacity: float = 0.55
     stamp_scale: float = 0.35
@@ -52,6 +56,13 @@ class ChannelWatermarkConfig:
             object.__setattr__(self, field, float(getattr(self, field)))
         for field in ("scale_steps", "inpaint_dilate_px"):
             object.__setattr__(self, field, int(getattr(self, field)))
+        for field in ("remove_watermark", "stamp_watermark"):
+            value = getattr(self, field)
+            if isinstance(value, str):
+                object.__setattr__(
+                    self, field,
+                    value.strip().lower() not in ("", "0", "false", "no"),
+                )
 
 
 def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
@@ -63,10 +74,24 @@ def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
     return cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
 
-def _load_template(path: str) -> tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+def _load_template(
+    path: str,
+) -> Optional[tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]:
     if path not in _template_cache:
         raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
         if raw is None:
+            if path == _DEFAULT_TEMPLATE:
+                # No bundled reference watermark: treat detection as a no-op so
+                # stamping still runs. An explicit template_path that's missing
+                # is a config typo and still raises.
+                logger.warning(
+                    "Default watermark template %s is missing — detection/removal "
+                    "disabled (stamping unaffected). Set a per-channel template_path "
+                    "or remove_watermark: false to silence this.",
+                    path,
+                )
+                _template_cache[path] = None
+                return None
             raise FileNotFoundError(f"Watermark template not found: {path}")
         if raw.ndim == 3 and raw.shape[2] == 4:
             alpha = raw[:, :, 3]
@@ -82,10 +107,13 @@ def _load_template(path: str) -> tuple[np.ndarray, np.ndarray, Optional[np.ndarr
 
 def _run_detection(
     image_bgr: np.ndarray,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
 ) -> tuple[float, float, Optional[tuple[int, int, int, int]]]:
     """Returns (score, scale, bbox) where bbox is None if score < match_threshold."""
-    tmpl_feat, _tmpl_gray, _alpha = _load_template(config.template_path)
+    template = _load_template(config.template_path)
+    if template is None:
+        return 0.0, 0.0, None
+    tmpl_feat, _tmpl_gray, _alpha = template
     img_gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     img_feat = _gradient_magnitude(img_gray)
     img_h, img_w = img_feat.shape
@@ -123,7 +151,7 @@ def _run_detection(
 
 def _detect_watermark(
     image_bgr: np.ndarray,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
 ) -> Optional[tuple[int, int, int, int]]:
     _, _, bbox = _run_detection(image_bgr, config)
     return bbox
@@ -142,7 +170,7 @@ def _get_lama():
 
 def remove_watermark_from_image(
     image_bytes: bytes,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
 ) -> Optional[bytes]:
     arr = np.frombuffer(image_bytes, np.uint8)
     image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -180,7 +208,7 @@ def remove_watermark_from_image(
 
 def remove_watermark_from_video(
     video_path: str,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
     output_path: str,
 ) -> bool:
     cap = cv2.VideoCapture(video_path)
@@ -221,7 +249,7 @@ def remove_watermark_from_video(
 
 async def async_remove_watermark_from_image(
     image_bytes: bytes,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
 ) -> Optional[bytes]:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, remove_watermark_from_image, image_bytes, config)
@@ -229,7 +257,7 @@ async def async_remove_watermark_from_image(
 
 async def async_remove_watermark_from_video(
     video_path: str,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
     output_path: str,
 ) -> bool:
     loop = asyncio.get_running_loop()
@@ -238,7 +266,7 @@ async def async_remove_watermark_from_video(
 
 def stamp_watermark_on_image(
     image_bytes: bytes,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
 ) -> bytes:
     img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
     wm = _load_stamp(config.stamp_watermark_path)
@@ -262,7 +290,7 @@ def stamp_watermark_on_image(
 
 def stamp_watermark_on_video(
     video_path: str,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
     output_path: str,
 ) -> bool:
     cap = cv2.VideoCapture(video_path)
@@ -307,7 +335,7 @@ def stamp_watermark_on_video(
 
 async def async_stamp_watermark_on_image(
     image_bytes: bytes,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
 ) -> bytes:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, stamp_watermark_on_image, image_bytes, config)
@@ -315,7 +343,7 @@ async def async_stamp_watermark_on_image(
 
 async def async_stamp_watermark_on_video(
     video_path: str,
-    config: ChannelWatermarkConfig,
+    config: WatermarkConfig,
     output_path: str,
 ) -> bool:
     loop = asyncio.get_running_loop()

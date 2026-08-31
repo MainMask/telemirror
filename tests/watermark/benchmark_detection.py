@@ -13,7 +13,7 @@ from pathlib import Path
 import cv2
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from telemirror.watermark.processor import ChannelWatermarkConfig, _run_detection
+from telemirror.watermark.processor import WatermarkConfig, _run_detection
 
 _DEFAULT_DATASET = str(Path(__file__).parent / "watermark_dataset")
 
@@ -39,9 +39,9 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="Save *_detected.jpg with bbox")
     args = parser.parse_args()
 
-    config = ChannelWatermarkConfig()
+    config = WatermarkConfig()
     if args.threshold is not None:
-        config = ChannelWatermarkConfig(match_threshold=args.threshold)
+        config = WatermarkConfig(match_threshold=args.threshold)
 
     files = collect_files(args.path)
     if not files:
