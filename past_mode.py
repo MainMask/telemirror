@@ -42,7 +42,6 @@ from telethon import TelegramClient, errors, utils
 from telethon.sessions import StringSession
 from telethon.tl import types
 
-from telemirror._patch import patch_input_media_with_spoiler
 from telemirror.mirroring import EventProcessor
 from telemirror.misc.links import private_message_link
 from telemirror.misc.log_setup import setup_stdout_logger
@@ -362,8 +361,6 @@ async def _run(logger: logging.Logger) -> None:
     database: Database = (
         InMemoryDatabase() if USE_MEMORY_DB else await PostgresDatabase(connection_string=DB_URL)
     )
-
-    patch_input_media_with_spoiler()
 
     _CONN_RETRIES = 20
     _RETRY_DELAY = 3  # секунд между попытками переподключения
