@@ -667,3 +667,26 @@ an independent full read — no leaks, hot path clean. Tests: 199 → 206.
 - `past_mode.py` still open-codes its own client bootstrap (own
   `connection_retries` / `retry_delay` strategy) — deliberately not folded into
   `open_client`.
+
+---
+
+# «⚜️ Цитадель» batch 2 + `setup_citadel.py` removed
+
+Batch 2 (donors «🏴‍☠️ D{È,É,E} SKLAD» → recipients «⚜️ Цитадель», 12 live + 23
+course) added via `setup_mirrors.py`, which was retargeted from the old brand name
+«Archonum» to «⚜️ Цитадель». Live directions merge-appended to
+`.configs/mirror.config.yml` (text append, comments preserved); course-only
+directions written to `.configs/citadel_courses.config.yml` (no `broadcast_channel`,
+consumed only by `YAML_CONFIG_ENV=… python past_mode.py`).
+
+`skylon_set/setup_citadel.py` + `tests/test_setup_citadel.py` deleted: it was a
+one-shot for batch 1 (id-pair driven, print-only), its output is permanent in the
+config, it was never re-run, and `setup_mirrors.py` is now the sole «⚜️ Цитадель»
+generator. Earlier passes' references to the file are historical.
+
+Fixed along the way: `_common.fetch_all_topics` dropped `ForumTopicDeleted`
+tombstones (crashed callers on `.title`) and now pages from the last non-deleted
+topic; `setup_mirrors._sync_forum_topics` makes topic creation idempotent after a
+FloodWait abort; `classify_donor` excludes already-created «⚜️ Цитадель» recipients
+so they can't be re-picked as donors; the duplicate detector skips an empty
+`name_key` (bare-«Цитадель» titles no longer collapse into one false group).

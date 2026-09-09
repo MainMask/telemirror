@@ -62,8 +62,9 @@ filters:
 # a `broadcast_targets:` list of specific channels/topics.
 broadcast_channel: -1003926294676
 
-# Mirror directions — сгенерировано skylon_set/setup_citadel.py:
-#   доноры «O Λ И M П» / «🪐» → получатели «⚜️ Цитадель», топик→топик по названию.
+# Mirror directions — доноры → получатели «⚜️ Цитадель», топик→топик по названию.
+#   Пачка 1: «O Λ И M П» / «🪐» / GRIND (собрана по id-парам, генератор удалён).
+#   Пачка 2 (ниже): «🏴‍☠️ DÈ SKLAD», генератор skylon_set/setup_mirrors.py.
 #   Каждая директория тянет всю историю донора при старте (past_mode: full_history).
 directions:
 - from:
