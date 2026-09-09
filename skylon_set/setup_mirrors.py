@@ -440,8 +440,11 @@ async def step_verify(client):
     groups: dict[str, list] = defaultdict(list)
     for dlg in dialogs:
         title = dlg.title or ""
-        if "Цитадель" in title and not title.startswith("[ДУБЛЬ]"):
-            groups[name_key(title)].append(dlg)
+        key = name_key(title)
+        # пустой ключ = заголовок ровно «Цитадель» (бренд вырезан целиком):
+        # такие каналы схлопнулись бы в одну ложную группу
+        if key and "Цитадель" in title and not title.startswith("[ДУБЛЬ]"):
+            groups[key].append(dlg)
 
     extras = []
     any_dupe = False
