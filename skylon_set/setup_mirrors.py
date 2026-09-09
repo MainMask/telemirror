@@ -24,7 +24,7 @@ from telethon.tl.functions.messages import (
 )
 from telethon.tl.types import ChatPhotoEmpty, InputChatUploadedPhoto
 
-from skylon_set._common import entity_type, make_client, safe_call
+from skylon_set._common import entity_type, fetch_all_topics, make_client, safe_call
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / ".configs" / "mirror.config.yml"
 
@@ -215,11 +215,9 @@ async def step_configure(client):
     async def fetch_topics(entity) -> dict:
         eid = entity.id
         if eid not in topic_cache:
-            result = await client(GetForumTopicsRequest(
-                peer=entity, offset_date=0, offset_id=0, offset_topic=0, limit=100
-            ))
-            topic_cache[eid] = {t.id: t for t in result.topics}
-            await asyncio.sleep(0.3)
+            topic_cache[eid] = {
+                t.id: t for t in await fetch_all_topics(client, entity)
+            }
         return topic_cache[eid]
 
     for donor in donors:
@@ -449,18 +447,13 @@ async def step_build_config(client):
                 print(f"OK (супергруппа): '{donor.title}' → '{rec.title}'")
                 continue
 
-            d_result = await client(GetForumTopicsRequest(
-                peer=e, offset_date=0, offset_id=0, offset_topic=0, limit=100
-            ))
-            r_result = await client(GetForumTopicsRequest(
-                peer=r_e, offset_date=0, offset_id=0, offset_topic=0, limit=100
-            ))
-            await asyncio.sleep(0.3)
+            d_topics = await fetch_all_topics(client, e)
+            r_topics = await fetch_all_topics(client, r_e)
 
-            r_by_title = {t.title: t for t in r_result.topics}
-            r_general  = next((t for t in r_result.topics if t.id == 1), None)
+            r_by_title = {t.title: t for t in r_topics}
+            r_general  = next((t for t in r_topics if t.id == 1), None)
 
-            for d_topic in d_result.topics:
+            for d_topic in d_topics:
                 if d_topic.id == 1:
                     r_topic = r_general
                 else:
@@ -514,11 +507,9 @@ async def step_final_verify(client):
     async def get_topics(chat_id: int) -> dict:
         if chat_id not in topic_cache:
             e = await get_entity(chat_id)
-            result = await client(GetForumTopicsRequest(
-                peer=e, offset_date=0, offset_id=0, offset_topic=0, limit=100
-            ))
-            topic_cache[chat_id] = {t.id: t for t in result.topics}
-            await asyncio.sleep(0.3)
+            topic_cache[chat_id] = {
+                t.id: t for t in await fetch_all_topics(client, e)
+            }
         return topic_cache[chat_id]
 
     channel_dirs = [d for d in directions if "#" not in str(d["from"][0])]

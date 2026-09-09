@@ -39,14 +39,15 @@ except Exception:
     print("Failed reading .env")
     raise
 
-from telethon import errors, utils
+from telethon import errors
 from telethon.tl import types
 from telethon.tl.functions.messages import SearchRequest, UpdatePinnedMessageRequest
 from telethon.tl.types import InputMessagesFilterPinned
 
 from telemirror.misc.links import private_message_link
+from telemirror.misc.log_setup import setup_stdout_logger
 from telemirror.storage import MirrorMessage, PostgresDatabase
-from skylon_set._common import configure_logging, make_client, safe_call
+from skylon_set._common import open_client, safe_call
 
 
 # ── Значения ─────────────────────────────────────────────────────────────────
@@ -346,58 +347,48 @@ async def _run(logger: logging.Logger, args: argparse.Namespace) -> None:
     logger.info(f"Пар для синхронизации: {len(pairs)}")
 
     db = await PostgresDatabase(connection_string=DB_URL)
-    client = make_client(flood_sleep_threshold=60)
-    client.parse_mode = "markdown"
-    await client.connect()
-
     try:
-        me = await client.get_me()
-        if me is None:
-            raise RuntimeError(
-                "Нет авторизации. Запустите login.py для получения SESSION_STRING."
-            )
-        at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
-        logger.info(f"Вошли как {utils.get_display_name(me)}{at_username}")
-
-        # raw SearchRequest требует резолва peer из сессии — прогреваем кэш.
-        peer_ids = {p.donor_id for p in pairs} | {p.recipient_id for p in pairs}
-        for cid in peer_ids:
-            await safe_call(
-                client, lambda c=cid: client.get_entity(c), skip_errors=(ValueError,)
-            )
-
-        totals = PairSummary(0, 0)
-        for pair in pairs:
-            try:
-                s = await sync_pair(
-                    client,
-                    db,
-                    pair,
-                    reconcile=not args.additive,
-                    allow_clear=args.allow_clear,
-                    max_pins=args.max_pins,
-                    thorough=args.thorough,
-                    dry_run=args.dry_run,
-                    logger=logger,
+        async with open_client(
+            logger, warn_main_running=False, flood_sleep_threshold=60
+        ) as (client, _me):
+            # raw SearchRequest требует резолва peer из сессии — прогреваем кэш.
+            peer_ids = {p.donor_id for p in pairs} | {p.recipient_id for p in pairs}
+            for cid in peer_ids:
+                await safe_call(
+                    client, lambda c=cid: client.get_entity(c), skip_errors=(ValueError,)
                 )
-            except Exception as e:
-                logger.error(
-                    f"[{pair.donor_id}→{pair.recipient_id}] ошибка: "
-                    f"{type(e).__name__}: {e}"
-                )
-                continue
-            totals.desired += s.desired
-            totals.pinned += s.pinned
-            totals.unpinned += s.unpinned
-            totals.skipped_no_binding += s.skipped_no_binding
 
-        suffix = " (dry-run)" if args.dry_run else ""
-        logger.info(
-            f"Итого: desired={totals.desired} pinned=+{totals.pinned} "
-            f"unpinned=-{totals.unpinned} no-binding={totals.skipped_no_binding}{suffix}"
-        )
+            totals = PairSummary(0, 0)
+            for pair in pairs:
+                try:
+                    s = await sync_pair(
+                        client,
+                        db,
+                        pair,
+                        reconcile=not args.additive,
+                        allow_clear=args.allow_clear,
+                        max_pins=args.max_pins,
+                        thorough=args.thorough,
+                        dry_run=args.dry_run,
+                        logger=logger,
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"[{pair.donor_id}→{pair.recipient_id}] ошибка: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    continue
+                totals.desired += s.desired
+                totals.pinned += s.pinned
+                totals.unpinned += s.unpinned
+                totals.skipped_no_binding += s.skipped_no_binding
+
+            suffix = " (dry-run)" if args.dry_run else ""
+            logger.info(
+                f"Итого: desired={totals.desired} pinned=+{totals.pinned} "
+                f"unpinned=-{totals.unpinned} no-binding={totals.skipped_no_binding}{suffix}"
+            )
     finally:
-        await client.disconnect()
         await db.close()
 
 
@@ -436,7 +427,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logger = configure_logging("sync_pins", LOG_LEVEL)
+    logger = setup_stdout_logger("sync_pins", LOG_LEVEL)
     try:
         asyncio.run(_run(logger, args))
     except KeyboardInterrupt:

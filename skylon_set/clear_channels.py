@@ -25,21 +25,15 @@ except Exception:
     print("Failed reading .env")
     raise
 
-import psycopg
-from telethon import TelegramClient, errors, utils
+from telethon import TelegramClient
 from telethon.tl.functions.channels import DeleteHistoryRequest
 
-from skylon_set._common import configure_logging, make_client
+from telemirror.misc.log_setup import setup_stdout_logger
+from telemirror.misc.topics import topic_id_of
+from telemirror.storage import PostgresDatabase
+from skylon_set._common import open_client, safe_call
 
-GENERAL_TOPIC_ID = 1
 DELETE_BATCH = 100
-
-
-def _get_msg_topic(msg) -> int:
-    """topic_id сообщения (та же логика, что EventProcessor._matches_from_topic)."""
-    if msg.reply_to and msg.reply_to.forum_topic:
-        return msg.reply_to.reply_to_top_id or msg.reply_to.reply_to_msg_id
-    return GENERAL_TOPIC_ID
 
 
 def collect_targets(chat_mapping) -> Dict[int, Set[Optional[int]]]:
@@ -61,34 +55,35 @@ def channels_for_full_clear(targets: Dict[int, Set[Optional[int]]]) -> list:
 async def purge(
     client: TelegramClient,
     channel_id: int,
-    topic_id: Optional[int],
+    topic_ids: Set[int],
     dry_run: bool,
     logger: logging.Logger,
 ) -> int:
-    """Удаляет сообщения в канале (или конкретном топике). Возвращает кол-во удалённых."""
-    label = f"{channel_id}#{topic_id}" if topic_id is not None else str(channel_id)
+    """Удаляет сообщения указанных топиков канала за один проход по истории.
+
+    Раньше вызывалась по разу на каждый топик — K полных проходов по истории
+    канала; теперь один проход маршрутизирует сообщения по нужным топикам.
+    """
+    label = f"{channel_id} топики {sorted(topic_ids)}"
     deleted = 0
-    batch = []
+    batch: list = []
 
     async def flush():
         nonlocal deleted
         if not batch:
             return
         if not dry_run:
-            while True:
-                try:
-                    await client.delete_messages(channel_id, batch)
-                    break
-                except errors.FloodWaitError as e:
-                    logger.warning(f"[{label}] FloodWait {e.seconds}s, ждём...")
-                    await asyncio.sleep(e.seconds)
+            await safe_call(
+                client,
+                lambda ids=list(batch): client.delete_messages(channel_id, ids),
+            )
         deleted += len(batch)
         batch.clear()
 
     async for msg in client.iter_messages(channel_id):
         if msg.action is not None:  # MessageService (channel created, pin, etc.) — skip
             continue
-        if topic_id is not None and _get_msg_topic(msg) != topic_id:
+        if topic_id_of(msg) not in topic_ids:
             continue
         batch.append(msg.id)
         if len(batch) >= DELETE_BATCH:
@@ -101,64 +96,40 @@ async def purge(
     return deleted
 
 
-async def _reset_checkpoints(
+async def _reset_db_state(
     cleared_targets: Dict[int, Set[Optional[int]]],
     dry_run: bool,
     logger: logging.Logger,
 ) -> None:
-    """Сбрасывает past_mode чекпоинты для очищенных целевых каналов."""
+    """Сбрасывает past_mode чекпоинты и записи binding_id очищенных целевых каналов."""
     pairs = [
         (src, tgt)
         for src, tgt_map in CHAT_MAPPING.items()
         for tgt in tgt_map
         if tgt in cleared_targets
     ]
-    if not pairs:
-        return
+    target_ids = list(cleared_targets)
 
     if dry_run:
-        logger.info(f"(dry-run) Было бы сброшено {len(pairs)} чекпоинт(ов): {pairs}")
+        logger.info(
+            f"(dry-run) Было бы сброшено {len(pairs)} чекпоинт(ов) и очищен "
+            f"binding_id для {len(target_ids)} канала(ов)"
+        )
         return
 
     if USE_MEMORY_DB:
-        return  # in-memory чекпоинты не переживают перезапуск
+        return  # in-memory состояние не переживает перезапуск
 
-    async with await psycopg.AsyncConnection.connect(DB_URL) as conn:
-        async with conn.cursor() as cur:
-            for src, tgt in pairs:
-                await cur.execute(
-                    "DELETE FROM past_mode_checkpoint "
-                    "WHERE source_channel = %s AND target_channel = %s",
-                    (src, tgt),
-                )
-                logger.info(f"[checkpoint] сброшен: {src}→{tgt}")
-
-
-async def _clear_bindings(
-    cleared_targets: Dict[int, Set[Optional[int]]],
-    dry_run: bool,
-    logger: logging.Logger,
-) -> None:
-    """Удаляет записи binding_id для очищенных целевых каналов."""
-    target_ids = list(cleared_targets.keys())
-    if not target_ids:
-        return
-
-    if dry_run:
-        logger.info(f"(dry-run) Было бы очищено binding_id для {len(target_ids)} канала(ов): {target_ids}")
-        return
-
-    if USE_MEMORY_DB:
-        return
-
-    async with await psycopg.AsyncConnection.connect(DB_URL) as conn:
-        async with conn.cursor() as cur:
-            for tgt in target_ids:
-                await cur.execute(
-                    "DELETE FROM binding_id WHERE mirror_channel = %s",
-                    (tgt,),
-                )
-                logger.info(f"[binding_id] очищен: {tgt}")
+    db = await PostgresDatabase(connection_string=DB_URL)
+    try:
+        for src, tgt in pairs:
+            await db.delete_past_mode_checkpoint(src, tgt)
+            logger.info(f"[checkpoint] сброшен: {src}→{tgt}")
+        for tgt in target_ids:
+            await db.delete_bindings_for_mirror(tgt)
+            logger.info(f"[binding_id] очищен: {tgt}")
+    finally:
+        await db.close()
 
 
 async def _run(logger: logging.Logger, dry_run: bool) -> None:
@@ -172,19 +143,22 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
         logger.warning("CHAT_MAPPING пуст — нечего очищать.")
         return
 
-    # Строим список задач: если None в topic_ids — чистим весь канал (одна задача без фильтра)
-    tasks = []
-    for channel_id, topic_ids in targets.items():
-        if None in topic_ids:
-            tasks.append((channel_id, None))
-        else:
-            for topic_id in sorted(topic_ids):
-                tasks.append((channel_id, topic_id))
+    # Каналы без топик-scoping чистит DeleteHistory целиком — по истории их не
+    # сканируем. Остальные — один проход на канал по множеству их топиков.
+    full_clear = set(channels_for_full_clear(targets))
+    topic_only = {
+        channel_id: {t for t in topic_ids if t is not None}
+        for channel_id, topic_ids in targets.items()
+        if channel_id not in full_clear
+    }
 
-    logger.info(f"Целей для очистки: {len(tasks)}")
-    for channel_id, topic_id in tasks:
-        label = f"{channel_id}#{topic_id}" if topic_id is not None else str(channel_id)
-        logger.info(f"  {label}")
+    logger.info(
+        f"Целей: {len(topic_only)} топик-scoped + {len(full_clear)} полная очистка"
+    )
+    for channel_id, tids in topic_only.items():
+        logger.info(f"  {channel_id} топики {sorted(tids)}")
+    for channel_id in full_clear:
+        logger.info(f"  {channel_id} (DeleteHistory)")
 
     if not dry_run:
         answer = input("\nПродолжить удаление? [y/N] ").strip().lower()
@@ -192,48 +166,34 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
             logger.info("Отменено.")
             return
 
-    client = make_client(flood_sleep_threshold=60)
-    client.parse_mode = "markdown"
-    await client.connect()
-
-    me = await client.get_me()
-    if me is None:
-        raise RuntimeError("Нет авторизации. Запустите login.py для получения SESSION_STRING.")
-    at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
-    logger.info(f"Вошли как {utils.get_display_name(me)}{at_username}")
-
     total = 0
-    try:
-        for channel_id, topic_id in tasks:
+    async with open_client(
+        logger, warn_main_running=False, flood_sleep_threshold=60
+    ) as (client, _me):
+        for channel_id, tids in topic_only.items():
             try:
-                total += await purge(client, channel_id, topic_id, dry_run, logger)
+                total += await purge(client, channel_id, tids, dry_run, logger)
             except Exception as e:
-                label = f"{channel_id}#{topic_id}" if topic_id is not None else str(channel_id)
-                logger.error(f"[{label}] Ошибка: {e}")
+                logger.error(f"[{channel_id}] Ошибка: {e}")
 
-        # DeleteHistory очищает канал целиком — вызываем только для каналов без
-        # топик-scoping в конфиге; для остальных историю уже почистил per-topic purge.
-        full_clear_channels = channels_for_full_clear(targets)
         if dry_run:
             logger.info(
-                f"(dry-run) Было бы вызвано DeleteHistory для {len(full_clear_channels)} "
-                f"канала(ов) без топик-scoping"
+                f"(dry-run) Было бы вызвано DeleteHistory для {len(full_clear)} канала(ов)"
             )
         else:
-            for channel_id in full_clear_channels:
+            for channel_id in full_clear:
                 try:
-                    await client(DeleteHistoryRequest(channel=channel_id, max_id=0, for_everyone=True))
+                    await client(DeleteHistoryRequest(
+                        channel=channel_id, max_id=0, for_everyone=True
+                    ))
                     logger.info(f"[{channel_id}] DeleteHistory выполнен")
                 except Exception as e:
                     logger.error(f"[{channel_id}] DeleteHistory ошибка: {e}")
 
-        await _reset_checkpoints(targets, dry_run, logger)
-        await _clear_bindings(targets, dry_run, logger)
-    finally:
-        await client.disconnect()
+        await _reset_db_state(targets, dry_run, logger)
 
     action = "Найдено (dry-run)" if dry_run else "Итого удалено"
-    logger.info(f"{action}: {total} сообщений во всех каналах.")
+    logger.info(f"{action}: {total} сообщений (топик-scoped каналы).")
 
 
 def main() -> None:
@@ -245,7 +205,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logger = configure_logging("purge_targets", LOG_LEVEL)
+    logger = setup_stdout_logger("purge_targets", LOG_LEVEL)
     try:
         asyncio.run(_run(logger, args.dry_run))
     except KeyboardInterrupt:

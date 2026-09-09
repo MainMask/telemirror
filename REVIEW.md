@@ -574,3 +574,96 @@ override, `album._HACK_DELAY`). Tests: 196 → 199.
   iterates full channel history client-side for topic-scoped targets — inherent
   to per-topic filtering, rare destructive op behind a `y/N` prompt.
 - P3 items from passes 1–8 remain documented trade-offs, not touched.
+
+---
+
+# Pass 10 — whole-project sweep + `skylon_set/` refactor (explicit request)
+
+Re-run of the pass-9 checklist (memory leaks / perf holes / dead code) plus, on
+explicit request, a systemic refactor of the operator scripts (which pass 9 only
+read, not optimised). Runtime memory/perf conclusions from pass 9 re-confirmed by
+an independent full read — no leaks, hot path clean. Tests: 199 → 206.
+`pyflakes` + `ruff` clean; `vulture` unchanged (only the `_patch/sending.py`
+`hints` false positive).
+
+## Fixed — runtime (`telemirror/`)
+
+- **P3 (perf)** `mirroring.EventProcessor._rewrite_links` / `_try_rewrite_tg_link`:
+  the per-link resolution (`database.get_messages` — a DB round-trip — plus, for
+  public links, `client.get_entity` — a network round-trip) ran once per fan-out
+  target even though the result depends only on `(url, fallback_link_url)`. A
+  broadcast message with an internal link cost N DB queries + N entity fetches for
+  N targets. Now `new_message` / `new_album` build a per-event `link_cache: dict`
+  and thread it through; the string/entity mutation stays per-copy, only the
+  resolution is memoised. Other callers (`past_mode._edit_links_pass`,
+  `_sync_broadcast_channel`) pass no cache → identical behaviour. Test:
+  `tests/test_link_rewrite_cache.py::test_link_resolution_is_cached_across_fanout`.
+- **P3 (perf)** `mirroring.EventProcessor._resolve_username_to_channel_id`: added
+  an instance-level `LRUCache[str, int](capacity=256)` so a `t.me/<username>` link
+  reused across messages is resolved once. Only successful resolutions are cached
+  (a miss may become resolvable later); capacity-bounded, staleness on username
+  reassignment matches Telethon's own entity cache. Test:
+  `..._username_resolution_is_cached_on_the_processor`.
+- **cleanup** `EventProcessor.GENERAL_TOPIC_ID` + the branchy topic-of-message
+  logic in `_matches_from_topic` were duplicated in
+  `skylon_set/clear_channels.py`. Extracted to `telemirror/misc/topics.py`
+  (`topic_id_of`, `GENERAL_TOPIC_ID`); `_matches_from_topic` is now a two-liner.
+  All `tests/test_matches_from_topic.py` cases green (behaviour identical).
+
+## Added — `telemirror/storage.py` (Database protocol extension, approved)
+
+- `delete_past_mode_checkpoint(source, target)` and
+  `delete_bindings_for_mirror(mirror_channel)` on `Database` /
+  `InMemoryDatabase` / `PostgresDatabase`. Lets `clear_channels` reset DB state
+  through the pooled `PostgresDatabase` instead of opening two raw
+  `psycopg.AsyncConnection`s with per-row `DELETE` loops. Tests in
+  `tests/test_storage.py`.
+
+## Fixed — `skylon_set/`
+
+- **perf** `clear_channels.purge`: took a full `iter_messages` pass over the whole
+  channel history **per configured topic** (K passes for K topics), filtering
+  client-side. Now one pass routes every message to the right topic set. Also:
+  channels that get `DeleteHistory` (no topic scoping) are no longer streamed +
+  deleted message-by-message first — `DeleteHistory` alone wipes them. The inner
+  hand-rolled `FloodWait` loop is replaced by `safe_call`. Message set deleted is
+  unchanged (the total-count log for full-clear channels no longer includes the
+  now-skipped streaming pass). Test:
+  `tests/test_clear_channels.py::test_purge_sweeps_history_once_and_routes_by_topic`.
+- **latent bug** `setup_mirrors.py` had three separate `GetForumTopicsRequest`
+  call sites with `limit=100` and **no pagination** — a forum with >100 topics was
+  silently truncated. Unified onto `skylon_set/_common.fetch_all_topics` (paginated,
+  ported from `setup_citadel.fetch_topics`, which was the one correct copy).
+  `setup_citadel` now imports it too. `step_create_pairs`' own
+  `GetForumTopicsRequest` (wrapped in `safe_call`, one-shot channel setup) is left
+  as-is — converting it would drop the retry wrapper. Test:
+  `tests/test_fetch_all_topics.py`.
+- **robustness** `rename_emoji.py` / `set_anonymous.py` disconnected the client
+  only on the happy paths — an exception (e.g. `safe_call` exhausting retries,
+  `input()` interrupted) leaked the connection. Both `main()` bodies are now
+  wrapped in `try/…/finally: disconnect()`. (Was pass-7 deferred P3.)
+- **dedup** New `skylon_set/_common.open_client` async context manager (connect +
+  `get_me` auth check + "logged in as" line + guaranteed disconnect + the
+  "stop main.py" warning), adopted by `clear_channels`, `setup_citadel`,
+  `sync_pins`. `_common.configure_logging` (a no-op wrapper over
+  `setup_stdout_logger`) removed; the three callers use `setup_stdout_logger`
+  directly.
+
+## Reviewed, no change — acknowledged trade-offs
+
+- `binding_id` has no `UNIQUE` constraint → a re-sync / double event can write
+  duplicate rows that then fan out into duplicate edits/deletes. Correctness, not
+  perf; adding the constraint to a live table with possible existing dupes is a
+  risky migration and a behaviour change. Left for a dedicated decision.
+- `FilterAction.FORCE_SEND` is half-wired (propagated by `CompositeMessageFilter`
+  / `_process_album`, but no filter returns it and `mirroring.py` treats it like a
+  normal send). Dead branch, but `FilterAction` is exported — not removed.
+- `Database.insert` / `Database.delete_messages` (single-row) are unused outside
+  tests but part of the public `Database` protocol — kept.
+- `setup_mirrors` running `get_dialogs()` once per full-cycle step — re-confirmed
+  intentional (pass 9): the dialog view legitimately changes between steps.
+- `sync_pins.sync_pair` materialises a channel pair's full `binding_id` history in
+  memory — released between pairs, inherent to the pin-diff; not touched.
+- `past_mode.py` still open-codes its own client bootstrap (own
+  `connection_retries` / `retry_delay` strategy) — deliberately not folded into
+  `open_client`.
