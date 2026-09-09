@@ -57,9 +57,9 @@ filters:
         - "@openfrm"
         - "openfrm"
 
-# Admin broadcast channel: its posts fan out to all 8 recipients configured in
-# `directions:` (every channel and every forum topic). To narrow the fan-out, add
-# a `broadcast_targets:` list of specific channels/topics.
+# Admin broadcast channel: its posts fan out to every recipient configured in
+# `directions:` (all 20 channels, every forum topic — ~199 targets). To narrow
+# the fan-out, add a `broadcast_targets:` list of specific channels/topics.
 broadcast_channel: -1003926294676
 
 # Mirror directions — доноры → получатели «⚜️ Цитадель», топик→топик по названию.
