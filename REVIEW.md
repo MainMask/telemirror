@@ -682,7 +682,11 @@ consumed only by `YAML_CONFIG_ENV=… python past_mode.py`).
 `skylon_set/setup_citadel.py` + `tests/test_setup_citadel.py` deleted: it was a
 one-shot for batch 1 (id-pair driven, print-only), its output is permanent in the
 config, it was never re-run, and `setup_mirrors.py` is now the sole «⚜️ Цитадель»
-generator. Earlier passes' references to the file are historical.
+generator. `skylon_set/rename_emoji.py` + `tests/test_rename_emoji.py` deleted
+too: it was the Archonum-era 🗝→⚜️ title normaliser, wholly coupled to the
+«Archonum» keyword (which the owner has fully retired) and a no-op on «⚜️ Цитадель»
+titles — `step_final_verify` covers recipient-title drift for the current batch.
+Earlier passes' references to both files are historical.
 
 Fixed along the way: `_common.fetch_all_topics` dropped `ForumTopicDeleted`
 tombstones (crashed callers on `.title`) and now pages from the last non-deleted
