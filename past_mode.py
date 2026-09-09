@@ -276,60 +276,64 @@ async def _edit_links_pass(
         )
 
         mirror_map = {m.original_id: m for m in mirrors}
-        try:
-            _ids = list(mirror_map.keys())
-            _BATCH = 100
-            src_messages = []
-            for _i in range(0, len(_ids), _BATCH):
-                src_messages.extend(
-                    await client.get_messages(source_id, ids=_ids[_i : _i + _BATCH])
-                )
-        except Exception as e:
-            logger.warning(f"{prefix}: не удалось получить сообщения batch: {e}")
-            continue
-
+        _ids = list(mirror_map.keys())
+        _BATCH = 100
         edited = 0
-        for src_msg in src_messages:
-            if not src_msg or not src_msg.entities:
-                continue
-            if not any(
-                isinstance(e, (types.MessageEntityTextUrl, types.MessageEntityUrl))
-                for e in src_msg.entities
-            ):
-                continue
-
-            mirror = mirror_map[src_msg.id]
-            msg_copy = processor.copy_message(src_msg)
-            entities_before = deepcopy(msg_copy.entities)
-            text_before = msg_copy.message
-            await processor._rewrite_links(msg_copy, source_id, cfg.fallback_link_url)
-
-            text_changed = msg_copy.message != text_before
-            url_changed = any(
-                getattr(a, "url", None) != getattr(b, "url", None)
-                for a, b in zip(
-                    msg_copy.entities or [], entities_before or [], strict=False
-                )
-            )
-            if not text_changed and not url_changed:
-                continue
-
+        # Stream the source messages batch by batch — for a full_history replay
+        # `mirrors` can be tens of thousands, and accumulating every Message
+        # object here just to iterate it once was a needless memory spike.
+        for _i in range(0, len(_ids), _BATCH):
             try:
-                await client.edit_message(
-                    entity=target_id,
-                    message=mirror.mirror_id,
-                    text=msg_copy.message,
-                    formatting_entities=msg_copy.entities,
+                src_batch = await client.get_messages(
+                    source_id, ids=_ids[_i : _i + _BATCH]
                 )
-                edited += 1
-                logger.info(f"{prefix}: исправлена ссылка в {mirror.original_id}→{mirror.mirror_id}")
-                if cfg.past_mode.send_delay:
-                    await asyncio.sleep(cfg.past_mode.send_delay)
             except Exception as e:
-                logger.warning(
-                    f"{prefix}: ошибка редактирования {mirror.mirror_id}: "
-                    f"{type(e).__name__}: {e}"
+                logger.warning(f"{prefix}: не удалось получить сообщения batch: {e}")
+                break
+
+            for src_msg in src_batch:
+                if not src_msg or not src_msg.entities:
+                    continue
+                if not any(
+                    isinstance(e, (types.MessageEntityTextUrl, types.MessageEntityUrl))
+                    for e in src_msg.entities
+                ):
+                    continue
+
+                mirror = mirror_map[src_msg.id]
+                msg_copy = processor.copy_message(src_msg)
+                entities_before = deepcopy(msg_copy.entities)
+                text_before = msg_copy.message
+                await processor._rewrite_links(
+                    msg_copy, source_id, cfg.fallback_link_url
                 )
+
+                text_changed = msg_copy.message != text_before
+                url_changed = any(
+                    getattr(a, "url", None) != getattr(b, "url", None)
+                    for a, b in zip(
+                        msg_copy.entities or [], entities_before or [], strict=False
+                    )
+                )
+                if not text_changed and not url_changed:
+                    continue
+
+                try:
+                    await client.edit_message(
+                        entity=target_id,
+                        message=mirror.mirror_id,
+                        text=msg_copy.message,
+                        formatting_entities=msg_copy.entities,
+                    )
+                    edited += 1
+                    logger.info(f"{prefix}: исправлена ссылка в {mirror.original_id}→{mirror.mirror_id}")
+                    if cfg.past_mode.send_delay:
+                        await asyncio.sleep(cfg.past_mode.send_delay)
+                except Exception as e:
+                    logger.warning(
+                        f"{prefix}: ошибка редактирования {mirror.mirror_id}: "
+                        f"{type(e).__name__}: {e}"
+                    )
 
         if edited:
             logger.info(f"{prefix}: исправлено {edited} сообщени(ий)")
