@@ -12,8 +12,16 @@ from tests.conftest import run
 class _Topic:
     def __init__(self, tid):
         self.id = tid
+        self.title = f"topic {tid}"
         self.top_message = tid
         self.date = 0
+
+
+class _Deleted:
+    """ForumTopicDeleted tombstone — carries only an id."""
+
+    def __init__(self, tid):
+        self.id = tid
 
 
 class _Page:
@@ -54,3 +62,11 @@ def test_single_page_when_under_cap():
     topics = run(common.fetch_all_topics(client, -100))
     assert len(topics) == 42
     assert client.calls == 1
+
+
+def test_drops_deleted_topic_tombstones():
+    client = _FakeClient.__new__(_FakeClient)
+    client._pages = [_Page([_Topic(1), _Deleted(2), _Topic(3)])]
+    client.calls = 0
+    topics = run(common.fetch_all_topics(client, -100))
+    assert [t.id for t in topics] == [1, 3]
