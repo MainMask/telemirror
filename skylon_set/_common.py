@@ -92,10 +92,13 @@ async def fetch_all_topics(client, peer) -> list:
                 limit=100,
             )
         )
-        out.extend(t for t in r.topics if getattr(t, "title", None) is not None)
+        real = [t for t in r.topics if getattr(t, "title", None) is not None]
+        out.extend(real)
         if len(r.topics) < 100:
             return out
-        last = r.topics[-1]
+        # курсор — по последнему НЕ удалённому топику страницы: у ForumTopicDeleted
+        # нет top_message/date, а нулевой курсор сбил бы пагинацию
+        last = real[-1] if real else r.topics[-1]
         off_t = last.id
         off_id = getattr(last, "top_message", 0) or 0
         off_d = getattr(last, "date", 0) or 0

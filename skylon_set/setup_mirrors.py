@@ -66,10 +66,11 @@ def show_menu() -> str:
 _DE_SKLAD_VARIANTS = ("DÈ SKLAD", "DÉ SKLAD", "DE SKLAD")
 
 _CITADEL_SUFFIX = "⚜️ Цитадель"
+_PIRATE_FLAG = "🏴‍☠️"
 
 # «🏴‍☠️ DÈ SKLAD» в хвосте заголовка (флаг и пробелы опциональны).
 _DONOR_TRAILER_RE = re.compile(
-    r"\s*(?:\U0001F3F4‍☠️\s*)?(?:"
+    r"\s*(?:" + re.escape(_PIRATE_FLAG) + r"\s*)?(?:"
     + "|".join(re.escape(v) for v in _DE_SKLAD_VARIANTS)
     + r")\s*$"
 )

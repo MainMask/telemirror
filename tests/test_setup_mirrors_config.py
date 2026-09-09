@@ -1,5 +1,6 @@
 """A8: build-config must preserve hand-maintained keys and back up the old file."""
 
+import pytest
 import yaml
 
 from skylon_set import setup_mirrors
@@ -77,8 +78,5 @@ def test_write_directions_merge_refuses_when_directions_not_last(tmp_path):
         "broadcast_channel: -100999\n",
         encoding="utf-8",
     )
-    try:
+    with pytest.raises(ValueError):
         setup_mirrors.write_directions(cfg, [{"from": [-9], "to": [-8]}], merge=True)
-        raise AssertionError("expected ValueError")
-    except ValueError:
-        pass
