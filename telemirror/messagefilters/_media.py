@@ -41,8 +41,14 @@ class MediaDownloadError(Exception):
     A filter re-raises it only under ``strict_media_mode`` (past_mode) so its
     retry wrapper re-runs from the checkpoint instead of committing a degraded
     mirror; the live mirror mirrors the original (un-watermarked / unrenamed)
-    rather than lose the message.
+    rather than lose the message. ``message_id`` is the source message that
+    could not be downloaded — past_mode uses it to skip past a permanently
+    stuck message instead of retrying forever.
     """
+
+    def __init__(self, *args, message_id: Optional[int] = None) -> None:
+        super().__init__(*args)
+        self.message_id = message_id
 
 
 async def download_media_with_retry(message: EventMessage, **kwargs):
@@ -68,7 +74,8 @@ async def download_media_with_retry(message: EventMessage, **kwargs):
             link = private_message_link(message.chat_id, message.id)
             if i == attempts - 1:
                 raise MediaDownloadError(
-                    f"{link}: download failed after {attempts} attempts ({e})"
+                    f"{link}: download failed after {attempts} attempts ({e})",
+                    message_id=message.id,
                 ) from e
             delay = _DOWNLOAD_RETRY_DELAYS[i]
             logger.warning(

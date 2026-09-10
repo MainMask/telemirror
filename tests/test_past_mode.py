@@ -221,19 +221,51 @@ def test_replay_with_retry_waits_out_media_download_error(monkeypatch):
     assert slept == [past_mode._MEDIA_RETRY_WAIT]
 
 
-def test_replay_with_retry_gives_up_after_media_retry_limit(monkeypatch):
-    """Endless MediaDownloadError with no progress → give up after the limit so
-    the process exits (visible) instead of hanging on one message forever."""
+def test_replay_with_retry_skips_stuck_message_after_limit(monkeypatch):
+    """A message that keeps failing to download past the limit is skipped:
+    checkpoint jumps past it, an alert is sent, the replay continues (no crash
+    loop, live mirror not held down for hours)."""
     attempts = []
+    notified = []
 
+    async def fake_sleep(seconds):
+        pass
+
+    async def fake_notify(client, src, mid, log):
+        notified.append(mid)
+
+    monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(past_mode, "_notify_skipped", fake_notify)
+
+    db = run(InMemoryDatabase())
+
+    async def stuck_then_done(client, database, source_id, target_id, cfgs, logger, total=None):
+        attempts.append(1)
+        if len(attempts) <= past_mode._MEDIA_RETRY_LIMIT + 1:
+            raise MediaDownloadError("t.me/c/1/77: exhausted", message_id=77)
+        return 0
+
+    monkeypatch.setattr(past_mode, "_replay_direction", stuck_then_done)
+
+    run(
+        past_mode._replay_with_retry(
+            object(), db, SRC, TGT,
+            [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG,
+        )
+    )
+    assert notified == [77]
+    assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 77
+
+
+def test_replay_with_retry_reraises_when_stuck_message_unknown(monkeypatch):
+    """No message_id on the error → can't skip → propagate (process exits)."""
     async def fake_sleep(seconds):
         pass
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
 
     async def always_failing(client, database, source_id, target_id, cfgs, logger, total=None):
-        attempts.append(1)
-        raise MediaDownloadError("t.me/c/1/2: exhausted")
+        raise MediaDownloadError("t.me/c/1/2: exhausted")  # no message_id
 
     monkeypatch.setattr(past_mode, "_replay_direction", always_failing)
 
@@ -244,7 +276,6 @@ def test_replay_with_retry_gives_up_after_media_retry_limit(monkeypatch):
                 [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG,
             )
         )
-    assert len(attempts) == past_mode._MEDIA_RETRY_LIMIT + 1
 
 
 def test_replay_resumes_from_checkpoint(monkeypatch):

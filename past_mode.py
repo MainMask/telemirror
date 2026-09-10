@@ -53,10 +53,11 @@ _LOG_EVERY = 25  # логировать прогресс каждые N сооб
 
 # MediaDownloadError = транзиентный сбой выдачи файлов Telegram, переживший
 # ретраи download_media_with_retry. Ждём и повторяем прогон с чекпоинта; после
-# _MEDIA_RETRY_LIMIT попыток подряд сдаёмся (пусть процесс упадёт и перезапустится
-# systemd — это заметно, в отличие от тихого зависания на одном сообщении).
+# _MEDIA_RETRY_LIMIT попыток подряд по одному сообщению — сдвигаем чекпоинт за
+# него, шлём алерт в TECH_CHANNEL и едем дальше (не крашимся в цикле рестартов
+# systemd, не держим live-зеркало остановленным часами).
 _MEDIA_RETRY_WAIT = 120  # секунд между повторами
-_MEDIA_RETRY_LIMIT = 10
+_MEDIA_RETRY_LIMIT = 5
 
 
 def _configure_logging(log_level: str) -> logging.Logger:
@@ -280,6 +281,24 @@ async def _replay_direction(
     return processed
 
 
+async def _notify_skipped(
+    client: TelegramClient, source_id: int, message_id: int, logger: logging.Logger
+) -> None:
+    """Tell TECH_CHANNEL that past_mode gave up on one message (Telegram couldn't
+    serve the file). Best effort — must not break the replay loop."""
+    if not TECH_CHANNEL:
+        return
+    link = private_message_link(source_id, message_id)
+    try:
+        await client.send_message(
+            TECH_CHANNEL,
+            f"⚠️ past_mode пропустил {link} — файл не скачался за все попытки. "
+            f"Домиррорь вручную после восстановления Telegram.",
+        )
+    except Exception as e:  # noqa: BLE001 - alert failure is not replay failure
+        logger.warning(f"не смог уведомить TECH_CHANNEL о пропуске: {e}")
+
+
 async def _replay_with_retry(
     client: TelegramClient,
     database: Database,
@@ -314,8 +333,17 @@ async def _replay_with_retry(
                 media_failure_checkpoint = checkpoint
             media_failures += 1
             if media_failures > _MEDIA_RETRY_LIMIT:
-                logger.error(f"{e} — {_MEDIA_RETRY_LIMIT} повторов подряд не помогли, сдаёмся")
-                raise
+                if e.message_id is None:
+                    raise  # can't skip what we can't name
+                logger.error(
+                    f"{e} — {_MEDIA_RETRY_LIMIT} повторов не помогли, "
+                    f"пропускаю сообщение {e.message_id} и еду дальше"
+                )
+                await _notify_skipped(client, source_id, e.message_id, logger)
+                await database.set_past_mode_checkpoint(source_id, target_id, e.message_id)
+                media_failures = 0
+                media_failure_checkpoint = e.message_id
+                continue
             logger.warning(
                 f"{e} — ждём {_MEDIA_RETRY_WAIT}s и повторяем с чекпоинта "
                 f"({media_failures}/{_MEDIA_RETRY_LIMIT})"
