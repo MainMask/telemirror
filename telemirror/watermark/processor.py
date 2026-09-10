@@ -17,6 +17,11 @@ from PIL import Image
 _DEFAULT_TEMPLATE = str(Path(__file__).parent / "reference_watermark.png")
 _DEFAULT_STAMP = str(Path(__file__).parent / "my_watermark.png")
 
+_X264_PRESETS = frozenset((
+    "ultrafast", "superfast", "veryfast", "faster", "fast",
+    "medium", "slow", "slower", "veryslow", "placebo",
+))
+
 logger = logging.getLogger(__name__)
 
 _template_cache: dict[
@@ -47,14 +52,19 @@ class WatermarkConfig:
     stamp_watermark_path: str = _DEFAULT_STAMP
     stamp_opacity: float = 0.55
     stamp_scale: float = 0.35
+    # Videos longer than this are forwarded as-is (no re-encode, no stamp).
+    # 0 disables the limit. libx264 params for the ones that are stamped:
+    stamp_video_max_duration_s: float = 300.0
+    stamp_video_preset: str = "veryfast"
+    stamp_video_crf: int = 18
 
     def __post_init__(self) -> None:
         # YAML values arrive as strings; coerce so they never reach an ffmpeg
         # filtergraph or a numpy call verbatim.
         for field in ("match_threshold", "scale_min", "scale_max",
-                      "stamp_opacity", "stamp_scale"):
+                      "stamp_opacity", "stamp_scale", "stamp_video_max_duration_s"):
             object.__setattr__(self, field, float(getattr(self, field)))
-        for field in ("scale_steps", "inpaint_dilate_px"):
+        for field in ("scale_steps", "inpaint_dilate_px", "stamp_video_crf"):
             object.__setattr__(self, field, int(getattr(self, field)))
         for field in ("remove_watermark", "stamp_watermark"):
             value = getattr(self, field)
@@ -63,6 +73,12 @@ class WatermarkConfig:
                     self, field,
                     value.strip().lower() not in ("", "0", "false", "no"),
                 )
+        # A typo'd preset would otherwise fail every single video at ffmpeg time.
+        if self.stamp_video_preset not in _X264_PRESETS:
+            raise ValueError(
+                f"stamp_video_preset={self.stamp_video_preset!r} is not an x264 "
+                f"preset ({', '.join(sorted(_X264_PRESETS))})"
+            )
 
 
 def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
@@ -288,6 +304,12 @@ def stamp_watermark_on_image(
     return out.getvalue()
 
 
+def _ffmpeg_timeout(duration_s: float) -> float:
+    """Time budget for a full re-encode: proportional to the clip length, with
+    slack. 300s floor; 3h ceiling to cap a stuck ffmpeg."""
+    return float(min(10800.0, max(300.0, duration_s * 4 + 120)))
+
+
 def stamp_watermark_on_video(
     video_path: str,
     config: WatermarkConfig,
@@ -296,11 +318,15 @@ def stamp_watermark_on_video(
     cap = cv2.VideoCapture(video_path)
     fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     fh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
     cap.release()
 
     if fw == 0 or fh == 0:
         logger.warning("Could not read video dimensions: %s", video_path)
         return False
+
+    duration = frames / fps if fps > 0 else 0.0
 
     wm_orig = _load_stamp(config.stamp_watermark_path)
     wm_w = int(fw * config.stamp_scale)
@@ -319,10 +345,16 @@ def stamp_watermark_on_video(
         "-i", video_path,
         "-i", config.stamp_watermark_path,
         "-filter_complex", filter_complex,
+        "-c:v", "libx264",
+        "-preset", config.stamp_video_preset,
+        "-crf", str(config.stamp_video_crf),
+        "-pix_fmt", "yuv420p",
         "-c:a", "copy",
         output_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, timeout=300, check=False)
+    proc = subprocess.run(
+        cmd, capture_output=True, timeout=_ffmpeg_timeout(duration), check=False
+    )
     if proc.returncode != 0:
         logger.error(
             "ffmpeg overlay failed (code %d): %s",

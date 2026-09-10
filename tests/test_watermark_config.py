@@ -17,17 +17,25 @@ def test_string_values_coerced():
         inpaint_dilate_px="4",
         stamp_opacity="0.6",
         stamp_scale="0.4",
+        stamp_video_max_duration_s="90",
+        stamp_video_crf="20",
     )
     assert (c.match_threshold, c.scale_min, c.scale_max) == (0.5, 0.3, 1.0)
     assert isinstance(c.scale_steps, int) and c.scale_steps == 20
     assert isinstance(c.inpaint_dilate_px, int) and c.inpaint_dilate_px == 4
     assert isinstance(c.stamp_opacity, float) and c.stamp_opacity == 0.6
+    assert isinstance(c.stamp_video_max_duration_s, float)
+    assert c.stamp_video_max_duration_s == 90.0
+    assert isinstance(c.stamp_video_crf, int) and c.stamp_video_crf == 20
 
 
 def test_defaults_still_valid():
     c = WatermarkConfig()
     assert isinstance(c.match_threshold, float)
     assert isinstance(c.scale_steps, int)
+    assert c.stamp_video_max_duration_s == 300.0
+    assert c.stamp_video_preset == "veryfast"
+    assert c.stamp_video_crf == 18
 
 
 def test_toggle_flags():

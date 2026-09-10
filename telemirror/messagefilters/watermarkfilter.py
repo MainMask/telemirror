@@ -78,17 +78,37 @@ class WatermarkRemovalFilter(MessageFilter):
             handle = await self._process_photo(message, config)
         elif isinstance(message.media, types.MessageMediaDocument):
             doc = message.media.document
-            is_video = isinstance(doc, types.Document) and any(
-                isinstance(a, types.DocumentAttributeVideo) for a in doc.attributes
-            )
-            if is_video and doc.size > UPLOAD_LIMIT_BYTES:
+            video_attr = None
+            if isinstance(doc, types.Document):
+                video_attr = next(
+                    (
+                        a
+                        for a in doc.attributes
+                        if isinstance(a, types.DocumentAttributeVideo)
+                    ),
+                    None,
+                )
+            max_duration = config.stamp_video_max_duration_s
+            if video_attr is not None and doc.size > UPLOAD_LIMIT_BYTES:
                 logger.info(
                     "WatermarkRemovalFilter: skipping %.2f GB video (chat_id=%s) — "
                     "exceeds the ~2GB re-upload limit; forwarded as-is",
                     doc.size / 1024**3,
                     message.chat_id,
                 )
-            elif is_video:
+            elif (
+                video_attr is not None
+                and max_duration > 0
+                and (video_attr.duration or 0) > max_duration
+            ):
+                logger.info(
+                    "WatermarkRemovalFilter: %.0fs video exceeds the %.0fs re-encode "
+                    "limit (chat_id=%s) — forwarded as-is without watermark",
+                    video_attr.duration,
+                    max_duration,
+                    message.chat_id,
+                )
+            elif video_attr is not None:
                 handle = await self._process_video(message, config)
 
         if handle is not None:

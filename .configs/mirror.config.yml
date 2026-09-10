@@ -37,9 +37,14 @@ filters:
   #    the source's watermark. Optional `channels: [-100..., -100...]` limits which
   #    sources are processed; omit to cover all. stamp_scale / stamp_opacity —
   #    0.35 / 0.55 defaults.
+  #    Videos longer than stamp_video_max_duration_s (seconds; 0 = no limit) are
+  #    forwarded untouched — stamping a video means a full re-encode, too slow for
+  #    long clips. The ones that are stamped use libx264 stamp_video_preset /
+  #    stamp_video_crf (veryfast / 18 — visually transparent, near-lossless).
   - WatermarkRemovalFilter:
       remove_watermark: false
       stamp_watermark: true
+      stamp_video_max_duration_s: 300
 
   # 4. Bypass Telegram's "restrict saving content" (noforwards) protection by
   #    re-uploading media as a fresh file. Placed after the cheap text-discard
