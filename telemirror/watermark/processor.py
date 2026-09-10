@@ -57,12 +57,19 @@ class WatermarkConfig:
     stamp_video_max_duration_s: float = 300.0
     stamp_video_preset: str = "veryfast"
     stamp_video_crf: int = 18
+    # A video whose predicted re-encode (estimate_stamp_encode_s) exceeds this
+    # wall-clock budget is forwarded as-is too. 0 disables the check.
+    stamp_video_max_encode_s: float = 180.0
+    # x264 encode throughput (preset above) relative to realtime at 1080p on the
+    # target host. Measured on a 1 vCPU EPYC box, veryfast/crf18 → ~0.73.
+    stamp_video_encode_realtime_ratio: float = 0.73
 
     def __post_init__(self) -> None:
         # YAML values arrive as strings; coerce so they never reach an ffmpeg
         # filtergraph or a numpy call verbatim.
         for field in ("match_threshold", "scale_min", "scale_max",
-                      "stamp_opacity", "stamp_scale", "stamp_video_max_duration_s"):
+                      "stamp_opacity", "stamp_scale", "stamp_video_max_duration_s",
+                      "stamp_video_max_encode_s", "stamp_video_encode_realtime_ratio"):
             object.__setattr__(self, field, float(getattr(self, field)))
         for field in ("scale_steps", "inpaint_dilate_px", "stamp_video_crf"):
             object.__setattr__(self, field, int(getattr(self, field)))
@@ -302,6 +309,17 @@ def stamp_watermark_on_image(
     out = io.BytesIO()
     img.convert("RGB").save(out, format="JPEG", quality=92)
     return out.getvalue()
+
+
+def estimate_stamp_encode_s(w: int, h: int, duration_s: float, ratio: float) -> float:
+    """Rough wall-clock estimate for the libx264 re-encode in
+    ``stamp_watermark_on_video``, scaled from a measured 1080p baseline (``ratio``
+    = encoder throughput ÷ realtime at 1080p on the target host). Frame rate is
+    assumed ~30fps — ``DocumentAttributeVideo`` carries none — so a 60fps clip is
+    under-estimated ~2×."""
+    if ratio <= 0 or w <= 0 or h <= 0 or duration_s <= 0:
+        return 0.0
+    return (w * h) / (1920 * 1080) * duration_s / ratio
 
 
 def _ffmpeg_timeout(duration_s: float) -> float:

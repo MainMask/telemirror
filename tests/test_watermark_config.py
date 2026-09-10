@@ -19,6 +19,8 @@ def test_string_values_coerced():
         stamp_scale="0.4",
         stamp_video_max_duration_s="90",
         stamp_video_crf="20",
+        stamp_video_max_encode_s="120",
+        stamp_video_encode_realtime_ratio="0.5",
     )
     assert (c.match_threshold, c.scale_min, c.scale_max) == (0.5, 0.3, 1.0)
     assert isinstance(c.scale_steps, int) and c.scale_steps == 20
@@ -27,6 +29,10 @@ def test_string_values_coerced():
     assert isinstance(c.stamp_video_max_duration_s, float)
     assert c.stamp_video_max_duration_s == 90.0
     assert isinstance(c.stamp_video_crf, int) and c.stamp_video_crf == 20
+    assert isinstance(c.stamp_video_max_encode_s, float)
+    assert c.stamp_video_max_encode_s == 120.0
+    assert isinstance(c.stamp_video_encode_realtime_ratio, float)
+    assert c.stamp_video_encode_realtime_ratio == 0.5
 
 
 def test_defaults_still_valid():
@@ -36,6 +42,8 @@ def test_defaults_still_valid():
     assert c.stamp_video_max_duration_s == 300.0
     assert c.stamp_video_preset == "veryfast"
     assert c.stamp_video_crf == 18
+    assert c.stamp_video_max_encode_s == 180.0
+    assert c.stamp_video_encode_realtime_ratio == 0.73
 
 
 def test_toggle_flags():

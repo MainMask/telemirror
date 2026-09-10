@@ -37,9 +37,13 @@ filters:
   #    the source's watermark. Optional `channels: [-100..., -100...]` limits which
   #    sources are processed; omit to cover all. stamp_scale / stamp_opacity —
   #    0.35 / 0.55 defaults.
-  #    Videos longer than stamp_video_max_duration_s (seconds; 0 = no limit) are
-  #    forwarded untouched — stamping a video means a full re-encode, too slow for
-  #    long clips. The ones that are stamped use libx264 stamp_video_preset /
+  #    Videos are forwarded untouched (no stamp) when longer than
+  #    stamp_video_max_duration_s (seconds; 0 = no limit) OR when the predicted
+  #    re-encode exceeds stamp_video_max_encode_s seconds — estimated from
+  #    resolution × duration against stamp_video_encode_realtime_ratio (x264
+  #    throughput vs realtime at 1080p on this host; ~0.73 on 1 vCPU, raise it on
+  #    faster hardware). Stamping a video means a full re-encode, too slow for
+  #    long/large clips. The ones that are stamped use libx264 stamp_video_preset /
   #    stamp_video_crf (veryfast / 18 — visually transparent, near-lossless).
   - WatermarkRemovalFilter:
       remove_watermark: false
