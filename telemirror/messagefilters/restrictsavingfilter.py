@@ -10,6 +10,7 @@ from ..hints import EventLike, EventMessage
 from ._media import (
     UPLOAD_LIMIT_BYTES,
     ReuploadCache,
+    download_media_with_retry,
     downloaded_tempfile,
     filename_of,
     source_media_id,
@@ -89,9 +90,7 @@ class RestrictSavingContentBypassFilter(MessageFilter):
         return FilterResult(FilterAction.CONTINUE, message)
 
     async def _process_photo(self, message: EventMessage):
-        photo_bytes: bytes = await message._client.download_media(
-            message=message, file=bytes
-        )
+        photo_bytes: bytes = await download_media_with_retry(message, file=bytes)
         return await message._client.upload_file(photo_bytes, file_name="photo.jpg")
 
     async def _process_document(self, message: EventMessage):
