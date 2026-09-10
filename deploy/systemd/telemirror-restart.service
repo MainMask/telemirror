@@ -1,0 +1,8 @@
+[Unit]
+Description=telemirror — плановый чистый рестарт живого зеркала
+# Не трогать, если бэкофилл истории сейчас держит зеркало остановленным.
+After=telemirror.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl try-restart telemirror.service

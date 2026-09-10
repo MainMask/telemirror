@@ -1,0 +1,10 @@
+[Unit]
+Description=telemirror — ежесуточный чистый рестарт живого зеркала
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

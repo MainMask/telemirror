@@ -1,11 +1,12 @@
 import asyncio
 import logging
 import re
-from typing import Dict, List, Optional, Union
+import time
+from typing import Awaitable, Callable, Dict, List, Optional, Union
 
 from telethon import TelegramClient, errors, events, utils
 from telethon.sessions import StringSession
-from telethon.tl import types
+from telethon.tl import functions, types
 
 from config import DirectionConfig
 from telemirror._patch import (
@@ -17,6 +18,7 @@ from telemirror._patch import (
 from telemirror.hints import EventAlbumMessage, EventLike, EventMessage
 from telemirror.messagefilters import MediaDownloadError, strict_media_mode
 from telemirror.messagefilters.base import FilterAction
+from telemirror.misc import sdnotify
 from telemirror.misc.links import private_message_link
 from telemirror.misc.lrucache import LRUCache
 from telemirror.misc.message_groups import iter_message_groups
@@ -1015,6 +1017,12 @@ class EventHandlers:
 
 class Mirroring:
     CONNECT_TIMEOUT_SEC = 30
+    # Watchdog: how long telethon may stay disconnected (auto-reconnecting)
+    # before we stop feeding systemd's watchdog and let it restart us fresh.
+    WATCHDOG_DISCONNECT_GRACE_SEC = 1800
+    # Bound on a single liveness round-trip; longer than this = the request
+    # path is wedged, not slow.
+    WATCHDOG_PROBE_TIMEOUT_SEC = 30
 
     def __init__(
         self: "Mirroring",
@@ -1172,6 +1180,7 @@ class Mirroring:
         )
 
     async def __connect_client(self: "Mirroring", client: TelegramClient) -> None:
+        watchdog_task: Optional[asyncio.Task] = None
         try:
             if not client.is_connected():
                 # Avoid `client.connect` hang forever:
@@ -1227,6 +1236,14 @@ class Mirroring:
                     TelegramLogHandler(client, self._tech_channel)
                 )
 
+            # Auth confirmed — the service is up. Tell systemd (Type=notify) now,
+            # before the potentially slow broadcast sync, and start pinging the
+            # watchdog so a later hang gets us killed + restarted.
+            sdnotify.notify("READY=1")
+            watchdog_task = asyncio.create_task(
+                sdnotify.watchdog_loop(self.__watchdog_probe(client))
+            )
+
             if self._broadcast_channel:
                 try:
                     await self._sync_broadcast_channel(client)
@@ -1262,7 +1279,53 @@ class Mirroring:
                 "try to get a new session key (run login.py)"
             )
         finally:
+            if watchdog_task is not None:
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
+            sdnotify.notify("STOPPING=1")
             await client.disconnect()
+
+    def __watchdog_probe(
+        self: "Mirroring", client: TelegramClient
+    ) -> Callable[[], Awaitable[bool]]:
+        """Liveness check for ``sdnotify.watchdog_loop``. Healthy =
+        connected *and* a bounded ``updates.GetState`` round-trip succeeds
+        (catches a wedged request path a bare ``is_connected()`` would miss).
+        While disconnected we stay 'healthy' for ``WATCHDOG_DISCONNECT_GRACE_SEC``
+        so telethon's auto-reconnect gets a chance before a restart."""
+        disconnected_since: Optional[float] = None
+
+        async def probe() -> bool:
+            nonlocal disconnected_since
+            if client.is_connected():
+                disconnected_since = None
+                try:
+                    await asyncio.wait_for(
+                        client(functions.updates.GetStateRequest()),
+                        timeout=self.WATCHDOG_PROBE_TIMEOUT_SEC,
+                    )
+                except Exception as e:  # noqa: BLE001 - any failure = not healthy
+                    self._logger.warning(
+                        "watchdog: GetState probe failed (%s: %s)",
+                        type(e).__name__, e,
+                    )
+                    return False
+                return True
+            now = time.monotonic()
+            if disconnected_since is None:
+                disconnected_since = now
+            within_grace = now - disconnected_since < self.WATCHDOG_DISCONNECT_GRACE_SEC
+            if not within_grace:
+                self._logger.error(
+                    "watchdog: disconnected > %ds, giving up on this process",
+                    self.WATCHDOG_DISCONNECT_GRACE_SEC,
+                )
+            return within_grace
+
+        return probe
 
 
 class Telemirror:
@@ -1306,6 +1369,11 @@ class Telemirror:
             system_version=api_system_version,
             app_version=api_app_version,
             flood_sleep_threshold=300,
+            # Keep auto-reconnecting through a long outage instead of exiting;
+            # the watchdog (Mirroring.WATCHDOG_DISCONNECT_GRACE_SEC) is what
+            # bounds how long we wait before a fresh-process restart.
+            connection_retries=1000,
+            retry_delay=5,
         )
         # Set up default parse mode as markdown
         recv_client.parse_mode = send_client.parse_mode = "markdown"
