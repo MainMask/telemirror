@@ -54,7 +54,8 @@ def test_flood_during_reupload_propagates():
         run(f._process_message(_photo_message(_FloodClient()), events.NewMessage.Event))
 
 
-def test_media_download_error_propagates_not_discarded():
+def test_media_download_error_propagates_when_strict(strict_media):
+    """past_mode: re-raise so the replay wrapper retries from the checkpoint."""
     f = RestrictSavingContentBypassFilter()
     with pytest.raises(MediaDownloadError):
         run(
@@ -62,6 +63,18 @@ def test_media_download_error_propagates_not_discarded():
                 _photo_message(_MediaDownloadErrorClient()), events.NewMessage.Event
             )
         )
+
+
+def test_media_download_error_discards_when_not_strict():
+    """Live: protected media can't be re-uploaded without the failed download —
+    nothing to mirror, so discard (can't degrade to the original here)."""
+    f = RestrictSavingContentBypassFilter()
+    action, _ = run(
+        f._process_message(
+            _photo_message(_MediaDownloadErrorClient()), events.NewMessage.Event
+        )
+    )
+    assert action is FilterAction.DISCARD
 
 
 def test_other_failure_discards():

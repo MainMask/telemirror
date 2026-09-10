@@ -13,6 +13,7 @@ from ._media import (
     ReuploadCache,
     downloaded_tempfile,
     filename_of,
+    strict_media_mode,
 )
 from .base import FilterAction, FilterResult, MessageFilter
 
@@ -134,7 +135,12 @@ class DocumentFilenameFilter(MessageFilter):
             # fan-out reuses it instead of re-uploading once per target.
             self._cache.put(doc.id, uploaded)
         except MediaDownloadError:
-            raise  # transient — let past_mode retry rather than mirror unrenamed
+            if strict_media_mode.get():
+                raise  # past_mode: keep the checkpoint put and retry the message
+            logger.warning(
+                "DocumentFilenameFilter: download failed, mirroring original name (%s)",
+                private_message_link(message.chat_id, message.id),
+            )
         except Exception:
             logger.exception(
                 "DocumentFilenameFilter: rename failed (%s), sending original",

@@ -20,6 +20,7 @@ from ._media import (
     ReuploadCache,
     download_media_with_retry,
     source_media_id,
+    strict_media_mode,
 )
 from .base import FilterAction, FilterResult, MessageFilter
 
@@ -175,7 +176,13 @@ class WatermarkRemovalFilter(MessageFilter):
                 return None
             return await message._client.upload_file(output, file_name="photo.jpg")
         except MediaDownloadError:
-            raise  # transient — let past_mode retry rather than mirror unprocessed
+            if strict_media_mode.get():
+                raise  # past_mode: keep the checkpoint put and retry the message
+            logger.warning(
+                "WatermarkRemovalFilter: download failed, mirroring original photo (chat_id=%s)",
+                message.chat_id,
+            )
+            return None
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: photo processing failed (chat_id=%s)", message.chat_id
@@ -215,7 +222,13 @@ class WatermarkRemovalFilter(MessageFilter):
                 return await message._client.upload_file(upload_path)
             return None
         except MediaDownloadError:
-            raise  # transient — let past_mode retry rather than mirror unprocessed
+            if strict_media_mode.get():
+                raise  # past_mode: keep the checkpoint put and retry the message
+            logger.warning(
+                "WatermarkRemovalFilter: download failed, mirroring original video (chat_id=%s)",
+                message.chat_id,
+            )
+            return None
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: video processing failed (chat_id=%s)", message.chat_id

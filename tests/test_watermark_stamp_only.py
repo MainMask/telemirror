@@ -144,16 +144,23 @@ def test_costly_video_forwarded_without_watermark(monkeypatch):
     assert isinstance(res.media, types.MessageMediaDocument)  # unchanged
 
 
-def test_media_download_error_propagates(monkeypatch):
+class _MDEClient(_Client):
+    async def download_media(self, message, file):
+        raise MediaDownloadError("t.me/c/1/2: exhausted")
+
+
+def test_media_download_error_propagates_when_strict(monkeypatch, strict_media):
     calls = _video_spies(monkeypatch)
-
-    class _MDEClient(_Client):
-        async def download_media(self, message, file):
-            raise MediaDownloadError("t.me/c/1/2: exhausted")
-
     with pytest.raises(MediaDownloadError):
         _run({"remove_watermark": False}, _video_message(_MDEClient()))
-    assert calls == {"remove": 0, "stamp": 0}  # nothing mirrored in degraded form
+    assert calls == {"remove": 0, "stamp": 0}
+
+
+def test_media_download_error_mirrors_original_when_not_strict(monkeypatch):
+    calls = _video_spies(monkeypatch)
+    _, res = _run({"remove_watermark": False}, _video_message(_MDEClient()))
+    assert calls == {"remove": 0, "stamp": 0}
+    assert isinstance(res.media, types.MessageMediaDocument)  # original, un-watermarked
 
 
 def test_cheap_hd_video_still_stamped(monkeypatch):

@@ -15,6 +15,7 @@ from ._media import (
     downloaded_tempfile,
     filename_of,
     source_media_id,
+    strict_media_mode,
 )
 from .base import FilterAction, FilterResult, MessageFilter
 
@@ -71,12 +72,22 @@ class RestrictSavingContentBypassFilter(MessageFilter):
                 new_media = await self._process_document(message)
             else:
                 new_media = None
-        except (errors.FloodWaitError, errors.FloodPremiumWaitError, MediaDownloadError):
-            # A >threshold flood or an exhausted transient download must reach
-            # past_mode's retry wrapper instead of becoming a silent DISCARD
-            # (checkpoint would advance past an un-mirrored message). Same
-            # contract as mirroring.py.
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+            # A >threshold flood must reach past_mode's retry wrapper instead of
+            # becoming a silent DISCARD (checkpoint would advance past an
+            # un-mirrored message). Same contract as mirroring.py.
             raise
+        except MediaDownloadError:
+            if strict_media_mode.get():
+                raise  # past_mode: retry from the checkpoint
+            # live: protected media is unusable without the download that just
+            # failed — there is nothing to mirror, so drop it (logged).
+            logger.warning(
+                "RestrictSavingContentBypassFilter: download failed, cannot bypass "
+                "protection (chat_id=%s) — discarding",
+                message.chat_id,
+            )
+            return FilterResult(FilterAction.DISCARD, message)
         except Exception:
             logger.exception(
                 "RestrictSavingContentBypassFilter: bypass failed (chat_id=%s)",

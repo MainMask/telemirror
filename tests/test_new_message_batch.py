@@ -117,31 +117,52 @@ class _MDEFilter:
         raise MediaDownloadError("t.me/c/1/2: exhausted")
 
 
-def _mde_processor(db, *, strict):
+def test_new_message_sets_strict_media_mode_from_flag():
+    """The per-message contextvar the media filters read mirrors the processor's
+    strict_media_errors flag."""
+    from telemirror.messagefilters import strict_media_mode
+
+    seen = []
+
+    class _Spy:
+        restricted_content_allowed = False
+
+        async def process(self, message, event_type):
+            seen.append(strict_media_mode.get())
+            raise MediaDownloadError("stop here")
+
+    cfg = DirectionConfig(disable_delete=False, disable_edit=False, filters=_Spy())
+    for flag in (True, False):
+        proc = EventProcessor(
+            chat_mapping={SOURCE: {TARGETS[0]: [cfg]}},
+            database=run(InMemoryDatabase()),
+            client=object(),
+            logger=logging.getLogger("test.ctx"),
+            strict_media_errors=flag,
+        )
+        try:
+            run(proc.new_message(SOURCE, make_message("hi", channel_id=1000), "link"))
+        except MediaDownloadError:
+            pass
+    assert seen == [True, False]
+
+
+def test_media_download_error_propagates_out_of_handle_exceptions():
+    """A filter that re-raises MediaDownloadError (strict_media_mode / past_mode)
+    reaches past_mode's retry wrapper — __handle_exceptions does not swallow it,
+    same as a >threshold FloodWait."""
     cfg = DirectionConfig(
         disable_delete=False, disable_edit=False, filters=_MDEFilter()
     )
-    return EventProcessor(
+    proc = EventProcessor(
         chat_mapping={SOURCE: {TARGETS[0]: [cfg]}},
-        database=db,
+        database=run(InMemoryDatabase()),
         client=object(),
         logger=logging.getLogger("test.mde"),
-        strict_media_errors=strict,
+        strict_media_errors=True,
     )
-
-
-def test_media_download_error_reraised_when_strict(monkeypatch):
-    """strict_media_errors=True (past_mode): __handle_exceptions re-raises so the
-    retry wrapper re-runs from the checkpoint instead of a degraded mirror."""
-    proc = _mde_processor(run(InMemoryDatabase()), strict=True)
     with pytest.raises(MediaDownloadError):
         run(proc.new_message(SOURCE, make_message("hi", channel_id=1000), "link"))
-
-
-def test_media_download_error_swallowed_when_not_strict():
-    """Default (live mirror): skipped and logged like any other filter failure."""
-    proc = _mde_processor(run(InMemoryDatabase()), strict=False)
-    run(proc.new_message(SOURCE, make_message("hi", channel_id=1000), "link"))
 
 
 def test_media_download_error_mid_fanout_persists_already_sent_targets(monkeypatch):

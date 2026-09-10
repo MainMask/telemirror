@@ -5,6 +5,7 @@ from telethon import events
 from telethon.tl import types
 
 from telemirror.messagefilters import MediaDownloadError
+from telemirror.messagefilters.base import FilterAction
 from telemirror.messagefilters.documentfilenamefilter import DocumentFilenameFilter
 from tests.conftest import make_message, run
 
@@ -49,14 +50,24 @@ def _doc_message(client):
     return msg
 
 
-def test_media_download_error_propagates_not_sent_unrenamed(monkeypatch):
-    """A transient download that outlived its retries must propagate so past_mode
-    retries — not be swallowed into mirroring the document under its old name."""
+class _MDEClient:
+    async def download_media(self, message, file):
+        raise MediaDownloadError("t.me/c/1/2: exhausted")
 
-    class _MDEClient:
-        async def download_media(self, message, file):
-            raise MediaDownloadError("t.me/c/1/2: exhausted")
 
+def test_media_download_error_propagates_when_strict(strict_media):
+    """past_mode: a download that outlived its retries propagates so the replay
+    wrapper retries — not swallowed into mirroring the old name."""
     f = DocumentFilenameFilter(suffix="@CitadelClan")
     with pytest.raises(MediaDownloadError):
         run(f._process_message(_doc_message(_MDEClient()), events.NewMessage.Event))
+
+
+def test_media_download_error_mirrors_original_when_not_strict():
+    """Live mirror: the document goes out under its original name rather than
+    being dropped."""
+    f = DocumentFilenameFilter(suffix="@CitadelClan")
+    msg = _doc_message(_MDEClient())
+    action, result = run(f._process_message(msg, events.NewMessage.Event))
+    assert action is FilterAction.CONTINUE
+    assert result.media is msg.media  # untouched original

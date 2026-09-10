@@ -15,7 +15,7 @@ from telemirror._patch import (
     set_album_event_timeout,
 )
 from telemirror.hints import EventAlbumMessage, EventLike, EventMessage
-from telemirror.messagefilters import MediaDownloadError
+from telemirror.messagefilters import MediaDownloadError, strict_media_mode
 from telemirror.messagefilters.base import FilterAction
 from telemirror.misc.links import private_message_link
 from telemirror.misc.lrucache import LRUCache
@@ -78,18 +78,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         async def wrapper(self: "EventProcessor", *args, **kw):
             try:
                 return await fn(self, *args, **kw)
-            except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-                # A >threshold FloodWait must reach past_mode's retry wrapper so
-                # the checkpoint isn't advanced past an un-sent message.
+            except (errors.FloodWaitError, errors.FloodPremiumWaitError, MediaDownloadError):
+                # >threshold FloodWait, or (past_mode only, via strict_media_mode)
+                # a media download that outlived its retries: reach past_mode's
+                # retry wrapper so the checkpoint isn't advanced past the message.
                 raise
-            except MediaDownloadError as e:
-                # A transient media download that outlived its retries. In
-                # past_mode re-raise so the retry wrapper re-runs from the
-                # checkpoint instead of committing a degraded/absent mirror; in
-                # live mode fall through and skip like any other filter failure.
-                if self._strict_media_errors:
-                    raise
-                self._logger.error(e, exc_info=True)
             except Exception as e:
                 self._logger.error(e, exc_info=True)
 
@@ -256,6 +249,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     async def new_message(
         self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
     ):
+        strict_media_mode.set(self._strict_media_errors)
         if message.action is not None:
             self._logger.info(
                 f"[New message]: {message_link} is a service message, skipping"
@@ -471,6 +465,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     async def new_album(
         self: "EventProcessor", chat_id: int, album: EventAlbumMessage, album_link: str
     ) -> None:
+        strict_media_mode.set(self._strict_media_errors)
         incoming_first_message: EventMessage = album[0]
         restricted_saving_content: bool = bool(
             incoming_first_message.chat and incoming_first_message.chat.noforwards
