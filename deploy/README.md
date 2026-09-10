@@ -23,6 +23,10 @@
   параметры совпадают с `.env`.
 - `.env` в корне репо заполнен (`API_ID`, `API_HASH`, `SESSION_STRING`,
   `DB_*`). `SESSION_STRING` берётся из `python login.py`.
+- Если сеть поднимается через systemd-networkd — включи
+  `systemctl enable systemd-networkd-wait-online.service`, иначе
+  `network-online.target` не блокирует старт (не критично: telethon
+  переподключается сам, `Restart=always` подстрахует).
 
 ## Установка
 
@@ -34,6 +38,10 @@ sudo deploy/bootstrap.sh
 Скрипт: увеличит swap, поставит симлинки юнитов в `/etc/systemd/system/`,
 положит cron-файл, сделает `daemon-reload`. Сервисы **не запускает** — это
 делается вручную ниже.
+
+Юниты — симлинки на репо, cron-файл — копия. Если правишь
+`deploy/cron.d/telemirror-tmp` — прогони `bootstrap.sh` ещё раз (или скопируй
+руками); если правишь юниты — хватит `git pull` + `systemctl daemon-reload`.
 
 ## Живое зеркало
 
