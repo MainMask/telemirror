@@ -287,6 +287,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         inserted: List[MirrorMessage] = []
         # Resolve each distinct t.me link once for the whole fan-out.
         link_cache: dict = {}
+        # Targets that already hold a mirror of this source message — skip them
+        # so a past_mode retry (or a re-delivered update) can't send a duplicate.
+        already_mirrored = {
+            m.mirror_channel
+            for m in await self._database.get_messages(message.id, chat_id)
+        }
 
         async def flush_inserted() -> None:
             if not inserted:
@@ -302,6 +308,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 )
 
         for outgoing_chat, configs in outgoing_chats.items():
+            if outgoing_chat in already_mirrored:
+                self._logger.debug(
+                    "[New message]: %s already mirrored to chat#%s, skip",
+                    message_link, outgoing_chat,
+                )
+                continue
             for config in configs:
                 if not self._matches_from_topic(config, message):
                     continue
@@ -493,8 +505,20 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         # Resolve each distinct t.me link once for the whole fan-out.
         link_cache: dict = {}
+        already_mirrored = {
+            m.mirror_channel
+            for m in await self._database.get_messages(
+                incoming_first_message.id, chat_id
+            )
+        }
 
         for outgoing_chat, configs in outgoing_chats.items():
+            if outgoing_chat in already_mirrored:
+                self._logger.debug(
+                    "[New album]: %s already mirrored to chat#%s, skip",
+                    album_link, outgoing_chat,
+                )
+                continue
             for config in configs:
                 if not self._matches_from_topic(config, incoming_first_message):
                     continue
@@ -1023,6 +1047,12 @@ class Mirroring:
     # Bound on a single liveness round-trip; longer than this = the request
     # path is wedged, not slow.
     WATCHDOG_PROBE_TIMEOUT_SEC = 30
+    # Consecutive failed round-trips on a live connection before we let systemd
+    # restart us — absorbs a lone dropped packet / brief DC hiccup.
+    WATCHDOG_PROBE_FAIL_STREAK = 3
+    # No update of any kind for this long (while otherwise healthy) → warn to the
+    # tech channel. Not a restart: a genuinely quiet feed looks the same.
+    WATCHDOG_SILENCE_WARN_SEC = 7200
 
     def __init__(
         self: "Mirroring",
@@ -1293,13 +1323,27 @@ class Mirroring:
     ) -> Callable[[], Awaitable[bool]]:
         """Liveness check for ``sdnotify.watchdog_loop``. Healthy =
         connected *and* a bounded ``updates.GetState`` round-trip succeeds
-        (catches a wedged request path a bare ``is_connected()`` would miss).
+        (catches a dead receive loop a bare ``is_connected()`` would miss). A
+        few round-trips may fail in a row (``WATCHDOG_PROBE_FAIL_STREAK``) and a
+        FloodWait counts as healthy — both are back-off situations, not hangs.
         While disconnected we stay 'healthy' for ``WATCHDOG_DISCONNECT_GRACE_SEC``
-        so telethon's auto-reconnect gets a chance before a restart."""
+        so telethon's auto-reconnect gets a chance before a restart.
+
+        A stalled update *dispatch* while requests still work can't be told from
+        a genuinely quiet feed, so long silence only warns (to the tech channel),
+        never restarts."""
         disconnected_since: Optional[float] = None
+        fail_streak = 0
+        last_silence_warn = 0.0
+        self._last_update_ts = time.monotonic()
+
+        async def _bump_last_update(_event) -> None:
+            self._last_update_ts = time.monotonic()
+
+        client.add_event_handler(_bump_last_update, events.Raw)
 
         async def probe() -> bool:
-            nonlocal disconnected_since
+            nonlocal disconnected_since, fail_streak, last_silence_warn
             if client.is_connected():
                 disconnected_since = None
                 try:
@@ -1307,12 +1351,29 @@ class Mirroring:
                         client(functions.updates.GetStateRequest()),
                         timeout=self.WATCHDOG_PROBE_TIMEOUT_SEC,
                     )
-                except Exception as e:  # noqa: BLE001 - any failure = not healthy
+                except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+                    self._logger.warning("watchdog: rate-limited (%ss), still healthy", e.seconds)
+                    fail_streak = 0
+                    return True
+                except Exception as e:  # noqa: BLE001 - transient until the streak runs out
+                    fail_streak += 1
                     self._logger.warning(
-                        "watchdog: GetState probe failed (%s: %s)",
+                        "watchdog: GetState probe failed %d/%d (%s: %s)",
+                        fail_streak, self.WATCHDOG_PROBE_FAIL_STREAK,
                         type(e).__name__, e,
                     )
-                    return False
+                    return fail_streak < self.WATCHDOG_PROBE_FAIL_STREAK
+                fail_streak = 0
+                silent_for = time.monotonic() - self._last_update_ts
+                if (
+                    silent_for > self.WATCHDOG_SILENCE_WARN_SEC
+                    and time.monotonic() - last_silence_warn > self.WATCHDOG_SILENCE_WARN_SEC
+                ):
+                    last_silence_warn = time.monotonic()
+                    self._logger.warning(
+                        "watchdog: no update in %.0f min — feed quiet or dispatch stalled",
+                        silent_for / 60,
+                    )
                 return True
             now = time.monotonic()
             if disconnected_since is None:

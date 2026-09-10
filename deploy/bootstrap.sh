@@ -21,7 +21,9 @@ for unit in \
     telemirror-past-courses.service \
     telemirror-alert@.service \
     telemirror-restart.service \
-    telemirror-restart.timer; do
+    telemirror-restart.timer \
+    telemirror-health.service \
+    telemirror-health.timer; do
     ln -sfn "$REPO_DIR/deploy/systemd/$unit" "/etc/systemd/system/$unit"
     echo "  /etc/systemd/system/$unit -> $REPO_DIR/deploy/systemd/$unit"
 done
@@ -45,10 +47,10 @@ install -m 644 -o root -g root \
 echo "  /etc/cron.d/telemirror-tmp"
 
 echo
-echo "== 5/5 daemon-reload + плановый рестарт =="
+echo "== 5/5 daemon-reload + таймеры =="
 systemctl daemon-reload
-systemctl enable --now telemirror-restart.timer
-echo "  telemirror-restart.timer включён и запущен"
+systemctl enable --now telemirror-restart.timer telemirror-health.timer
+echo "  telemirror-restart.timer, telemirror-health.timer включены и запущены"
 
 cat <<'EOF'
 

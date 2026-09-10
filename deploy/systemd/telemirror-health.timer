@@ -1,0 +1,10 @@
+[Unit]
+Description=telemirror — периодическая проверка здоровья живого зеркала
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

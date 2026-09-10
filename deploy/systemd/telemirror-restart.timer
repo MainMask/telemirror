@@ -3,7 +3,8 @@ Description=telemirror — ежесуточный чистый рестарт ж
 
 [Timer]
 OnCalendar=*-*-* 04:00:00
-Persistent=true
+# Не догонять пропущенный запуск: рестарт зеркала сразу после буста бессмыслен.
+Persistent=false
 RandomizedDelaySec=300
 
 [Install]

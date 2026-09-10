@@ -13,6 +13,7 @@
 | `systemd/telemirror.service` | живое зеркало (`main.py`), 24/7 |
 | `systemd/telemirror-past-courses.service` | разовый прогон истории курсов (`past_mode.py`) |
 | `systemd/telemirror-alert@.service` | `OnFailure=`: шлёт в `TECH_CHANNEL`, что юнит сдался |
+| `systemd/telemirror-health.{timer,service}` | раз в 10 мин: алерт если зеркало флапает или зависло не-active |
 | `systemd/telemirror-restart.{timer,service}` | чистый рестарт зеркала раз в сутки (04:00) |
 | `systemd/journald.conf.d/telemirror.conf` | `SystemMaxUse=500M` — журнал не забьёт `/var` |
 | `cron.d/telemirror-tmp` | ежечасная подчистка осиротевших `/tmp/tmp*.mp4` |
@@ -64,15 +65,18 @@ journalctl -u telemirror.service -f
 |---|---|
 | Краш / OOM-kill / чистый выход | `Restart=always`, бэкофф 10s → 120s |
 | Обрыв сети / сбой Telegram DC | telethon переподключается сам (`connection_retries=1000`); watchdog терпит отключённое состояние до **30 мин**, дольше — рестарт свежим процессом |
-| **Зависание** (процесс жив, апдейты не идут) | `Type=notify` + `WatchdogSec=600`: watchdog-таск каждые 300 с делает `updates.GetState` round-trip; завис/не отвечает → `WATCHDOG=1` не уходит → systemd шлёт `SIGTERM` и рестартит |
-| Стойкий crash-loop | 15 падений за час → `failed` → `OnFailure=telemirror-alert@` пишет в `TECH_CHANNEL`, сервис стоит до `systemctl reset-failed && systemctl start` |
+| **Мёртвый receive-loop / висящий RPC** | `Type=notify` + `WatchdogSec=600`: watchdog-таск каждые 300 с делает `updates.GetState` round-trip (допускает 3 сбоя подряд, FloodWait — ок); не отвечает → `WATCHDOG=1` не уходит → systemd шлёт `SIGTERM` и рестартит |
+| Завис именно dispatch апдейтов (RPC жив) | не отличимо от тихой ленты → авто-рестарта нет; после 2 ч без единого апдейта — `warning` в `TECH_CHANNEL` |
+| Быстрый crash-loop (<~4 мин/итерация) | 15 падений за час → `failed` → `OnFailure=telemirror-alert@` в `TECH_CHANNEL`, сервис стоит до `systemctl reset-failed && systemctl start` |
+| Медленный crash-loop / застрял не-`active` | `telemirror-health.timer` (10 мин): алерт в `TECH_CHANNEL` при ≥3 рестартах за интервал или `ActiveState≠active` два раза подряд |
 | Бан аккаунта / отзыв сессии | попадает в crash-loop выше → алерт; чинить через `python login.py` |
 | Медленная утечка памяти | `telemirror-restart.timer` — чистый рестарт в 04:00 |
 
 Проверки:
 ```bash
 systemctl show telemirror.service -p Type -p WatchdogUSec -p NRestarts
-systemctl list-timers telemirror-restart.timer
+systemctl list-timers 'telemirror-*'
+python -m telemirror.health        # разовый прогон проверки
 # симуляция зависания — через ~10 мин ждём watchdog-рестарт:
 systemctl kill -s STOP telemirror.service
 ```

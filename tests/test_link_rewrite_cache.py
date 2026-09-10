@@ -39,7 +39,10 @@ class _CountingDB(InMemoryDatabase):
         self.get_messages_calls = 0
 
     async def get_messages(self, original_id, original_channel):
-        self.get_messages_calls += 1
+        # count only link-resolution lookups (against the referenced channel),
+        # not the unrelated per-message dedup guard in new_message
+        if original_channel == REF:
+            self.get_messages_calls += 1
         return await super().get_messages(original_id, original_channel)
 
 
