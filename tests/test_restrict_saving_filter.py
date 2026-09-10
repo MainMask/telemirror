@@ -8,6 +8,7 @@ import pytest
 from telethon import errors, events
 from telethon.tl import types
 
+from telemirror.messagefilters import MediaDownloadError
 from telemirror.messagefilters.base import FilterAction
 from telemirror.messagefilters.restrictsavingfilter import (
     RestrictSavingContentBypassFilter,
@@ -42,10 +43,25 @@ class _BrokenClient:
         raise RuntimeError("download failed")
 
 
+class _MediaDownloadErrorClient:
+    async def download_media(self, message, file):
+        raise MediaDownloadError("t.me/c/1/2: exhausted")
+
+
 def test_flood_during_reupload_propagates():
     f = RestrictSavingContentBypassFilter()
     with pytest.raises(errors.FloodWaitError):
         run(f._process_message(_photo_message(_FloodClient()), events.NewMessage.Event))
+
+
+def test_media_download_error_propagates_not_discarded():
+    f = RestrictSavingContentBypassFilter()
+    with pytest.raises(MediaDownloadError):
+        run(
+            f._process_message(
+                _photo_message(_MediaDownloadErrorClient()), events.NewMessage.Event
+            )
+        )
 
 
 def test_other_failure_discards():

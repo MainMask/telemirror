@@ -16,6 +16,7 @@ from ..watermark.processor import (
 )
 from ._media import (
     UPLOAD_LIMIT_BYTES,
+    MediaDownloadError,
     ReuploadCache,
     download_media_with_retry,
     source_media_id,
@@ -173,6 +174,8 @@ class WatermarkRemovalFilter(MessageFilter):
             if output is None:
                 return None
             return await message._client.upload_file(output, file_name="photo.jpg")
+        except MediaDownloadError:
+            raise  # transient — let past_mode retry rather than mirror unprocessed
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: photo processing failed (chat_id=%s)", message.chat_id
@@ -211,6 +214,8 @@ class WatermarkRemovalFilter(MessageFilter):
             if upload_path is not None:
                 return await message._client.upload_file(upload_path)
             return None
+        except MediaDownloadError:
+            raise  # transient — let past_mode retry rather than mirror unprocessed
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: video processing failed (chat_id=%s)", message.chat_id

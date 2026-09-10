@@ -42,6 +42,7 @@ from telethon import TelegramClient, errors, utils
 from telethon.sessions import StringSession
 from telethon.tl import types
 
+from telemirror.messagefilters import MediaDownloadError
 from telemirror.mirroring import EventProcessor
 from telemirror.misc.links import private_message_link
 from telemirror.misc.log_setup import setup_stdout_logger
@@ -49,6 +50,13 @@ from telemirror.misc.message_groups import iter_message_groups
 from telemirror.storage import Database, InMemoryDatabase, PostgresDatabase
 
 _LOG_EVERY = 25  # логировать прогресс каждые N сообщений/альбомов
+
+# MediaDownloadError = транзиентный сбой выдачи файлов Telegram, переживший
+# ретраи download_media_with_retry. Ждём и повторяем прогон с чекпоинта; после
+# _MEDIA_RETRY_LIMIT попыток подряд сдаёмся (пусть процесс упадёт и перезапустится
+# systemd — это заметно, в отличие от тихого зависания на одном сообщении).
+_MEDIA_RETRY_WAIT = 120  # секунд между повторами
+_MEDIA_RETRY_LIMIT = 10
 
 
 def _configure_logging(log_level: str) -> logging.Logger:
@@ -223,6 +231,7 @@ async def _replay_direction(
         database=database,
         client=client,
         logger=logger,
+        strict_media_errors=True,  # exhausted transient download → retry, not degrade
     )
 
     processed = 0
@@ -280,13 +289,16 @@ async def _replay_with_retry(
     logger: logging.Logger,
     total: Optional[int] = None,
 ) -> int:
-    """Run `_replay_direction`, retrying on a >threshold FloodWait.
+    """Run `_replay_direction`, retrying on a >threshold FloodWait or an
+    exhausted transient media download (`MediaDownloadError`).
 
     Telethon auto-sleeps for waits ≤300s (flood_sleep_threshold); this loop
     handles the larger ones — raised either from iter_messages or from a send
     (mirroring re-raises both flood types). The checkpoint is saved as we go,
     so after sleeping we resume from where we left off.
     """
+    media_failures = 0
+    media_failure_checkpoint = object()  # sentinel: no stall seen yet
     while True:
         try:
             return await _replay_direction(
@@ -295,6 +307,20 @@ async def _replay_with_retry(
         except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
             logger.warning(f"FloodWait {e.seconds}s, ждём и повторяем...")
             await asyncio.sleep(e.seconds)
+        except MediaDownloadError as e:
+            checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)
+            if checkpoint != media_failure_checkpoint:
+                media_failures = 0  # progressed since the last stall — fresh budget
+                media_failure_checkpoint = checkpoint
+            media_failures += 1
+            if media_failures > _MEDIA_RETRY_LIMIT:
+                logger.error(f"{e} — {_MEDIA_RETRY_LIMIT} повторов подряд не помогли, сдаёмся")
+                raise
+            logger.warning(
+                f"{e} — ждём {_MEDIA_RETRY_WAIT}s и повторяем с чекпоинта "
+                f"({media_failures}/{_MEDIA_RETRY_LIMIT})"
+            )
+            await asyncio.sleep(_MEDIA_RETRY_WAIT)
 
 
 async def _edit_links_pass(

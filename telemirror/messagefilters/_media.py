@@ -23,6 +23,18 @@ UPLOAD_LIMIT_BYTES = 2 * 1024**3
 _DOWNLOAD_RETRY_DELAYS = (15, 45, 90)  # seconds between attempts
 
 
+class MediaDownloadError(Exception):
+    """Raised by ``download_media_with_retry`` once its spaced retries are spent
+    on a *transient* Telegram file-serving failure.
+
+    Filters let it propagate rather than committing a degraded mirror (unrenamed
+    document, un-watermarked video). ``EventProcessor`` with
+    ``strict_media_errors`` (past_mode) re-raises it from ``__handle_exceptions``
+    so the retry wrapper re-runs from the checkpoint; the live mirror logs and
+    skips the message like any other filter failure.
+    """
+
+
 async def download_media_with_retry(message: EventMessage, **kwargs):
     """``message._client.download_media(message=message, **kwargs)`` with spaced
     retries over transient Telegram file-serving errors.
@@ -32,8 +44,8 @@ async def download_media_with_retry(message: EventMessage, **kwargs):
     off, collapses them into ``ValueError('Request was unsuccessful N time(s)')`` —
     so that string is the only ValueError worth a slow retry, a bare one is a real
     bug. FloodWaitError is a deliberate omission: it must reach past_mode's retry
-    wrapper. After the last attempt the exception propagates and the caller keeps
-    its existing fallback.
+    wrapper. When the retries are spent the failure is re-raised as
+    ``MediaDownloadError``; a non-transient error propagates unchanged.
     """
     attempts = len(_DOWNLOAD_RETRY_DELAYS) + 1
     for i in range(attempts):
@@ -41,14 +53,19 @@ async def download_media_with_retry(message: EventMessage, **kwargs):
             return await message._client.download_media(message=message, **kwargs)
         except (ConnectionError, asyncio.TimeoutError, ValueError) as e:
             transient = not isinstance(e, ValueError) or "unsuccessful" in str(e)
-            if not transient or i == attempts - 1:
+            if not transient:
                 raise
+            link = private_message_link(message.chat_id, message.id)
+            if i == attempts - 1:
+                raise MediaDownloadError(
+                    f"{link}: download failed after {attempts} attempts ({e})"
+                ) from e
             delay = _DOWNLOAD_RETRY_DELAYS[i]
             logger.warning(
                 "media download failed (%s: %s) %s — retry %d/%d in %ds",
                 type(e).__name__,
                 e,
-                private_message_link(message.chat_id, message.id),
+                link,
                 i + 1,
                 attempts - 1,
                 delay,

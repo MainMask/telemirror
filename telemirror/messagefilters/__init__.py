@@ -1,3 +1,4 @@
+from ._media import MediaDownloadError
 from .base import (
     CompositeMessageFilter,
     FilterAction,
@@ -30,6 +31,7 @@ __all__ = [
     "ForwardFormatFilter",
     "KeywordReplaceFilter",
     "MappedNameForwardFormat",
+    "MediaDownloadError",
     "MessageFilter",
     "RestrictSavingContentBypassFilter",
     "SkipAllFilter",

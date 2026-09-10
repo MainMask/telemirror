@@ -4,10 +4,12 @@ list narrows which sources are processed."""
 
 from datetime import datetime, timezone
 
+import pytest
 from telethon import events
 from telethon.tl import types
 
 import telemirror.messagefilters.watermarkfilter as wf
+from telemirror.messagefilters import MediaDownloadError
 from tests.conftest import make_message, run
 
 CHAT_ID = -1000000001000  # == chat_id of make_message(channel_id=1000)
@@ -140,6 +142,18 @@ def test_costly_video_forwarded_without_watermark(monkeypatch):
     _, res = _run({}, msg)
     assert calls == {"remove": 0, "stamp": 0}
     assert isinstance(res.media, types.MessageMediaDocument)  # unchanged
+
+
+def test_media_download_error_propagates(monkeypatch):
+    calls = _video_spies(monkeypatch)
+
+    class _MDEClient(_Client):
+        async def download_media(self, message, file):
+            raise MediaDownloadError("t.me/c/1/2: exhausted")
+
+    with pytest.raises(MediaDownloadError):
+        _run({"remove_watermark": False}, _video_message(_MDEClient()))
+    assert calls == {"remove": 0, "stamp": 0}  # nothing mirrored in degraded form
 
 
 def test_cheap_hd_video_still_stamped(monkeypatch):

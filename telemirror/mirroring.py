@@ -15,6 +15,7 @@ from telemirror._patch import (
     set_album_event_timeout,
 )
 from telemirror.hints import EventAlbumMessage, EventLike, EventMessage
+from telemirror.messagefilters import MediaDownloadError
 from telemirror.messagefilters.base import FilterAction
 from telemirror.misc.links import private_message_link
 from telemirror.misc.lrucache import LRUCache
@@ -46,6 +47,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         database: Database,
         client: TelegramClient,
         logger: logging.Logger,
+        strict_media_errors: bool = False,
     ) -> None:
         """Message event processor
 
@@ -54,11 +56,16 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             database (`Database`): Message IDs storage
             client (`TelegramClient`): Message sender client
             logger (`logging.Logger`): Logger
+            strict_media_errors (`bool`): re-raise `MediaDownloadError` instead of
+                logging and skipping. past_mode sets this so its retry wrapper
+                re-runs from the checkpoint; the live mirror leaves it off and
+                skips the message like any other filter failure.
         """
         self._chat_mapping = chat_mapping
         self._database = database
         self._client = client
         self._logger = logger
+        self._strict_media_errors = strict_media_errors
         # Public t.me/<username> → Telethon peer id, resolved once per process.
         # Only successful resolutions are stored; a miss may become resolvable later.
         self._username_id_cache: LRUCache[str, int] = LRUCache(capacity=256)
@@ -75,6 +82,14 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 # A >threshold FloodWait must reach past_mode's retry wrapper so
                 # the checkpoint isn't advanced past an un-sent message.
                 raise
+            except MediaDownloadError as e:
+                # A transient media download that outlived its retries. In
+                # past_mode re-raise so the retry wrapper re-runs from the
+                # checkpoint instead of committing a degraded/absent mirror; in
+                # live mode fall through and skip like any other filter failure.
+                if self._strict_media_errors:
+                    raise
+                self._logger.error(e, exc_info=True)
             except Exception as e:
                 self._logger.error(e, exc_info=True)
 
@@ -314,9 +329,19 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     )
 
                 filtered_message: EventMessage
-                filter_action, filtered_message = await config.filters.process(
-                    message_copy, events.NewMessage.Event
-                )
+                try:
+                    filter_action, filtered_message = await config.filters.process(
+                        message_copy, events.NewMessage.Event
+                    )
+                except (
+                    errors.FloodWaitError,
+                    errors.FloodPremiumWaitError,
+                    MediaDownloadError,
+                ):
+                    # earlier fan-out targets are already sent — persist their
+                    # rows before this propagates (same as the send handlers)
+                    await flush_inserted()
+                    raise
 
                 if filter_action is FilterAction.DISCARD:
                     self._logger.info(
