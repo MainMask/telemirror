@@ -1,0 +1,5 @@
+# Подчищает осиротевшие видео-темпы telemirror в общем /tmp.
+# В штатном режиме их удаляет finally в watermark-фильтре, а у systemd-юнитов
+# ещё и PrivateTmp=true (namespace умирает вместе с процессом). Этот cron —
+# страховка для ручных запусков past_mode.py вне systemd и падений по OOM.
+19 * * * * root find /tmp -maxdepth 1 -name 'tmp*.mp4' -mmin +180 -delete 2>/dev/null

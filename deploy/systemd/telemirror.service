@@ -1,0 +1,31 @@
+[Unit]
+Description=telemirror — живое зеркало
+Documentation=https://github.com/MainMask/telemirror
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Делит SESSION_STRING с бэкофиллом истории — одновременно работать нельзя.
+Conflicts=telemirror-past-courses.service
+# Сломанный деплой не должен бесконечно долбить Telegram (риск бана аккаунта).
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/root/telemirror
+ExecStart=/root/telemirror/.venv/bin/python -u main.py
+Restart=always
+RestartSec=10
+
+# Скачок/утечка памяти прибьёт только telemirror (дальше рестарт + ресинк по
+# таблице binding_id), а не случайный процесс на сервере.
+MemoryHigh=1100M
+MemoryMax=1400M
+
+# Свой /tmp: осиротевшие ffmpeg-темпы (после OOM/краша) исчезают при рестарте.
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+[Unit]
+Description=telemirror — прогон истории курсов Цитадель
+Documentation=https://github.com/MainMask/telemirror
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Делит SESSION_STRING с живым зеркалом — старт бэкофилла останавливает live…
+Conflicts=telemirror.service
+# …а по успешному завершению live поднимается обратно автоматически.
+OnSuccess=telemirror.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/root/telemirror
+ExecStart=/bin/sh -c 'YAML_CONFIG_ENV="$(cat .configs/citadel_courses.config.yml)" exec .venv/bin/python -u past_mode.py'
+# Переживает обрыв сети (past_mode резюмится с чекпоинта); при устойчивом
+# падении burst-лимит выше останавливает юнит на разбор.
+Restart=on-failure
+RestartSec=60
+
+MemoryHigh=1100M
+MemoryMax=1400M
+
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+Nice=10
+
+# Нет [Install] — юнит запускается вручную (systemctl start), не при загрузке.
