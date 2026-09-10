@@ -9,7 +9,6 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from telethon import errors
 from telethon.tl import types
 
 from ..hints import EventMessage
@@ -21,20 +20,6 @@ logger = logging.getLogger(__name__)
 # Larger files can't be re-uploaded through this session.
 UPLOAD_LIMIT_BYTES = 2 * 1024**3
 
-# Transient Telegram file-serving failures worth waiting out. Deliberately
-# excludes FloodWaitError/FloodPremiumWaitError (RPCError subclasses) — those
-# must reach past_mode's retry wrapper (see mirroring.py / restrictsavingfilter).
-_DOWNLOAD_RETRY_ERRORS = (
-    errors.ServerError,
-    errors.RpcCallFailError,
-    errors.RpcMcgetFailError,
-    errors.InterdcCallErrorError,
-    errors.InterdcCallRichErrorError,
-    errors.TimedOutError,
-    asyncio.TimeoutError,
-    ConnectionError,
-    ValueError,  # Telethon's generic "Request was unsuccessful N time(s)"
-)
 _DOWNLOAD_RETRY_DELAYS = (15, 45, 90)  # seconds between attempts
 
 
@@ -42,17 +27,21 @@ async def download_media_with_retry(message: EventMessage, **kwargs):
     """``message._client.download_media(message=message, **kwargs)`` with spaced
     retries over transient Telegram file-serving errors.
 
-    A Telegram DC hiccup makes ``GetFileRequest`` time out; Telethon's own ~6
-    fast retries span only ~12s, so a multi-minute wobble drops the download.
-    After the last attempt the exception propagates — the caller keeps its
-    existing fallback.
+    A Telegram DC hiccup makes ``GetFileRequest`` time out; Telethon's own ``_call``
+    retries its server errors ~6× over ~12s and, with ``raise_last_call_error``
+    off, collapses them into ``ValueError('Request was unsuccessful N time(s)')`` —
+    so that string is the only ValueError worth a slow retry, a bare one is a real
+    bug. FloodWaitError is a deliberate omission: it must reach past_mode's retry
+    wrapper. After the last attempt the exception propagates and the caller keeps
+    its existing fallback.
     """
     attempts = len(_DOWNLOAD_RETRY_DELAYS) + 1
     for i in range(attempts):
         try:
             return await message._client.download_media(message=message, **kwargs)
-        except _DOWNLOAD_RETRY_ERRORS as e:
-            if i == attempts - 1:
+        except (ConnectionError, asyncio.TimeoutError, ValueError) as e:
+            transient = not isinstance(e, ValueError) or "unsuccessful" in str(e)
+            if not transient or i == attempts - 1:
                 raise
             delay = _DOWNLOAD_RETRY_DELAYS[i]
             logger.warning(

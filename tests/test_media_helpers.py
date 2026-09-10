@@ -122,6 +122,20 @@ def test_download_retry_exhausts_and_reraises(monkeypatch):
     assert calls["n"] == len(_media._DOWNLOAD_RETRY_DELAYS) + 1
 
 
+def test_download_retry_reraises_non_transient_valueerror(monkeypatch):
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def download_media(self, message, **kwargs):
+            calls["n"] += 1
+            raise ValueError("bad file argument")
+
+    with pytest.raises(ValueError, match="bad file argument"):
+        run(download_media_with_retry(_retry_msg(FakeClient()), file=bytes))
+    assert calls["n"] == 1  # deterministic failure — no retry
+
+
 def test_download_retry_does_not_swallow_floodwait(monkeypatch):
     _no_sleep(monkeypatch)
     calls = {"n": 0}
