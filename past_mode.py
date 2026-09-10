@@ -155,11 +155,13 @@ async def _replay_direction(
     target_id: int,
     cfgs: List[DirectionConfig],
     logger: logging.Logger,
+    total: Optional[int] = None,
 ) -> int:
     """Один проход по истории канала на пару (source, target).
 
     Все топик-направления пары обрабатываются за этот проход: процессор
     маршрутизирует каждое сообщение по тем cfg, чей from_topic_id совпадает.
+    `total` (кол-во сообщений источника) переиспользуется из _run, если передан.
     Возвращает число обработанных сообщений/альбомов.
     """
     pm = cfgs[0].past_mode
@@ -178,11 +180,12 @@ async def _replay_direction(
     if checkpoint is not None:
         logger.info(f"{prefix}: продолжение с message_id={checkpoint}")
 
-    try:
-        total = (await client.get_messages(source_id, limit=0)).total
-    except Exception as e:
-        logger.warning(f"{prefix}: не удалось получить total: {e}")
-        total = 0
+    if total is None:
+        try:
+            total = (await client.get_messages(source_id, limit=0)).total
+        except Exception as e:
+            logger.warning(f"{prefix}: не удалось получить total: {e}")
+            total = 0
 
     # last_n без чекпоинта: собрать в память (новейшие первые), перевернуть
     use_buffer = pm.last_n is not None and checkpoint is None
@@ -275,6 +278,7 @@ async def _replay_with_retry(
     target_id: int,
     cfgs: List[DirectionConfig],
     logger: logging.Logger,
+    total: Optional[int] = None,
 ) -> int:
     """Run `_replay_direction`, retrying on a >threshold FloodWait.
 
@@ -286,7 +290,7 @@ async def _replay_with_retry(
     while True:
         try:
             return await _replay_direction(
-                client, database, source_id, target_id, cfgs, logger
+                client, database, source_id, target_id, cfgs, logger, total
             )
         except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
             logger.warning(f"FloodWait {e.seconds}s, ждём и повторяем...")
@@ -449,7 +453,8 @@ async def _run(logger: logging.Logger) -> None:
             if src not in source_total:
                 try:
                     source_total[src] = (await client.get_messages(src, limit=0)).total
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Не удалось получить total для {src}: {e}")
                     source_total[src] = 0
         overall_total = sum(source_total[src] for src, _ in pairs)
         overall_done = 0
@@ -457,7 +462,8 @@ async def _run(logger: logging.Logger) -> None:
 
         for pair_no, ((source_id, target_id), cfgs) in enumerate(pairs.items(), start=1):
             overall_done += await _replay_with_retry(
-                client, database, source_id, target_id, cfgs, logger
+                client, database, source_id, target_id, cfgs, logger,
+                total=source_total[source_id],
             )
             _log_overall(
                 logger, pair_no, len(pairs), overall_done, overall_total, run_start

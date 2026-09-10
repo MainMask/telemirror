@@ -174,7 +174,7 @@ def test_replay_with_retry_waits_out_flood(monkeypatch, exc):
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
 
-    async def fake_replay(client, database, source_id, target_id, cfgs, logger):
+    async def fake_replay(client, database, source_id, target_id, cfgs, logger, total=None):
         attempts.append(1)
         if len(attempts) == 1:
             raise exc(request=None)
@@ -236,18 +236,38 @@ def test_replay_multi_topic_single_pass(monkeypatch):
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 3
 
 
+class _NoopProcessor:
+    def __init__(self, **kw):
+        pass
+
+    async def new_message(self, chat, msg, link):
+        pass
+
+    async def new_album(self, chat, album, link):
+        pass
+
+
+def test_replay_reuses_passed_total(monkeypatch):
+    """When _run passes `total`, _replay_direction must not re-fetch it."""
+    limit0_calls = []
+
+    class CountingClient(FakeClient):
+        async def get_messages(self, entity, limit=None, **kw):
+            if limit == 0:
+                limit0_calls.append(entity)
+            return await super().get_messages(entity, limit=limit, **kw)
+
+    monkeypatch.setattr(past_mode, "EventProcessor", _NoopProcessor)
+    db = run(InMemoryDatabase())
+    run(past_mode._replay_direction(
+        CountingClient([_msg(1), _msg(2)]), db, SRC, TGT,
+        [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG, total=99,
+    ))
+    assert limit0_calls == []
+
+
 def test_replay_mixed_strategies_warns(monkeypatch, caplog):
-    class Rec:
-        def __init__(self, **kw):
-            pass
-
-        async def new_message(self, chat, msg, link):
-            pass
-
-        async def new_album(self, chat, album, link):
-            pass
-
-    monkeypatch.setattr(past_mode, "EventProcessor", Rec)
+    monkeypatch.setattr(past_mode, "EventProcessor", _NoopProcessor)
     db = run(InMemoryDatabase())
     cfgs = [
         _cfg(PastModeConfig(full_history=True, send_delay=0), from_topic_id=2),
