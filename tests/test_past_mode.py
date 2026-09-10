@@ -18,11 +18,12 @@ TGT = -1002222222222
 _LOG = logging.getLogger("test.past_mode")
 
 
-def _cfg(pm: PastModeConfig) -> DirectionConfig:
+def _cfg(pm: PastModeConfig, from_topic_id=None) -> DirectionConfig:
     return DirectionConfig(
         disable_delete=False,
         disable_edit=False,
         filters=EmptyMessageFilter(),
+        from_topic_id=from_topic_id,
         past_mode=pm,
     )
 
@@ -109,7 +110,7 @@ def _run_replay(monkeypatch, messages, pm, db=None):
     db = db or run(InMemoryDatabase())
     run(
         past_mode._replay_direction(
-            FakeClient(messages), db, SRC, TGT, _cfg(pm), _LOG
+            FakeClient(messages), db, SRC, TGT, [_cfg(pm)], _LOG
         )
     )
     return calls, db
@@ -152,7 +153,7 @@ def test_replay_floodwait_does_not_advance_checkpoint(monkeypatch, exc):
         run(
             past_mode._replay_direction(
                 FakeClient([_msg(1), _msg(2), _msg(3)]), db, SRC, TGT,
-                _cfg(PastModeConfig(full_history=True, send_delay=0)), _LOG,
+                [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG,
             )
         )
     assert calls == [1, 2]
@@ -173,17 +174,18 @@ def test_replay_with_retry_waits_out_flood(monkeypatch, exc):
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
 
-    async def fake_replay(client, database, source_id, target_id, cfg, logger):
+    async def fake_replay(client, database, source_id, target_id, cfgs, logger):
         attempts.append(1)
         if len(attempts) == 1:
             raise exc(request=None)
+        return 0
 
     monkeypatch.setattr(past_mode, "_replay_direction", fake_replay)
 
     run(
         past_mode._replay_with_retry(
             object(), run(InMemoryDatabase()), SRC, TGT,
-            _cfg(PastModeConfig(full_history=True, send_delay=0)), _LOG,
+            [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG,
         )
     )
     assert len(attempts) == 2
@@ -199,6 +201,61 @@ def test_replay_resumes_from_checkpoint(monkeypatch):
         monkeypatch, msgs, PastModeConfig(full_history=True, send_delay=0), db=db
     )
     assert calls == [("new", 3), ("new", 4), ("new", 5)]  # min_id=2 is exclusive
+
+
+def test_replay_multi_topic_single_pass(monkeypatch):
+    """A pair with several topic-directions is replayed in ONE history pass;
+    the processor receives all the pair's cfgs and the checkpoint advances once."""
+    seen_mappings = []
+    calls = []
+
+    class Rec:
+        def __init__(self, **kw):
+            seen_mappings.append(kw["chat_mapping"][SRC][TGT])
+
+        async def new_message(self, chat, msg, link):
+            calls.append(msg.id)
+
+        async def new_album(self, chat, album, link):
+            calls.append(tuple(m.id for m in album))
+
+    monkeypatch.setattr(past_mode, "EventProcessor", Rec)
+    db = run(InMemoryDatabase())
+    cfgs = [
+        _cfg(PastModeConfig(full_history=True, send_delay=0), from_topic_id=2),
+        _cfg(PastModeConfig(full_history=True, send_delay=0), from_topic_id=3),
+    ]
+    processed = run(
+        past_mode._replay_direction(
+            FakeClient([_msg(1), _msg(2), _msg(3)]), db, SRC, TGT, cfgs, _LOG
+        )
+    )
+    assert seen_mappings == [cfgs]  # one processor, both topic cfgs, one pass
+    assert calls == [1, 2, 3]
+    assert processed == 3
+    assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 3
+
+
+def test_replay_mixed_strategies_warns(monkeypatch, caplog):
+    class Rec:
+        def __init__(self, **kw):
+            pass
+
+        async def new_message(self, chat, msg, link):
+            pass
+
+        async def new_album(self, chat, album, link):
+            pass
+
+    monkeypatch.setattr(past_mode, "EventProcessor", Rec)
+    db = run(InMemoryDatabase())
+    cfgs = [
+        _cfg(PastModeConfig(full_history=True, send_delay=0), from_topic_id=2),
+        _cfg(PastModeConfig(last_n=5, send_delay=0), from_topic_id=3),
+    ]
+    with caplog.at_level(logging.WARNING):
+        run(past_mode._replay_direction(FakeClient([_msg(1)]), db, SRC, TGT, cfgs, _LOG))
+    assert any("разные стратегии past_mode" in r.message for r in caplog.records)
 
 
 # --- _edit_links_pass ----------------------------------------------------
@@ -240,7 +297,7 @@ def test_edit_links_pass_rewrites_cross_message_link(monkeypatch):
     client = _EditFakeClient([linked])
 
     run(past_mode._edit_links_pass(
-        client, db, [(SRC, TGT, _cfg(PastModeConfig(full_history=True, send_delay=0)))],
+        client, db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]},
         _LOG,
     ))
 
@@ -288,7 +345,7 @@ def test_edit_links_pass_streams_source_messages_in_batches(monkeypatch):
     client = _BatchRecordingClient(src)
 
     run(past_mode._edit_links_pass(
-        client, db, [(SRC, TGT, _cfg(PastModeConfig(full_history=True, send_delay=0)))],
+        client, db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]},
         _LOG,
     ))
 
