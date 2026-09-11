@@ -161,8 +161,7 @@ _LIVE_SEND_DELAY: float = config("SEND_DELAY", default=0.5, cast=float)
 @dataclass(frozen=True)
 class PastModeConfig:
     send_delay: float = 0.5
-    # Accepts datetime/date/ISO-string on input; normalized to datetime in __post_init__.
-    since_date: Optional[datetime] = None
+    since_date: Optional[datetime] = None  # accepts datetime/date/ISO-str, see __post_init__
     last_n: Optional[int] = None
     full_history: bool = False
 

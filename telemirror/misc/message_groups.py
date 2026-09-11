@@ -1,10 +1,10 @@
-from typing import AsyncIterator, List, Union
+from typing import AsyncIterable, AsyncIterator, List, Union
 
 from telethon.tl import types
 
 
 async def iter_message_groups(
-    messages,
+    messages: AsyncIterable[object],
 ) -> AsyncIterator[Union[types.Message, List[types.Message]]]:
     """Consume an async iterable of messages and yield either:
 
