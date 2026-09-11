@@ -153,6 +153,9 @@ _COURSE_DONOR_TITLES = [
 
 _LIVE_KEYS = {name_key(t).casefold() for t in _LIVE_DONOR_TITLES}
 _COURSE_KEYS = {name_key(t).casefold() for t in _COURSE_DONOR_TITLES}
+assert _LIVE_KEYS.isdisjoint(_COURSE_KEYS), (
+    f"живые и курсы пересеклись: {_LIVE_KEYS & _COURSE_KEYS}"
+)
 
 
 def classify_donor(title: str) -> str:
@@ -262,9 +265,12 @@ async def step_create_pairs(client):
             print(f"OK:      '{donor.title}'  →  '{expected}'")
             # получатель мог остаться без части топиков (обрыв прошлого запуска)
             if getattr(donor.entity, "forum", False):
-                await _sync_forum_topics(
-                    client, donor.entity, rec.entity, enable_forum=False
-                )
+                if getattr(rec.entity, "forum", False):
+                    await _sync_forum_topics(
+                        client, donor.entity, rec.entity, enable_forum=False
+                    )
+                else:
+                    print("    ⚠ получатель не форум — топики не синхронизированы")
         else:
             found = entity_type(rec.entity) if rec else None
             note = f" (найден как {found}, не как {dtype})" if found else " (не найден)"
@@ -755,9 +761,10 @@ async def step_final_verify(client):
         from_id, from_tid = int(fv.split("#")[0]), int(fv.split("#")[1])
         to_id,   to_tid   = int(tv.split("#")[0]),   int(tv.split("#")[1])
 
-        from_topics = await get_topics(from_id)
-        if classify_donor(entity_cache[from_id].title or "") == "unknown":
+        from_e = await get_entity(from_id)
+        if classify_donor(from_e.title or "") == "unknown":
             continue  # чужое направление (прежние пачки) — не наша забота
+        from_topics = await get_topics(from_id)
         to_topics   = await get_topics(to_id)
         f_topic = from_topics.get(from_tid)
         t_topic = to_topics.get(to_tid)
