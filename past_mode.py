@@ -229,6 +229,30 @@ async def _replay_direction(
     logger.info(f"{prefix}: завершено. Обработано {processed} сообщений/альбомов.")
 
 
+async def _replay_with_retry(
+    client: TelegramClient,
+    database: Database,
+    source_id: int,
+    target_id: int,
+    cfg: DirectionConfig,
+    logger: logging.Logger,
+) -> None:
+    """Run `_replay_direction`, retrying on a >threshold FloodWait.
+
+    Telethon auto-sleeps for waits ≤300s (flood_sleep_threshold); this loop
+    handles the larger ones — raised either from iter_messages or from a send
+    (mirroring re-raises both flood types). The checkpoint is saved as we go,
+    so after sleeping we resume from where we left off.
+    """
+    while True:
+        try:
+            await _replay_direction(client, database, source_id, target_id, cfg, logger)
+            return
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+            logger.warning(f"FloodWait {e.seconds}s, ждём и повторяем...")
+            await asyncio.sleep(e.seconds)
+
+
 async def _edit_links_pass(
     client: TelegramClient,
     database: Database,
@@ -369,16 +393,7 @@ async def _run(logger: logging.Logger) -> None:
 
     try:
         for source_id, target_id, cfg in directions:
-            while True:
-                try:
-                    await _replay_direction(client, database, source_id, target_id, cfg, logger)
-                    break
-                except errors.FloodWaitError as e:
-                    # Telethon auto-sleeps for FloodWait ≤300s (flood_sleep_threshold).
-                    # This branch fires only for >300s waits during iter_messages.
-                    # Checkpoint is saved, so after sleeping we retry from where we left off.
-                    logger.warning(f"FloodWait {e.seconds}s при получении истории, ждём и повторяем...")
-                    await asyncio.sleep(e.seconds)
+            await _replay_with_retry(client, database, source_id, target_id, cfg, logger)
 
         # Second pass: fix cross-channel links that couldn't be resolved during mirroring
         logger.info("Второй проход: исправление перекрёстных ссылок...")

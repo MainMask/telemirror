@@ -108,3 +108,33 @@ def test_flood_wait_propagates_out_of_handle_exceptions(monkeypatch, exc):
 
     with pytest.raises(exc):
         run(proc.new_message(SOURCE, make_message("hi", channel_id=1000), "link"))
+
+
+@pytest.mark.parametrize(
+    "exc", [errors.FloodWaitError, errors.FloodPremiumWaitError]
+)
+def test_flood_mid_fanout_persists_already_sent_targets(monkeypatch, exc):
+    """A flood on a later fan-out target must still flush the rows for targets
+    that were already delivered before the exception unwinds."""
+    db = run(InMemoryDatabase())
+
+    async def fake_send_message(client, entity, message, **kw):
+        if entity == TARGETS[1]:
+            raise exc(request=None)
+        return types.Message(id=555, peer_id=types.PeerChannel(1), message="x")
+
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    proc = EventProcessor(
+        chat_mapping={SOURCE: {t: [_cfg()] for t in TARGETS}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test.flood"),
+    )
+
+    msg = make_message("hi", channel_id=1000)
+    with pytest.raises(exc):
+        run(proc.new_message(SOURCE, msg, "link"))
+
+    tracked = run(db.get_messages(msg.id, SOURCE))
+    assert {m.mirror_channel for m in tracked} == {TARGETS[0]}
