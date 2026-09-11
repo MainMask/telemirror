@@ -1,13 +1,13 @@
-telethon==1.41.2
+telethon==1.44.0
 opencv-python-headless==5.0.0.93
 pillow==12.3.0
 # simple-lama-inpainting: see install.sh (broken pillow<10 pin, install with --no-deps)
 # torch: transitive dep of simple-lama-inpainting, install manually if needed:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
 # ffmpeg: apt install ffmpeg
-cryptg==0.5.2
-psycopg[binary,pool]==3.2.12
+cryptg==0.6.0
+psycopg[binary,pool]==3.3.5
 python-decouple==3.8
 PyYAML==6.0.3
-aiohttp==3.13.1
+aiohttp==3.14.3
 uvloop==0.22.1; platform_system != "Windows"

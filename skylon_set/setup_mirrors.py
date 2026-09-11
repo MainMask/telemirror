@@ -12,13 +12,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import yaml
 from telethon.tl.functions.channels import (
     CreateChannelRequest,
-    CreateForumTopicRequest,
     DeleteChannelRequest,
-    EditForumTopicRequest,
     EditPhotoRequest,
     EditTitleRequest,
-    GetForumTopicsRequest,
     ToggleForumRequest,
+)
+from telethon.tl.functions.messages import (
+    CreateForumTopicRequest,
+    EditForumTopicRequest,
+    GetForumTopicsRequest,
 )
 from telethon.tl.types import ChatPhotoEmpty, InputChatUploadedPhoto
 
@@ -177,7 +179,7 @@ async def step_create_pairs(client):
         if is_megagroup and getattr(e, "forum", False):
             topics_result = await safe_call(client,
                 lambda src=e: client(GetForumTopicsRequest(
-                    channel=src, offset_date=0, offset_id=0, offset_topic=0, limit=100
+                    peer=src, offset_date=0, offset_id=0, offset_topic=0, limit=100
                 ))
             )
             if topics_result:
@@ -191,7 +193,7 @@ async def step_create_pairs(client):
                     print(f"    Создаю топик '{topic.title}'...")
                     await safe_call(client,
                         lambda c=created, t=topic: client(
-                            CreateForumTopicRequest(channel=c, title=t.title, icon_color=t.icon_color)
+                            CreateForumTopicRequest(peer=c, title=t.title, icon_color=t.icon_color)
                         )
                     )
 
@@ -214,7 +216,7 @@ async def step_configure(client):
         eid = entity.id
         if eid not in topic_cache:
             result = await client(GetForumTopicsRequest(
-                channel=entity, offset_date=0, offset_id=0, offset_topic=0, limit=100
+                peer=entity, offset_date=0, offset_id=0, offset_topic=0, limit=100
             ))
             topic_cache[eid] = {t.id: t for t in result.topics}
             await asyncio.sleep(0.3)
@@ -272,7 +274,7 @@ async def step_configure(client):
                 else:
                     await safe_call(client,
                         lambda re=r_entity, rid=r_topic.id, eid=d_emoji: client(
-                            EditForumTopicRequest(channel=re, topic_id=rid, icon_emoji_id=eid)
+                            EditForumTopicRequest(peer=re, topic_id=rid, icon_emoji_id=eid)
                         )
                     )
                     print(f"  Топик '{d_topic.title}': эмодзи обновлён")
@@ -282,7 +284,7 @@ async def step_configure(client):
                 if d_topic.title != r_topic.title:
                     await safe_call(client,
                         lambda re=r_entity, t=d_topic.title: client(
-                            EditForumTopicRequest(channel=re, topic_id=1, title=t)
+                            EditForumTopicRequest(peer=re, topic_id=1, title=t)
                         )
                     )
                     print(f"  General: переименован в '{d_topic.title}'")
@@ -291,7 +293,7 @@ async def step_configure(client):
                 if d_hidden != r_hidden:
                     await safe_call(client,
                         lambda re=r_entity, h=d_hidden: client(
-                            EditForumTopicRequest(channel=re, topic_id=1, hidden=h)
+                            EditForumTopicRequest(peer=re, topic_id=1, hidden=h)
                         )
                     )
                     print(f"  General: {'скрыт' if d_hidden else 'показан'}")
@@ -448,10 +450,10 @@ async def step_build_config(client):
                 continue
 
             d_result = await client(GetForumTopicsRequest(
-                channel=e, offset_date=0, offset_id=0, offset_topic=0, limit=100
+                peer=e, offset_date=0, offset_id=0, offset_topic=0, limit=100
             ))
             r_result = await client(GetForumTopicsRequest(
-                channel=r_e, offset_date=0, offset_id=0, offset_topic=0, limit=100
+                peer=r_e, offset_date=0, offset_id=0, offset_topic=0, limit=100
             ))
             await asyncio.sleep(0.3)
 
@@ -513,7 +515,7 @@ async def step_final_verify(client):
         if chat_id not in topic_cache:
             e = await get_entity(chat_id)
             result = await client(GetForumTopicsRequest(
-                channel=e, offset_date=0, offset_id=0, offset_topic=0, limit=100
+                peer=e, offset_date=0, offset_id=0, offset_topic=0, limit=100
             ))
             topic_cache[chat_id] = {t.id: t for t in result.topics}
             await asyncio.sleep(0.3)
@@ -592,7 +594,7 @@ async def step_final_verify(client):
             print(f"  Топик #{tid} → '{new_title}'...")
             await safe_call(client,
                 lambda ent=e, i=tid, t=new_title: client(
-                    EditForumTopicRequest(channel=ent, topic_id=i, title=t)
+                    EditForumTopicRequest(peer=ent, topic_id=i, title=t)
                 )
             )
     print("Готово.")
