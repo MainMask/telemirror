@@ -162,6 +162,43 @@ class EventProcessor(CopyEventMessage):
                             reply_to_topic_id=config.to_topic_id,
                         )
                     )
+                except errors.MediaCaptionTooLongError:
+                    if not filtered_message.media or not filtered_message.message:
+                        self._logger.error(
+                            f"Error while sending message to chat#{outgoing_chat}. "
+                            f"MediaCaptionTooLongError"
+                        )
+                        continue
+                    # Caption > 1024 chars: send media without caption, then text separately
+                    text, entities = filtered_message.message, filtered_message.entities
+                    filtered_message.message = ""
+                    filtered_message.entities = None
+                    try:
+                        outgoing_message = await send_message(
+                            self._client,
+                            entity=outgoing_chat,
+                            message=filtered_message,
+                            formatting_entities=None,
+                            reply_to=reply_to_messages.get(outgoing_chat)
+                            if outgoing_topic_reply or config.to_topic_id is None
+                            else config.to_topic_id,
+                            reply_to_topic_id=config.to_topic_id
+                            if outgoing_topic_reply
+                            else None,
+                        )
+                        await send_message(
+                            self._client,
+                            entity=outgoing_chat,
+                            message=text,
+                            formatting_entities=entities,
+                            reply_to=config.to_topic_id,
+                        )
+                    except Exception as split_err:
+                        self._logger.error(
+                            f"Error while sending split message to chat#{outgoing_chat}. "
+                            f"{type(split_err).__name__}: {split_err}"
+                        )
+                        continue
                 except Exception as e:
                     self._logger.error(
                         f"Error while sending message to chat#{outgoing_chat}. "
@@ -292,6 +329,49 @@ class EventProcessor(CopyEventMessage):
                             reply_to_topic_id=config.to_topic_id,
                         )
                     )
+                except errors.MediaCaptionTooLongError:
+                    if config.mode != "copy":
+                        self._logger.error(
+                            f"Error while sending album to chat#{outgoing_chat}. "
+                            f"MediaCaptionTooLongError"
+                        )
+                        continue
+                    # Strip captions > 1024 chars, send them as separate text messages
+                    texts_to_send = []
+                    safe_captions = []
+                    for i, caption in enumerate(captions):
+                        if len(caption) > 1024:
+                            texts_to_send.append((caption, filtered_album[i].entities))
+                            safe_captions.append("")
+                        else:
+                            safe_captions.append(caption)
+                    try:
+                        outgoing_messages = await send_file(
+                            self._client,
+                            entity=outgoing_chat,
+                            caption=safe_captions,
+                            file=files,
+                            reply_to=reply_to_messages.get(outgoing_chat)
+                            if outgoing_topic_reply or config.to_topic_id is None
+                            else config.to_topic_id,
+                            reply_to_topic_id=config.to_topic_id
+                            if outgoing_topic_reply
+                            else None,
+                        )
+                        for text, entities in texts_to_send:
+                            await send_message(
+                                self._client,
+                                entity=outgoing_chat,
+                                message=text,
+                                formatting_entities=entities,
+                                reply_to=config.to_topic_id,
+                            )
+                    except Exception as split_err:
+                        self._logger.error(
+                            f"Error while sending split album to chat#{outgoing_chat}. "
+                            f"{type(split_err).__name__}: {split_err}"
+                        )
+                        continue
                 except Exception as e:
                     self._logger.error(
                         f"Error while sending album to chat#{outgoing_chat}. "
