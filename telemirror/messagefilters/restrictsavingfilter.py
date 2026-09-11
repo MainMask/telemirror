@@ -1,33 +1,28 @@
+import logging
+import mimetypes
+import os
+import tempfile
 from typing import Type
 
+from telethon.tl import types
+
 from ..hints import EventLike, EventMessage
-from .base import FilterResult, MessageFilter
+from .base import FilterAction, FilterResult, MessageFilter
+
+logger = logging.getLogger(__name__)
+
+# Telegram upload limit for accounts without a Premium subscription.
+# Larger files can't be re-uploaded through this session and are skipped.
+_NON_PREMIUM_UPLOAD_LIMIT_BYTES = 2 * 1024**3
 
 
 class RestrictSavingContentBypassFilter(MessageFilter):
-    """Filter that bypasses `saving content restriction`
+    """Bypasses Telegram's `restrict saving content` (noforwards) protection.
 
-    Sample implementation:
-
-    Download the media (note that the file may be large),
-    upload it to the Telegram servers,
-    and then change the origin media to the new uploaded media
-
-    ```
-    # If here is media and noforwards enabled
-    if message.chat.noforwards and message.media:
-        # Handle images
-        if isinstance(message.media, types.MessageMediaPhoto):
-            client: TelegramClient = message.client
-            photo: bytes = await client.download_media(message=message, file=bytes)
-            cloned_photo: types.TypeInputFile = await client.upload_file(photo)
-            message.media = cloned_photo
-        # Others media types set to None (remove from original message)...
-        else:
-            message.media = None
-
-    return FilterResult(FilterAction.CONTINUE, message)
-    ```
+    Downloads media from a protected source message and re-uploads it as a
+    fresh file, so the outgoing message no longer references the protected
+    origin. Non-file media (polls, geo, contacts, webpages, ...) isn't
+    subject to this restriction and is passed through unchanged.
     """
 
     @property
@@ -37,4 +32,71 @@ class RestrictSavingContentBypassFilter(MessageFilter):
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]
     ) -> FilterResult[EventMessage]:
-        raise NotImplementedError
+        if not (message.chat and message.chat.noforwards and message.media):
+            return FilterResult(FilterAction.CONTINUE, message)
+
+        if isinstance(message.media, types.MessageMediaDocument):
+            doc = message.media.document
+            if not isinstance(doc, types.Document):
+                return FilterResult(FilterAction.DISCARD, message)
+            if doc.size > _NON_PREMIUM_UPLOAD_LIMIT_BYTES:
+                logger.info(
+                    "RestrictSavingContentBypassFilter: skipping %.2f GB file (chat_id=%s) — "
+                    "exceeds the ~2GB upload limit for accounts without Telegram Premium",
+                    doc.size / 1024**3,
+                    message.chat_id,
+                )
+                return FilterResult(FilterAction.DISCARD, message)
+
+        try:
+            if isinstance(message.media, types.MessageMediaPhoto):
+                await self._process_photo(message)
+            elif isinstance(message.media, types.MessageMediaDocument):
+                await self._process_document(message)
+        except Exception:
+            logger.exception(
+                "RestrictSavingContentBypassFilter: bypass failed (chat_id=%s)",
+                message.chat_id,
+            )
+            return FilterResult(FilterAction.DISCARD, message)
+
+        return FilterResult(FilterAction.CONTINUE, message)
+
+    async def _process_photo(self, message: EventMessage) -> None:
+        photo_bytes: bytes = await message._client.download_media(
+            message=message, file=bytes
+        )
+        handle = await message._client.upload_file(photo_bytes, file_name="photo.jpg")
+        message.media = handle
+
+    async def _process_document(self, message: EventMessage) -> None:
+        doc = message.media.document
+        filename = next(
+            (
+                a.file_name
+                for a in doc.attributes
+                if isinstance(a, types.DocumentAttributeFilename)
+            ),
+            None,
+        )
+        suffix = (
+            os.path.splitext(filename)[1]
+            if filename
+            else (mimetypes.guess_extension(doc.mime_type) or "")
+        )
+
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+                tmp_path = f.name
+
+            await message._client.download_media(message=message, file=tmp_path)
+            handle = await message._client.upload_file(
+                tmp_path, file_name=filename or os.path.basename(tmp_path)
+            )
+            message.media = types.InputMediaUploadedDocument(
+                file=handle, mime_type=doc.mime_type, attributes=doc.attributes
+            )
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)

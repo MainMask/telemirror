@@ -82,3 +82,8 @@ directions:
       #       -1001585626790:        # source channel ID
       #         template_path: "/data/watermarks/channel_wm.png"
       #         match_threshold: 0.75  # detection sensitivity (0.0–1.0)
+      # - RestrictSavingContentBypassFilter:  # bypass a source chat's "restrict saving content"
+      #                                       # (noforwards) protection by re-uploading media as a
+      #                                       # fresh file; requires mode: copy. No arguments.
+      #                                       # If used together with WatermarkRemovalFilter, must
+      #                                       # come after it (it replaces the message's media).
