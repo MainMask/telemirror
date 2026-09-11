@@ -76,7 +76,11 @@ async def open_client(
 
 
 async def fetch_all_topics(client, peer) -> list:
-    """Every forum topic of ``peer``, paginating past the 100-per-page API cap."""
+    """Every forum topic of ``peer``, paginating past the 100-per-page API cap.
+
+    ``ForumTopicDeleted`` tombstones (which carry only an ``id``) are dropped, so
+    callers can rely on ``.title`` / ``.icon_*`` being present.
+    """
     out, off_d, off_id, off_t = [], 0, 0, 0
     while True:
         r = await client(
@@ -88,11 +92,16 @@ async def fetch_all_topics(client, peer) -> list:
                 limit=100,
             )
         )
-        out.extend(r.topics)
+        real = [t for t in r.topics if getattr(t, "title", None) is not None]
+        out.extend(real)
         if len(r.topics) < 100:
             return out
-        last = r.topics[-1]
-        off_t, off_id, off_d = last.id, last.top_message, getattr(last, "date", 0) or 0
+        # курсор — по последнему НЕ удалённому топику страницы: у ForumTopicDeleted
+        # нет top_message/date, а нулевой курсор сбил бы пагинацию
+        last = real[-1] if real else r.topics[-1]
+        off_t = last.id
+        off_id = getattr(last, "top_message", 0) or 0
+        off_d = getattr(last, "date", 0) or 0
         await asyncio.sleep(0.3)
 
 

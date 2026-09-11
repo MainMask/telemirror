@@ -20,7 +20,6 @@ from telethon.tl.functions.channels import (
 from telethon.tl.functions.messages import (
     CreateForumTopicRequest,
     EditForumTopicRequest,
-    GetForumTopicsRequest,
 )
 from telethon.tl.types import ChatPhotoEmpty, InputChatUploadedPhoto
 
@@ -66,15 +65,28 @@ def show_menu() -> str:
 
 _DE_SKLAD_VARIANTS = ("DÈ SKLAD", "DÉ SKLAD", "DE SKLAD")
 
+_CITADEL_SUFFIX = "⚜️ Цитадель"
+_PIRATE_FLAG = "🏴‍☠️"
+
+# «🏴‍☠️ DÈ SKLAD» в хвосте заголовка (флаг и пробелы опциональны).
+_DONOR_TRAILER_RE = re.compile(
+    r"\s*(?:" + re.escape(_PIRATE_FLAG) + r"\s*)?(?:"
+    + "|".join(re.escape(v) for v in _DE_SKLAD_VARIANTS)
+    + r")\s*$"
+)
+
 
 def has_de_sklad(title: str) -> bool:
     return any(v in title for v in _DE_SKLAD_VARIANTS)
 
 
-def to_archonum(title: str) -> str:
-    for v in _DE_SKLAD_VARIANTS:
-        title = title.replace(v, "Archonum")
-    return title
+def to_citadel(title: str) -> str:
+    """Заголовок донора → заголовок получателя.
+
+    Срезает хвост «🏴‍☠️ DÈ SKLAD» и дописывает «⚜️ Цитадель». Заголовки без хвоста
+    (например «Activity | …») просто получают суффикс.
+    """
+    return f"{_DONOR_TRAILER_RE.sub('', title).rstrip()} {_CITADEL_SUFFIX}"
 
 
 _EMOJI_RE = re.compile(
@@ -84,11 +96,79 @@ _EMOJI_RE = re.compile(
 
 def name_key(title: str) -> str:
     """Strip brand keyword and emoji, return just the name part for fuzzy matching."""
-    for v in (*_DE_SKLAD_VARIANTS, "Archonum"):
+    for v in (*_DE_SKLAD_VARIANTS, "Цитадель"):
         if v in title:
             title = title.replace(v, "")
             break
     return _EMOJI_RE.sub("", title).strip()
+
+
+# ── Классификация доноров: живые (past + live) vs курсы (только past_mode) ─────
+#
+# Имена — как в диалогах владельца. Живые остаются в .configs/mirror.config.yml;
+# курсы уходят в отдельный citadel_courses.config.yml, который читает только
+# past_mode.py. Всё, что нашлось по «DE SKLAD», но не попало ни в один список,
+# скрипт печатает и не трогает.
+
+_LIVE_DONOR_TITLES = [
+    "СЛЕЗЫ САТОШИ 🏴‍☠️ DÈ SKLAD",
+    "BILLIONS CRYPTO 🏴‍☠️ DÈ SKLAD",
+    "pepe.research 🏴‍☠️ DÈ SKLAD",
+    "CRYPTO ANGEL 🏴‍☠️ DÈ SKLAD",
+    "INSTARDING 🏴‍☠️ DÉ SKLAD",
+    "MM TRADERS 🏴‍☠️ DÈ SKLAD",
+    "VECTRUM CLUB 🏴‍☠️DÈ SKLAD",
+    "INSTARDING PRO TRADING 🏴‍☠️ DÉ SKLAD",
+    "shitpost padre 🏴‍☠️ DÉ SKLAD",
+    "Pentagon Pro 🏴‍☠️ DE SKLAD",
+    "SmartCapital 🏴‍☠️ DÈ SKLAD",
+    "Rose 🏴‍☠️ DÈ SKLAD",
+]
+
+_COURSE_DONOR_TITLES = [
+    "Maloletoff Education 2024 🏴‍☠️ DÈ SKLAD",
+    "CRYPTOLOGY 🏴‍☠️ DÈ SKLAD",
+    "SANCHO 🏴‍☠️ DÈ SKLAD",
+    "Jay Education 🏴‍☠️ DÈ SKLAD",
+    "Mozart Academy 🏴‍☠️ DÈ SKLAD",
+    "Cryptomannn 2023 🏴‍☠️ DÈ SKLAD",
+    "a01k Academy 🏴‍☠️ DÈ SKLAD",
+    "Activity | Начинающий дропхантер",
+    "MM ACADEMY 🏴‍☠️ DÈ SKLAD",
+    "Block13 🏴‍☠️ DÈ SKLAD",
+    "CRYPTOLOGY WORKSHOP 🏴‍☠️ DÈ SKLAD",
+    "DEXMEN EDUCATION 🏴‍☠️ DÈ SKLAD",
+    "Meme bootcamp 2.0 🏴‍☠️ DÈ SKLAD",
+    "DYOR Pentagon 5.0 🏴‍☠️ DÉ SKLAD",
+    "DAYTRADING ACADEMY 🏴‍☠️ DÈ SKLAD",
+    "Vectrum Обучение 🏴‍☠️ DÈ SKLAD",
+    "DeFi Crypto 🏴‍☠️ DÈ SKLAD",
+    "Activity | Курс для новичков 2024",
+    "Обучение от КОВЧЕГА 🏴‍☠️ DÈ SKLAD",
+    "A01K Academy 2.0 🏴‍☠️ DÉ SKLAD",
+    "DarkTrader 3.0 🏴‍☠️ DÈ SKLAD",
+    "Dyor Pentagon Education 🏴‍☠️ DÈ SKLAD",
+    "Meme bootcamp (ноябрь) 🏴‍☠️ DÈ SKLAD",
+]
+
+_LIVE_KEYS = {name_key(t).casefold() for t in _LIVE_DONOR_TITLES}
+_COURSE_KEYS = {name_key(t).casefold() for t in _COURSE_DONOR_TITLES}
+
+
+def classify_donor(title: str) -> str:
+    """«live» / «course» / «unknown» по спискам выше (сверка по name_key).
+
+    Уже созданные получатели «⚜️ Цитадель» никогда не доноры: их name_key
+    совпадает с донорским, поэтому исключаем по бренду в заголовке.
+    """
+    if "Цитадель" in title:
+        return "unknown"
+    key = name_key(title).casefold()
+    if key in _LIVE_KEYS:
+        return "live"
+    if key in _COURSE_KEYS:
+        return "course"
+    return "unknown"
 
 
 def find_recipient(expected: str, recipients: dict):
@@ -108,15 +188,29 @@ def full_id(entity) -> int:
 
 
 def get_all_donors(dialogs) -> list:
+    """Доноры из хардкод-списков (живые + курсы), найденные среди диалогов."""
     return sorted(
-        [d for d in dialogs if has_de_sklad(d.title or "")],
-        key=lambda d: d.title,
+        [d for d in dialogs if classify_donor(d.title or "") != "unknown"],
+        key=lambda d: d.title or "",
     )
 
 
+def report_unmatched(dialogs) -> None:
+    """Печатает «DE SKLAD»-диалоги, которых нет ни в одном списке (не трогаются)."""
+    unmatched = [
+        d.title
+        for d in dialogs
+        if has_de_sklad(d.title or "") and classify_donor(d.title or "") == "unknown"
+    ]
+    if unmatched:
+        print(f"\nВне списков ({len(unmatched)}, пропускаю):")
+        for title in sorted(unmatched):
+            print(f"  ? '{title}'")
+
+
 def build_recipient_index(dialogs) -> dict:
-    """title → dialog for all Archonum-named dialogs (last wins on collision)."""
-    return {d.title: d for d in dialogs if "Archonum" in (d.title or "")}
+    """title → dialog for all «Цитадель»-named dialogs (last wins on collision)."""
+    return {d.title: d for d in dialogs if "Цитадель" in (d.title or "")}
 
 
 async def get_premium_status(client) -> bool:
@@ -126,21 +220,51 @@ async def get_premium_status(client) -> bool:
 
 # ── Шаг 1: Создать пары ──────────────────────────────────────────────────────
 
+async def _sync_forum_topics(client, donor_e, recip_e, *, enable_forum: bool) -> None:
+    """Создаёт у получателя каждый топик донора (id != 1), которого нет по названию.
+
+    Идемпотентно: повторный запуск после обрыва по FloodWait дозаполняет топики.
+    """
+    if enable_forum:
+        print("    Включаю форум...")
+        await safe_call(client,
+            lambda: client(ToggleForumRequest(channel=recip_e, enabled=True, tabs=False))
+        )
+
+    donor_topics = await fetch_all_topics(client, donor_e)
+    recip_titles = {t.title for t in await fetch_all_topics(client, recip_e)}
+    for topic in donor_topics:
+        if topic.id == 1 or topic.title in recip_titles:
+            continue
+        print(f"    Создаю топик '{topic.title}'...")
+        await safe_call(client,
+            lambda t=topic: client(
+                CreateForumTopicRequest(peer=recip_e, title=t.title, icon_color=t.icon_color)
+            )
+        )
+
+
 async def step_create_pairs(client):
     print("\n=== ШАГ 1: СОЗДАНИЕ ПАР ===\n")
     dialogs = await client.get_dialogs()
     donors = get_all_donors(dialogs)
     recipients = build_recipient_index(dialogs)
+    report_unmatched(dialogs)
 
     missing = []
     for donor in donors:
-        expected = to_archonum(donor.title)
+        expected = to_citadel(donor.title)
         dtype = entity_type(donor.entity)
         if dtype == "other":
             continue
         rec = find_recipient(expected, recipients)
         if rec and entity_type(rec.entity) == dtype:
             print(f"OK:      '{donor.title}'  →  '{expected}'")
+            # получатель мог остаться без части топиков (обрыв прошлого запуска)
+            if getattr(donor.entity, "forum", False):
+                await _sync_forum_topics(
+                    client, donor.entity, rec.entity, enable_forum=False
+                )
         else:
             found = entity_type(rec.entity) if rec else None
             note = f" (найден как {found}, не как {dtype})" if found else " (не найден)"
@@ -153,7 +277,7 @@ async def step_create_pairs(client):
 
     print(f"\nСоздаю {len(missing)} получател(ей)...")
     for donor in missing:
-        new_title = to_archonum(donor.title)
+        new_title = to_citadel(donor.title)
         e = donor.entity
         is_broadcast = getattr(e, "broadcast", False)
         is_megagroup = getattr(e, "megagroup", False)
@@ -177,25 +301,7 @@ async def step_create_pairs(client):
         print(f"    Создан: id={full_id(created)}  '{created.title}'")
 
         if is_megagroup and getattr(e, "forum", False):
-            topics_result = await safe_call(client,
-                lambda src=e: client(GetForumTopicsRequest(
-                    peer=src, offset_date=0, offset_id=0, offset_topic=0, limit=100
-                ))
-            )
-            if topics_result:
-                print("    Включаю форум...")
-                await safe_call(client,
-                    lambda c=created: client(ToggleForumRequest(channel=c, enabled=True, tabs=False))
-                )
-                for topic in topics_result.topics:
-                    if topic.id == 1:
-                        continue
-                    print(f"    Создаю топик '{topic.title}'...")
-                    await safe_call(client,
-                        lambda c=created, t=topic: client(
-                            CreateForumTopicRequest(peer=c, title=t.title, icon_color=t.icon_color)
-                        )
-                    )
+            await _sync_forum_topics(client, e, created, enable_forum=True)
 
     print("Готово.")
 
@@ -221,7 +327,7 @@ async def step_configure(client):
         return topic_cache[eid]
 
     for donor in donors:
-        expected = to_archonum(donor.title)
+        expected = to_citadel(donor.title)
         recipient = find_recipient(expected, recipients)
         if not recipient:
             print(f"ПРОПУСК '{donor.title}': получатель '{expected}' не найден")
@@ -310,17 +416,20 @@ async def step_verify(client):
     # Проверка пар
     print("--- Пары ---\n")
     for donor in donors:
-        expected = to_archonum(donor.title)
+        expected = to_citadel(donor.title)
         dtype = entity_type(donor.entity)
+        kind = classify_donor(donor.title)
         rec = find_recipient(expected, recipients)
         if rec and entity_type(rec.entity) == dtype:
-            print(f"OK:      '{donor.title}'  →  '{expected}'")
+            print(f"OK      [{kind}]: '{donor.title}'  →  '{expected}'")
         else:
             found = entity_type(rec.entity) if rec else None
             note = f" (найден как {found}, не как {dtype})" if found else " (не найден)"
-            print(f"MISSING: '{donor.title}'  →  '{expected}'{note}")
+            print(f"MISSING [{kind}]: '{donor.title}'  →  '{expected}'{note}")
 
-    # Поиск дублей Archonum-названий
+    report_unmatched(dialogs)
+
+    # Поиск дублей «Цитадель»-названий
     print("\n--- Дубли ---\n")
     known_ids: set[int] = set()
     if CONFIG_PATH.exists():
@@ -332,8 +441,11 @@ async def step_verify(client):
     groups: dict[str, list] = defaultdict(list)
     for dlg in dialogs:
         title = dlg.title or ""
-        if "Archonum" in title and not title.startswith("[ДУБЛЬ]"):
-            groups[name_key(title)].append(dlg)
+        key = name_key(title)
+        # пустой ключ = заголовок ровно «Цитадель» (бренд вырезан целиком):
+        # такие каналы схлопнулись бы в одну ложную группу
+        if key and "Цитадель" in title and not title.startswith("[ДУБЛЬ]"):
+            groups[key].append(dlg)
 
     extras = []
     any_dupe = False
@@ -391,25 +503,114 @@ async def step_verify(client):
 
 # ── Шаг 4: Собрать конфиг ────────────────────────────────────────────────────
 
-def write_directions(config_path: Path, directions: list) -> Path | None:
+def _direction(frm, to) -> dict:
+    """Одно направление с `past_mode: full_history` (свежий dict — без YAML-алиасов)."""
+    return {"from": [frm], "to": [to], "past_mode": {"full_history": True}}
+
+
+def _dir_key(d: dict) -> tuple:
+    return (
+        tuple(str(x) for x in d["from"]),
+        tuple(str(x) for x in d["to"]),
+    )
+
+
+def _append_directions_text(config_path: Path, original: str, fresh: list) -> None:
+    """Дописать `fresh` в конец блока `directions:`, сохраняя комментарии файла.
+
+    Требует, чтобы `directions:` был последним ключом верхнего уровня (так в
+    .configs/mirror.config.yml).
+    """
+    lines = original.splitlines()
+    top_keys = [i for i, ln in enumerate(lines) if re.match(r"[A-Za-z_][\w-]*:", ln)]
+    if not top_keys or not lines[top_keys[-1]].startswith("directions:"):
+        raise ValueError(
+            "directions: не последний ключ верхнего уровня — дозапись небезопасна, "
+            "правьте конфиг вручную"
+        )
+    block = yaml.safe_dump(
+        fresh, allow_unicode=True, default_flow_style=False, sort_keys=False
+    )
+    sep = "" if original.endswith("\n") else "\n"
+    config_path.write_text(original + sep + block, encoding="utf-8")
+
+
+def write_directions(
+    config_path: Path, directions: list, *, merge: bool = False
+) -> Path | None:
     """Записывает `directions` в конфиг, сохраняя остальные ключи.
+
+    `merge=False` (умолч.) — заменяет ключ `directions` целиком (комментарии файла
+    теряются). `merge=True` — дописывает только новые направления (дедуп по
+    from→to) в конец блока `directions:` текстом, сохраняя комментарии.
 
     Если файл существует — делает `.bak` и возвращает путь к нему.
     """
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    existing: dict = {}
-    backup: Path | None = None
-    if config_path.exists():
-        with open(config_path, encoding="utf-8") as f:
-            existing = yaml.safe_load(f) or {}
-        backup = config_path.with_suffix(config_path.suffix + ".bak")
-        backup.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
 
-    existing["directions"] = directions
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(
-            existing, f, allow_unicode=True, default_flow_style=False, sort_keys=False
+    if not config_path.exists():
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {"directions": directions}, f,
+                allow_unicode=True, default_flow_style=False, sort_keys=False,
+            )
+        return None
+
+    original = config_path.read_text(encoding="utf-8")
+    backup = config_path.with_suffix(config_path.suffix + ".bak")
+    backup.write_text(original, encoding="utf-8")
+
+    if not merge:
+        existing = yaml.safe_load(original) or {}
+        existing["directions"] = directions
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                existing, f,
+                allow_unicode=True, default_flow_style=False, sort_keys=False,
+            )
+        return backup
+
+    existing = yaml.safe_load(original) or {}
+    seen = {_dir_key(d) for d in (existing.get("directions") or [])}
+    fresh = [d for d in directions if _dir_key(d) not in seen]
+    if not fresh:
+        backup.unlink()
+        return None
+    _append_directions_text(config_path, original, fresh)
+    return backup
+
+
+COURSES_CONFIG_PATH = CONFIG_PATH.parent / "citadel_courses.config.yml"
+
+
+def write_courses_config(course_dirs: list) -> Path | None:
+    """Пишет citadel_courses.config.yml: глобальный блок из mirror.config.yml
+    (без broadcast_*) + directions курсов. Файл читает только past_mode.py."""
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        main_cfg = yaml.safe_load(f) or {}
+    carry = {
+        k: main_cfg[k]
+        for k in ("disable_edit", "disable_delete", "fallback_link_url", "filters")
+        if k in main_cfg
+    }
+    carry["directions"] = course_dirs
+
+    backup: Path | None = None
+    if COURSES_CONFIG_PATH.exists():
+        backup = COURSES_CONFIG_PATH.with_suffix(COURSES_CONFIG_PATH.suffix + ".bak")
+        backup.write_text(
+            COURSES_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8"
         )
+
+    header = (
+        "# Сгенерировано skylon_set/setup_mirrors.py — курсы «⚜️ Цитадель».\n"
+        "# main.py этот файл НЕ читает; курсы только прогоняются по истории:\n"
+        '#   YAML_CONFIG_ENV="$(cat .configs/citadel_courses.config.yml)" python past_mode.py\n\n'
+    )
+    body = yaml.safe_dump(
+        carry, allow_unicode=True, default_flow_style=False, sort_keys=False
+    )
+    COURSES_CONFIG_PATH.write_text(header + body, encoding="utf-8")
     return backup
 
 
@@ -419,32 +620,32 @@ async def step_build_config(client):
     donors = get_all_donors(dialogs)
     recipients = build_recipient_index(dialogs)
 
-    directions = []
+    live_dirs: list = []
+    course_dirs: list = []
     missing = []
 
     for donor in donors:
         e = donor.entity
-        expected = to_archonum(donor.title)
+        expected = to_citadel(donor.title)
         rec = find_recipient(expected, recipients)
+        kind = classify_donor(donor.title)
+        bucket = live_dirs if kind == "live" else course_dirs
 
         if not rec:
-            print(f"НЕ НАЙДЕН: '{donor.title}' → '{expected}'")
+            print(f"НЕ НАЙДЕН [{kind}]: '{donor.title}' → '{expected}'")
             missing.append(donor.title)
             continue
 
         r_e = rec.entity
 
         if getattr(e, "broadcast", False):
-            directions.append({"from": [full_id(e)], "to": [full_id(r_e)]})
-            print(f"OK (канал): '{donor.title}' → '{rec.title}'")
+            bucket.append(_direction(full_id(e), full_id(r_e)))
+            print(f"OK (канал) [{kind}]: '{donor.title}' → '{rec.title}'")
 
         elif getattr(e, "megagroup", False):
             if not getattr(e, "forum", False):
-                directions.append({
-                    "from": [f"{full_id(e)}#1"],
-                    "to":   [f"{full_id(r_e)}#1"],
-                })
-                print(f"OK (супергруппа): '{donor.title}' → '{rec.title}'")
+                bucket.append(_direction(f"{full_id(e)}#1", f"{full_id(r_e)}#1"))
+                print(f"OK (супергруппа) [{kind}]: '{donor.title}' → '{rec.title}'")
                 continue
 
             d_topics = await fetch_all_topics(client, e)
@@ -463,24 +664,32 @@ async def step_build_config(client):
                     print(f"  Топик '{d_topic.title}' не найден у '{rec.title}', пропускаю")
                     continue
 
-                directions.append({
-                    "from": [f"{full_id(e)}#{d_topic.id}"],
-                    "to":   [f"{full_id(r_e)}#{r_topic.id}"],
-                })
+                bucket.append(_direction(
+                    f"{full_id(e)}#{d_topic.id}", f"{full_id(r_e)}#{r_topic.id}"
+                ))
 
-            print(f"OK (форум): '{donor.title}' → '{rec.title}'")
+            print(f"OK (форум) [{kind}]: '{donor.title}' → '{rec.title}'")
 
-    # Обновляем только ключ `directions`, сохраняя filters / broadcast_* /
-    # disable_* и прочие ручные настройки существующего конфига.
-    backup = write_directions(CONFIG_PATH, directions)
-    if backup:
-        print(f"Бэкап прежнего конфига: {backup}")
+    report_unmatched(dialogs)
 
-    ch = sum(1 for d in directions if "#" not in str(d["from"][0]))
-    tp = len(directions) - ch
-    print(f"\nКонфиг записан: {ch} каналов + {tp} топиков → {CONFIG_PATH}")
+    # Живые — дозапись в основной конфиг (комментарии и текущие направления целы).
+    live_backup = write_directions(CONFIG_PATH, live_dirs, merge=True)
+    if live_backup:
+        print(f"\nЖивые: дозаписано в {CONFIG_PATH} (бэкап: {live_backup})")
+    else:
+        print(f"\nЖивые: новых направлений нет, {CONFIG_PATH} не тронут")
+
+    # Курсы — отдельный файл только для past_mode.py.
+    if course_dirs:
+        courses_backup = write_courses_config(course_dirs)
+        note = f" (бэкап: {courses_backup})" if courses_backup else ""
+        print(f"Курсы: {len(course_dirs)} направлений → {COURSES_CONFIG_PATH}{note}")
+
+    for label, dirs in (("живые", live_dirs), ("курсы", course_dirs)):
+        ch = sum(1 for d in dirs if "#" not in str(d["from"][0]))
+        print(f"  {label}: {ch} каналов + {len(dirs) - ch} топиков")
     if missing:
-        print(f"Пропущено {len(missing)} доноров без пары.")
+        print(f"Пропущено {len(missing)} доноров без пары: {missing}")
 
 
 # ── Шаг 5: Финальная проверка ─────────────────────────────────────────────────
@@ -494,7 +703,10 @@ async def step_final_verify(client):
     with open(CONFIG_PATH, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
-    directions   = data.get("directions", [])
+    directions   = list(data.get("directions", []))
+    if COURSES_CONFIG_PATH.exists():
+        with open(COURSES_CONFIG_PATH, encoding="utf-8") as f:
+            directions += (yaml.safe_load(f) or {}).get("directions", [])
     entity_cache: dict = {}
     topic_cache:  dict = {}
 
@@ -522,8 +734,10 @@ async def step_final_verify(client):
         from_id = int(str(direction["from"][0]))
         to_id   = int(str(direction["to"][0]))
         from_e  = await get_entity(from_id)
+        if classify_donor(from_e.title or "") == "unknown":
+            continue  # чужое направление (прежние пачки) — не наша забота
         to_e    = await get_entity(to_id)
-        expected = to_archonum(from_e.title)
+        expected = to_citadel(from_e.title)
         if to_e.title == expected:
             print(f"OK: '{from_e.title}' → '{to_e.title}'")
             ok += 1
@@ -542,6 +756,8 @@ async def step_final_verify(client):
         to_id,   to_tid   = int(tv.split("#")[0]),   int(tv.split("#")[1])
 
         from_topics = await get_topics(from_id)
+        if classify_donor(entity_cache[from_id].title or "") == "unknown":
+            continue  # чужое направление (прежние пачки) — не наша забота
         to_topics   = await get_topics(to_id)
         f_topic = from_topics.get(from_tid)
         t_topic = to_topics.get(to_tid)

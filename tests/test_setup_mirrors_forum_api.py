@@ -6,11 +6,13 @@ constructs these requests."""
 
 from telethon.tl.functions import channels, messages
 
+from skylon_set import _common
 from skylon_set import setup_mirrors as sm
 
 
 def test_forum_requests_come_from_messages_namespace():
-    assert sm.GetForumTopicsRequest is messages.GetForumTopicsRequest
+    # GetForumTopics is issued from the shared helper, the rest from the wizard
+    assert _common.GetForumTopicsRequest is messages.GetForumTopicsRequest
     assert sm.CreateForumTopicRequest is messages.CreateForumTopicRequest
     assert sm.EditForumTopicRequest is messages.EditForumTopicRequest
     # channel-scoped requests must NOT have moved
@@ -18,7 +20,7 @@ def test_forum_requests_come_from_messages_namespace():
 
 
 def test_forum_requests_accept_peer_kwarg():
-    get = sm.GetForumTopicsRequest(
+    get = _common.GetForumTopicsRequest(
         peer=-100, offset_date=0, offset_id=0, offset_topic=0, limit=100
     )
     assert get.peer == -100

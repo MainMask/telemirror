@@ -1,0 +1,481 @@
+# Сгенерировано skylon_set/setup_mirrors.py — курсы «⚜️ Цитадель».
+# main.py этот файл НЕ читает; курсы только прогоняются по истории:
+#   YAML_CONFIG_ENV="$(cat .configs/citadel_courses.config.yml)" python past_mode.py
+
+disable_edit: false
+disable_delete: true
+fallback_link_url: https://t.me/CitadelClan
+filters:
+- SkipWithUrlFilter:
+    blacklist: !!set
+      t.me/managerfrm: null
+      t.me/frmtribune: null
+      t.me/godolympbot: null
+      t.me/svyazfromonacobot: null
+      t.me/openfrm: null
+      t.me/mngrfrm: null
+- SkipWithKeywordsFilter:
+    keywords: !!set
+      O Λ И M П: null
+      r'@svyazfromonacobot': null
+      Олимп: null
+      Золотой билет: null
+      r'@managerfrm': null
+      r'@mngrfrm': null
+      r'@openfrm': null
+      r'@godolympbot': null
+      r'@frmtribune': null
+- WatermarkRemovalFilter:
+    remove_watermark: false
+    stamp_watermark: true
+- RestrictSavingContentBypassFilter
+- DocumentFilenameFilter:
+    suffix: '@CitadelClan'
+    remove:
+    - '@openfrm'
+    - openfrm
+directions:
+- from:
+  - -1002927675838#1
+  to:
+  - -1004474461451#1
+  past_mode:
+    full_history: true
+- from:
+  - -1002927675838#2
+  to:
+  - -1004474461451#2
+  past_mode:
+    full_history: true
+- from:
+  - -1002927675838#11
+  to:
+  - -1004474461451#3
+  past_mode:
+    full_history: true
+- from:
+  - -1002927675838#9
+  to:
+  - -1004474461451#4
+  past_mode:
+    full_history: true
+- from:
+  - -1002927675838#7
+  to:
+  - -1004474461451#5
+  past_mode:
+    full_history: true
+- from:
+  - -1002927675838#5
+  to:
+  - -1004474461451#6
+  past_mode:
+    full_history: true
+- from:
+  - -1002120391759
+  to:
+  - -1004443164778
+  past_mode:
+    full_history: true
+- from:
+  - -1002060000748
+  to:
+  - -1003905136652
+  past_mode:
+    full_history: true
+- from:
+  - -1001867871129
+  to:
+  - -1004477541378
+  past_mode:
+    full_history: true
+- from:
+  - -1002110625270
+  to:
+  - -1004304430349
+  past_mode:
+    full_history: true
+- from:
+  - -1001950466027
+  to:
+  - -1004358445952
+  past_mode:
+    full_history: true
+- from:
+  - -1001892331853
+  to:
+  - -1004392822957
+  past_mode:
+    full_history: true
+- from:
+  - -1001641270806
+  to:
+  - -1003901319427
+  past_mode:
+    full_history: true
+- from:
+  - -1001816442714
+  to:
+  - -1004405536420
+  past_mode:
+    full_history: true
+- from:
+  - -1002797860236
+  to:
+  - -1004283903776
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#1
+  to:
+  - -1003953193650#1
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#5
+  to:
+  - -1003953193650#2
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#3
+  to:
+  - -1003953193650#3
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#9
+  to:
+  - -1003953193650#4
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#11
+  to:
+  - -1003953193650#5
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#12
+  to:
+  - -1003953193650#6
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#13
+  to:
+  - -1003953193650#7
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#14
+  to:
+  - -1003953193650#8
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#15
+  to:
+  - -1003953193650#9
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#16
+  to:
+  - -1003953193650#10
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#17
+  to:
+  - -1003953193650#11
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#18
+  to:
+  - -1003953193650#12
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#19
+  to:
+  - -1003953193650#13
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#20
+  to:
+  - -1003953193650#14
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#21
+  to:
+  - -1003953193650#15
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#22
+  to:
+  - -1003953193650#16
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#23
+  to:
+  - -1003953193650#17
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#24
+  to:
+  - -1003953193650#18
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#25
+  to:
+  - -1003953193650#19
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#26
+  to:
+  - -1003953193650#20
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#27
+  to:
+  - -1003953193650#21
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#28
+  to:
+  - -1003953193650#22
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#29
+  to:
+  - -1003953193650#23
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#30
+  to:
+  - -1003953193650#24
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#31
+  to:
+  - -1003953193650#25
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#32
+  to:
+  - -1003953193650#26
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#33
+  to:
+  - -1003953193650#27
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#34
+  to:
+  - -1003953193650#28
+  past_mode:
+    full_history: true
+- from:
+  - -1001903727278#35
+  to:
+  - -1003953193650#29
+  past_mode:
+    full_history: true
+- from:
+  - -1002035177610
+  to:
+  - -1003747247102
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#1
+  to:
+  - -1004439837656#1
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#111
+  to:
+  - -1004439837656#2
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#97
+  to:
+  - -1004439837656#3
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#88
+  to:
+  - -1004439837656#4
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#83
+  to:
+  - -1004439837656#5
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#79
+  to:
+  - -1004439837656#6
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#70
+  to:
+  - -1004439837656#7
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#62
+  to:
+  - -1004439837656#8
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#54
+  to:
+  - -1004439837656#9
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#48
+  to:
+  - -1004439837656#10
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#19
+  to:
+  - -1004439837656#11
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#14
+  to:
+  - -1004439837656#12
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#6
+  to:
+  - -1004439837656#13
+  past_mode:
+    full_history: true
+- from:
+  - -1002252356542#3
+  to:
+  - -1004439837656#14
+  past_mode:
+    full_history: true
+- from:
+  - -1001939408082
+  to:
+  - -1003962592430
+  past_mode:
+    full_history: true
+- from:
+  - -1002283439005
+  to:
+  - -1003929409955
+  past_mode:
+    full_history: true
+- from:
+  - -1001684650890
+  to:
+  - -1004444735753
+  past_mode:
+    full_history: true
+- from:
+  - -1002271841792
+  to:
+  - -1003570014996
+  past_mode:
+    full_history: true
+- from:
+  - -1002587196351
+  to:
+  - -1004476454535
+  past_mode:
+    full_history: true
+- from:
+  - -1001819212207
+  to:
+  - -1003973100212
+  past_mode:
+    full_history: true
+- from:
+  - -1001702342727
+  to:
+  - -1004341264659
+  past_mode:
+    full_history: true
+- from:
+  - -1001835299207
+  to:
+  - -1004309664134
+  past_mode:
+    full_history: true
+- from:
+  - -1001947438361
+  to:
+  - -1004253414872
+  past_mode:
+    full_history: true
+- from:
+  - -1002958733572#1
+  to:
+  - -1003716407431#1
+  past_mode:
+    full_history: true
+- from:
+  - -1002958733572#8
+  to:
+  - -1003716407431#2
+  past_mode:
+    full_history: true
+- from:
+  - -1002958733572#6
+  to:
+  - -1003716407431#3
+  past_mode:
+    full_history: true
+- from:
+  - -1002958733572#4
+  to:
+  - -1003716407431#4
+  past_mode:
+    full_history: true
+- from:
+  - -1002958733572#2
+  to:
+  - -1003716407431#5
+  past_mode:
+    full_history: true
+- from:
+  - -1002958733572#10
+  to:
+  - -1003716407431#6
+  past_mode:
+    full_history: true
