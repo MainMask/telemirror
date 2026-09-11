@@ -15,7 +15,7 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 from time import monotonic
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -87,6 +87,31 @@ def _log_progress(
         logger.info(f"{prefix}: обработано {processed}")
 
 
+def _log_overall(
+    logger: logging.Logger,
+    pair_no: int,
+    pair_count: int,
+    done: int,
+    total: int,
+    run_start: float,
+) -> None:
+    """Сквозная строка прогресса по всем парам каналов."""
+    elapsed = monotonic() - run_start
+    if total > 0 and done > 0:
+        pct = min(100.0, done / total * 100.0)
+        eta = (
+            f" • ETA ~{_format_duration(elapsed / done * (total - done))}"
+            if done < total
+            else ""
+        )
+        tail = f"суммарно ~{done}/{total} ({pct:.0f}%){eta}"
+    else:
+        tail = f"суммарно обработано {done}"
+    logger.info(
+        f"[Прогресс] пара {pair_no}/{pair_count} • {tail} • прошло {_format_duration(elapsed)}"
+    )
+
+
 async def _integrity_check(
     database: Database,
     source_id: int,
@@ -128,22 +153,39 @@ async def _replay_direction(
     database: Database,
     source_id: int,
     target_id: int,
-    cfg: DirectionConfig,
+    cfgs: List[DirectionConfig],
     logger: logging.Logger,
-) -> None:
-    pm = cfg.past_mode
+    total: Optional[int] = None,
+) -> int:
+    """Один проход по истории канала на пару (source, target).
+
+    Все топик-направления пары обрабатываются за этот проход: процессор
+    маршрутизирует каждое сообщение по тем cfg, чей from_topic_id совпадает.
+    `total` (кол-во сообщений источника) переиспользуется из _run, если передан.
+    Возвращает число обработанных сообщений/альбомов.
+    """
+    pm = cfgs[0].past_mode
     prefix = f"[PastMode] {source_id}→{target_id}"
-    logger.info(f"{prefix}: старт (стратегия={_strategy_label(pm)})")
+
+    labels = {_strategy_label(c.past_mode) for c in cfgs}
+    if len(labels) > 1:
+        logger.warning(
+            f"{prefix}: у топиков пары разные стратегии past_mode ({sorted(labels)}), "
+            f"беру первую ({_strategy_label(pm)})"
+        )
+    topics_note = "" if len(cfgs) == 1 else f", топиков={len(cfgs)}"
+    logger.info(f"{prefix}: старт (стратегия={_strategy_label(pm)}{topics_note})")
 
     checkpoint, mirrors_done = await _integrity_check(database, source_id, target_id, logger)
     if checkpoint is not None:
         logger.info(f"{prefix}: продолжение с message_id={checkpoint}")
 
-    try:
-        total = (await client.get_messages(source_id, limit=0)).total
-    except Exception as e:
-        logger.warning(f"{prefix}: не удалось получить total: {e}")
-        total = 0
+    if total is None:
+        try:
+            total = (await client.get_messages(source_id, limit=0)).total
+        except Exception as e:
+            logger.warning(f"{prefix}: не удалось получить total: {e}")
+            total = 0
 
     # last_n без чекпоинта: собрать в память (новейшие первые), перевернуть
     use_buffer = pm.last_n is not None and checkpoint is None
@@ -175,9 +217,9 @@ async def _replay_direction(
         logger.info(f"{prefix}: ~{iter_total} сообщений к обработке{eta_str}")
 
     # Full CHAT_MAPPING is needed so _try_rewrite_tg_link can resolve cross-channel links.
-    # Override only the current source to this single direction to keep routing correct.
+    # Override only the current source to this single target pair to keep routing correct.
     processor = EventProcessor(
-        chat_mapping={**CHAT_MAPPING, source_id: {target_id: [cfg]}},
+        chat_mapping={**CHAT_MAPPING, source_id: {target_id: cfgs}},
         database=database,
         client=client,
         logger=logger,
@@ -226,6 +268,7 @@ async def _replay_direction(
             await process_single(group)
 
     logger.info(f"{prefix}: завершено. Обработано {processed} сообщений/альбомов.")
+    return processed
 
 
 async def _replay_with_retry(
@@ -233,9 +276,10 @@ async def _replay_with_retry(
     database: Database,
     source_id: int,
     target_id: int,
-    cfg: DirectionConfig,
+    cfgs: List[DirectionConfig],
     logger: logging.Logger,
-) -> None:
+    total: Optional[int] = None,
+) -> int:
     """Run `_replay_direction`, retrying on a >threshold FloodWait.
 
     Telethon auto-sleeps for waits ≤300s (flood_sleep_threshold); this loop
@@ -245,8 +289,9 @@ async def _replay_with_retry(
     """
     while True:
         try:
-            await _replay_direction(client, database, source_id, target_id, cfg, logger)
-            return
+            return await _replay_direction(
+                client, database, source_id, target_id, cfgs, logger, total
+            )
         except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
             logger.warning(f"FloodWait {e.seconds}s, ждём и повторяем...")
             await asyncio.sleep(e.seconds)
@@ -255,12 +300,15 @@ async def _replay_with_retry(
 async def _edit_links_pass(
     client: TelegramClient,
     database: Database,
-    directions: List,
+    pairs: Dict[Tuple[int, int], List[DirectionConfig]],
     logger: logging.Logger,
 ) -> None:
     """Второй проход: исправляет перекрёстные ссылки в уже отправленных сообщениях."""
-    for source_id, target_id, cfg in directions:
-        if cfg.mode != "copy":
+    for (source_id, target_id), cfgs in pairs.items():
+        # Работа тут пар-широкая (binding_id по паре каналов); берём первый
+        # copy-топик пары — fallback_link_url/send_delay у топиков пары совпадают.
+        cfg = next((c for c in cfgs if c.mode == "copy"), None)
+        if cfg is None:
             continue
 
         prefix = f"[EditPass] {source_id}→{target_id}"
@@ -345,22 +393,26 @@ async def _run(logger: logging.Logger) -> None:
         "Убедитесь, что main.py НЕ запущен."
     )
 
-    directions = [
-        (src, tgt, cfg)
-        for src, targets in CHAT_MAPPING.items()
-        for tgt, cfgs in targets.items()
-        for cfg in cfgs
-        if cfg.past_mode is not None
-    ]
+    # Группируем по паре каналов: все топик-направления пары идут одним проходом.
+    pairs: Dict[Tuple[int, int], List[DirectionConfig]] = {}
+    for src, targets in CHAT_MAPPING.items():
+        for tgt, cfgs in targets.items():
+            pm_cfgs = [c for c in cfgs if c.past_mode is not None]
+            if pm_cfgs:
+                pairs[(src, tgt)] = pm_cfgs
 
-    if not directions:
+    if not pairs:
         logger.warning(
             "Нет направлений с past_mode. "
             "Добавьте past_mode: в конфиг (YAML) или PAST_MODE= в .env."
         )
         return
 
-    logger.info(f"Найдено {len(directions)} направление(й) для воспроизведения.")
+    direction_count = sum(len(c) for c in pairs.values())
+    logger.info(
+        f"Найдено {direction_count} направление(й) в {len(pairs)} паре(ах) каналов "
+        "для воспроизведения."
+    )
 
     database: Database = (
         InMemoryDatabase() if USE_MEMORY_DB else await PostgresDatabase(connection_string=DB_URL)
@@ -393,17 +445,41 @@ async def _run(logger: logging.Logger) -> None:
     logger.info(f"Вошли как {utils.get_display_name(me)}{at_username}")
 
     try:
-        for source_id, target_id, cfg in directions:
-            await _replay_with_retry(client, database, source_id, target_id, cfg, logger)
+        # Общий прогресс: суммарный total по источникам как знаменатель
+        # (один полный проход по каналу на пару, поэтому источник с N парами
+        # учитывается N раз).
+        source_total: Dict[int, int] = {}
+        for src, _ in pairs:
+            if src not in source_total:
+                try:
+                    source_total[src] = (await client.get_messages(src, limit=0)).total
+                except Exception as e:
+                    logger.warning(f"Не удалось получить total для {src}: {e}")
+                    source_total[src] = 0
+        overall_total = sum(source_total[src] for src, _ in pairs)
+        overall_done = 0
+        run_start = monotonic()
+
+        for pair_no, ((source_id, target_id), cfgs) in enumerate(pairs.items(), start=1):
+            overall_done += await _replay_with_retry(
+                client, database, source_id, target_id, cfgs, logger,
+                total=source_total[source_id],
+            )
+            _log_overall(
+                logger, pair_no, len(pairs), overall_done, overall_total, run_start
+            )
 
         # Second pass: fix cross-channel links that couldn't be resolved during mirroring
         logger.info("Второй проход: исправление перекрёстных ссылок...")
-        await _edit_links_pass(client, database, directions, logger)
+        await _edit_links_pass(client, database, pairs, logger)
 
         if TECH_CHANNEL:
-            pairs = "\n".join(f"• `{s}` → `{t}`" for s, t, _ in directions)
-            header = f"✅ Past mode завершён. Скопирована история {len(directions)} направлени(й)."
-            full = f"{header}\n\n{pairs}"
+            pair_lines = "\n".join(f"• `{s}` → `{t}`" for s, t in pairs)
+            header = (
+                f"✅ Past mode завершён. Скопирована история {len(pairs)} пар(ы) каналов "
+                f"({direction_count} направлени(й))."
+            )
+            full = f"{header}\n\n{pair_lines}"
             await client.send_message(TECH_CHANNEL, full if len(full) <= 4096 else header)
     finally:
         await client.disconnect()
