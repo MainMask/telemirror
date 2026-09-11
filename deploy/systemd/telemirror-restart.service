@@ -1,6 +1,6 @@
 [Unit]
-Description=telemirror — плановый чистый рестарт живого зеркала
-# Не трогать, если бэкофилл истории сейчас держит зеркало остановленным.
+Description=telemirror — scheduled clean restart of the live mirror
+# Don't touch it if a history backfill is currently holding the mirror stopped.
 After=telemirror.service
 
 [Service]

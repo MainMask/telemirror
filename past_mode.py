@@ -1,12 +1,12 @@
 """
-Прогоняет историю сообщений через пайплайн зеркалирования
-для направлений, у которых задан past_mode.
+Replays message history through the mirroring pipeline for directions that
+have past_mode configured.
 
-Использование:
+Usage:
     python past_mode.py
 
-Предупреждение: использует тот же SESSION_STRING, что и основной сервис.
-Не запускайте одновременно с main.py.
+Warning: uses the same SESSION_STRING as the main service.
+Do not run at the same time as main.py.
 """
 
 import asyncio
@@ -39,7 +39,6 @@ except Exception:
     raise
 
 from telethon import TelegramClient, errors, utils
-from telethon.sessions import StringSession
 from telethon.tl import types
 
 from telemirror.messagefilters import MediaDownloadError
@@ -47,16 +46,17 @@ from telemirror.mirroring import EventProcessor
 from telemirror.misc.links import private_message_link
 from telemirror.misc.log_setup import setup_stdout_logger
 from telemirror.misc.message_groups import iter_message_groups
+from telemirror.misc.telegram_client import build_telegram_client
 from telemirror.storage import Database, InMemoryDatabase, PostgresDatabase
 
-_LOG_EVERY = 25  # логировать прогресс каждые N сообщений/альбомов
+_LOG_EVERY = 25  # log progress every N messages/albums
 
-# MediaDownloadError = транзиентный сбой выдачи файлов Telegram, переживший
-# ретраи download_media_with_retry. Ждём и повторяем прогон с чекпоинта; после
-# _MEDIA_RETRY_LIMIT попыток подряд по одному сообщению — сдвигаем чекпоинт за
-# него, шлём алерт в TECH_CHANNEL и едем дальше (не крашимся в цикле рестартов
-# systemd, не держим live-зеркало остановленным часами).
-_MEDIA_RETRY_WAIT = 120  # секунд между повторами
+# MediaDownloadError = a transient Telegram file-serving failure that outlived
+# download_media_with_retry's own retries. Wait and re-run from the checkpoint;
+# after _MEDIA_RETRY_LIMIT consecutive attempts on the same message — skip past
+# it, alert TECH_CHANNEL, and move on (don't crash-loop under systemd, don't
+# hold the live mirror down for hours).
+_MEDIA_RETRY_WAIT = 120  # seconds between retries
 _MEDIA_RETRY_LIMIT = 5
 
 
@@ -78,10 +78,10 @@ def _strategy_label(pm) -> str:
 
 def _format_duration(seconds: float) -> str:
     if seconds >= 3600:
-        return f"{seconds / 3600:.1f}ч"
+        return f"{seconds / 3600:.1f}h"
     if seconds >= 60:
-        return f"{seconds / 60:.0f}мин"
-    return f"{seconds:.0f}с"
+        return f"{seconds / 60:.0f}min"
+    return f"{seconds:.0f}s"
 
 
 def _log_progress(
@@ -93,7 +93,7 @@ def _log_progress(
         eta = f", ETA {elapsed / processed * (total - processed):.0f}s" if processed >= 3 else ""
         logger.info(f"{prefix}: {processed}/{total} ({pct:.1f}%){eta}")
     else:
-        logger.info(f"{prefix}: обработано {processed}")
+        logger.info(f"{prefix}: processed {processed}")
 
 
 def _log_overall(
@@ -104,7 +104,7 @@ def _log_overall(
     total: int,
     run_start: float,
 ) -> None:
-    """Сквозная строка прогресса по всем парам каналов."""
+    """Cross-pair progress line spanning every channel pair."""
     elapsed = monotonic() - run_start
     if total > 0 and done > 0:
         pct = min(100.0, done / total * 100.0)
@@ -113,11 +113,11 @@ def _log_overall(
             if done < total
             else ""
         )
-        tail = f"суммарно ~{done}/{total} ({pct:.0f}%){eta}"
+        tail = f"overall ~{done}/{total} ({pct:.0f}%){eta}"
     else:
-        tail = f"суммарно обработано {done}"
+        tail = f"overall processed {done}"
     logger.info(
-        f"[Прогресс] пара {pair_no}/{pair_count} • {tail} • прошло {_format_duration(elapsed)}"
+        f"[Progress] pair {pair_no}/{pair_count} • {tail} • elapsed {_format_duration(elapsed)}"
     )
 
 
@@ -127,7 +127,7 @@ async def _integrity_check(
     target_id: int,
     logger: logging.Logger,
 ) -> tuple[Optional[int], int]:
-    """Проверяет чекпоинт, возвращает (скорректированный checkpoint, кол-во зеркал в БД)."""
+    """Checks the checkpoint, returns (corrected checkpoint, mirror count in DB)."""
     prefix = f"[PastMode] {source_id}→{target_id}"
     checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)
     if checkpoint is None:
@@ -135,12 +135,12 @@ async def _integrity_check(
 
     mirrors = await database.get_messages_for_channel_pair(source_id, target_id)
     mirror_count = len(mirrors)
-    logger.info(f"{prefix}: чекпоинт={checkpoint}, зеркал в БД={mirror_count}")
+    logger.info(f"{prefix}: checkpoint={checkpoint}, mirrors in DB={mirror_count}")
 
     if mirror_count == 0:
         logger.warning(
-            f"{prefix}: чекпоинт={checkpoint} есть, но зеркала не найдены "
-            "(возможно, все сообщения отфильтрованы или проблема с БД)"
+            f"{prefix}: checkpoint={checkpoint} is set, but no mirrors were found "
+            "(possibly every message was filtered out, or a DB issue)"
         )
         return checkpoint, 0
 
@@ -148,8 +148,9 @@ async def _integrity_check(
     if checkpoint < max_mirrored:
         logger.warning(
             f"{prefix}: checkpoint={checkpoint} < max_mirrored={max_mirrored}, "
-            f"сдвигаю checkpoint вперёд до {max_mirrored} "
-            f"(сообщения между {checkpoint} и {max_mirrored} без зеркал при resume пропускаются)"
+            f"advancing the checkpoint to {max_mirrored} "
+            f"(messages between {checkpoint} and {max_mirrored} with no mirror "
+            "will be skipped on resume)"
         )
         await database.set_past_mode_checkpoint(source_id, target_id, max_mirrored)
         return max_mirrored, mirror_count
@@ -166,12 +167,12 @@ async def _replay_direction(
     logger: logging.Logger,
     total: Optional[int] = None,
 ) -> int:
-    """Один проход по истории канала на пару (source, target).
+    """One pass over a channel's history for a (source, target) pair.
 
-    Все топик-направления пары обрабатываются за этот проход: процессор
-    маршрутизирует каждое сообщение по тем cfg, чей from_topic_id совпадает.
-    `total` (кол-во сообщений источника) переиспользуется из _run, если передан.
-    Возвращает число обработанных сообщений/альбомов.
+    Every topic-direction of the pair is handled in this single pass: the
+    processor routes each message to whichever cfg's from_topic_id matches.
+    `total` (source message count) is reused from `_run` when given.
+    Returns the number of messages/albums processed.
     """
     pm = cfgs[0].past_mode
     prefix = f"[PastMode] {source_id}→{target_id}"
@@ -179,24 +180,24 @@ async def _replay_direction(
     labels = {_strategy_label(c.past_mode) for c in cfgs}
     if len(labels) > 1:
         logger.warning(
-            f"{prefix}: у топиков пары разные стратегии past_mode ({sorted(labels)}), "
-            f"беру первую ({_strategy_label(pm)})"
+            f"{prefix}: the pair's topics have different past_mode strategies "
+            f"({sorted(labels)}), using the first one ({_strategy_label(pm)})"
         )
-    topics_note = "" if len(cfgs) == 1 else f", топиков={len(cfgs)}"
-    logger.info(f"{prefix}: старт (стратегия={_strategy_label(pm)}{topics_note})")
+    topics_note = "" if len(cfgs) == 1 else f", topics={len(cfgs)}"
+    logger.info(f"{prefix}: starting (strategy={_strategy_label(pm)}{topics_note})")
 
     checkpoint, mirrors_done = await _integrity_check(database, source_id, target_id, logger)
     if checkpoint is not None:
-        logger.info(f"{prefix}: продолжение с message_id={checkpoint}")
+        logger.info(f"{prefix}: resuming from message_id={checkpoint}")
 
     if total is None:
         try:
             total = (await client.get_messages(source_id, limit=0)).total
         except Exception as e:
-            logger.warning(f"{prefix}: не удалось получить total: {e}")
+            logger.warning(f"{prefix}: failed to get total: {e}")
             total = 0
 
-    # last_n без чекпоинта: собрать в память (новейшие первые), перевернуть
+    # last_n without a checkpoint: buffer into memory (newest first), reverse
     use_buffer = pm.last_n is not None and checkpoint is None
     if use_buffer:
         buffer: List = []
@@ -207,10 +208,10 @@ async def _replay_direction(
     else:
         iter_kwargs: dict = {"reverse": True}
         if checkpoint is not None:
-            iter_kwargs["min_id"] = checkpoint  # min_id эксклюзивен — продолжаем со следующего
+            iter_kwargs["min_id"] = checkpoint  # min_id is exclusive — resume from the next one
         elif pm.since_date is not None:
             iter_kwargs["offset_date"] = pm.since_date
-        # full_history: только reverse=True
+        # full_history: reverse=True only
         iter_total = (
             max(0, pm.last_n - mirrors_done)
             if pm.last_n is not None and checkpoint is not None
@@ -219,11 +220,12 @@ async def _replay_direction(
 
     if iter_total > 0:
         eta_str = (
-            f", не менее ≈{_format_duration(iter_total * pm.send_delay)} (только send_delay, без учёта загрузки)"
+            f", at least ≈{_format_duration(iter_total * pm.send_delay)} "
+            "(send_delay only, download time not counted)"
             if pm.send_delay > 0
             else ""
         )
-        logger.info(f"{prefix}: ~{iter_total} сообщений к обработке{eta_str}")
+        logger.info(f"{prefix}: ~{iter_total} message(s) to process{eta_str}")
 
     # Full CHAT_MAPPING is needed so _try_rewrite_tg_link can resolve cross-channel links.
     # Override only the current source to this single target pair to keep routing correct.
@@ -277,7 +279,7 @@ async def _replay_direction(
         else:
             await process_single(group)
 
-    logger.info(f"{prefix}: завершено. Обработано {processed} сообщений/альбомов.")
+    logger.info(f"{prefix}: done. Processed {processed} message(s)/album(s).")
     return processed
 
 
@@ -292,11 +294,11 @@ async def _notify_skipped(
     try:
         await client.send_message(
             TECH_CHANNEL,
-            f"⚠️ past_mode пропустил {link} — файл не скачался за все попытки. "
-            f"Домиррорь вручную после восстановления Telegram.",
+            f"⚠️ past_mode skipped {link} — the file failed to download after all "
+            f"attempts. Mirror it manually once Telegram recovers.",
         )
     except Exception as e:  # noqa: BLE001 - alert failure is not replay failure
-        logger.warning(f"не смог уведомить TECH_CHANNEL о пропуске: {e}")
+        logger.warning(f"failed to notify TECH_CHANNEL about the skip: {e}")
 
 
 async def _replay_with_retry(
@@ -324,7 +326,7 @@ async def _replay_with_retry(
                 client, database, source_id, target_id, cfgs, logger, total
             )
         except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
-            logger.warning(f"FloodWait {e.seconds}s, ждём и повторяем...")
+            logger.warning(f"FloodWait {e.seconds}s, waiting and retrying...")
             await asyncio.sleep(e.seconds)
         except MediaDownloadError as e:
             checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)
@@ -336,8 +338,8 @@ async def _replay_with_retry(
                 if e.message_id is None:
                     raise  # can't skip what we can't name
                 logger.error(
-                    f"{e} — {_MEDIA_RETRY_LIMIT} повторов не помогли, "
-                    f"пропускаю сообщение {e.message_id} и еду дальше"
+                    f"{e} — {_MEDIA_RETRY_LIMIT} retries didn't help, "
+                    f"skipping message {e.message_id} and moving on"
                 )
                 await _notify_skipped(client, source_id, e.message_id, logger)
                 await database.set_past_mode_checkpoint(source_id, target_id, e.message_id)
@@ -345,7 +347,7 @@ async def _replay_with_retry(
                 media_failure_checkpoint = e.message_id
                 continue
             logger.warning(
-                f"{e} — ждём {_MEDIA_RETRY_WAIT}s и повторяем с чекпоинта "
+                f"{e} — waiting {_MEDIA_RETRY_WAIT}s and retrying from the checkpoint "
                 f"({media_failures}/{_MEDIA_RETRY_LIMIT})"
             )
             await asyncio.sleep(_MEDIA_RETRY_WAIT)
@@ -357,10 +359,11 @@ async def _edit_links_pass(
     pairs: Dict[Tuple[int, int], List[DirectionConfig]],
     logger: logging.Logger,
 ) -> None:
-    """Второй проход: исправляет перекрёстные ссылки в уже отправленных сообщениях."""
+    """Second pass: fixes cross-channel links in already-sent messages."""
     for (source_id, target_id), cfgs in pairs.items():
-        # Работа тут пар-широкая (binding_id по паре каналов); берём первый
-        # copy-топик пары — fallback_link_url/send_delay у топиков пары совпадают.
+        # Work here is pair-wide (binding_id is keyed by channel pair); take the
+        # pair's first copy-mode topic — fallback_link_url/send_delay are the
+        # same across the pair's topics.
         cfg = next((c for c in cfgs if c.mode == "copy"), None)
         if cfg is None:
             continue
@@ -390,7 +393,7 @@ async def _edit_links_pass(
                     source_id, ids=_ids[_i : _i + _BATCH]
                 )
             except Exception as e:
-                logger.warning(f"{prefix}: не удалось получить сообщения batch: {e}")
+                logger.warning(f"{prefix}: failed to fetch message batch: {e}")
                 break
 
             for src_msg in src_batch:
@@ -428,26 +431,26 @@ async def _edit_links_pass(
                         formatting_entities=msg_copy.entities,
                     )
                     edited += 1
-                    logger.info(f"{prefix}: исправлена ссылка в {mirror.original_id}→{mirror.mirror_id}")
+                    logger.info(f"{prefix}: fixed link in {mirror.original_id}→{mirror.mirror_id}")
                     if cfg.past_mode.send_delay:
                         await asyncio.sleep(cfg.past_mode.send_delay)
                 except Exception as e:
                     logger.warning(
-                        f"{prefix}: ошибка редактирования {mirror.mirror_id}: "
+                        f"{prefix}: error editing {mirror.mirror_id}: "
                         f"{type(e).__name__}: {e}"
                     )
 
         if edited:
-            logger.info(f"{prefix}: исправлено {edited} сообщени(ий)")
+            logger.info(f"{prefix}: fixed {edited} message(s)")
 
 
 async def _run(logger: logging.Logger) -> None:
     logger.warning(
-        "past_mode.py использует тот же SESSION_STRING, что и живой сервис. "
-        "Убедитесь, что main.py НЕ запущен."
+        "past_mode.py uses the same SESSION_STRING as the live service. "
+        "Make sure main.py is NOT running."
     )
 
-    # Группируем по паре каналов: все топик-направления пары идут одним проходом.
+    # Group by channel pair: every topic-direction of a pair is replayed in one pass.
     pairs: Dict[Tuple[int, int], List[DirectionConfig]] = {}
     for src, targets in CHAT_MAPPING.items():
         for tgt, cfgs in targets.items():
@@ -457,15 +460,15 @@ async def _run(logger: logging.Logger) -> None:
 
     if not pairs:
         logger.warning(
-            "Нет направлений с past_mode. "
-            "Добавьте past_mode: в конфиг (YAML) или PAST_MODE= в .env."
+            "No directions have past_mode configured. "
+            "Add past_mode: to the config (YAML) or PAST_MODE= to .env."
         )
         return
 
     direction_count = sum(len(c) for c in pairs.values())
     logger.info(
-        f"Найдено {direction_count} направление(й) в {len(pairs)} паре(ах) каналов "
-        "для воспроизведения."
+        f"Found {direction_count} direction(s) across {len(pairs)} channel pair(s) "
+        "to replay."
     )
 
     database: Database = (
@@ -473,42 +476,40 @@ async def _run(logger: logging.Logger) -> None:
     )
 
     _CONN_RETRIES = 20
-    _RETRY_DELAY = 3  # секунд между попытками переподключения
+    _RETRY_DELAY = 3  # seconds between reconnect attempts
 
-    client = TelegramClient(
-        StringSession(SESSION_STRING),
+    # flood_sleep_threshold=300: Telethon auto-sleeps FloodWait ≤300s (same as main.py)
+    client = build_telegram_client(
+        SESSION_STRING,
         API_ID,
         API_HASH,
         device_model=API_DEVICE_MODEL,
         system_version=API_SYSTEM_VERSION,
         app_version=API_APP_VERSION,
-        flood_sleep_threshold=300,  # Telethon auto-sleep для FloodWait ≤300s (как в main.py)
         connection_retries=_CONN_RETRIES,
         retry_delay=_RETRY_DELAY,
     )
     logger.info(
-        f"При обрыве соединения: до {_CONN_RETRIES} попыток с задержкой {_RETRY_DELAY}s между ними"
+        f"On a dropped connection: up to {_CONN_RETRIES} attempts, {_RETRY_DELAY}s apart"
     )
-    client.parse_mode = "markdown"
     await client.connect()
 
     me = await client.get_me()
     if me is None:
-        raise RuntimeError("Нет авторизации. Запустите login.py для получения SESSION_STRING.")
+        raise RuntimeError("Not authorized. Run login.py to get a SESSION_STRING.")
     at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
-    logger.info(f"Вошли как {utils.get_display_name(me)}{at_username}")
+    logger.info(f"Logged in as {utils.get_display_name(me)}{at_username}")
 
     try:
-        # Общий прогресс: суммарный total по источникам как знаменатель
-        # (один полный проход по каналу на пару, поэтому источник с N парами
-        # учитывается N раз).
+        # Overall progress: the sum of source totals as the denominator (one
+        # full pass per pair, so a source with N pairs is counted N times).
         source_total: Dict[int, int] = {}
         for src, _ in pairs:
             if src not in source_total:
                 try:
                     source_total[src] = (await client.get_messages(src, limit=0)).total
                 except Exception as e:
-                    logger.warning(f"Не удалось получить total для {src}: {e}")
+                    logger.warning(f"Failed to get total for {src}: {e}")
                     source_total[src] = 0
         overall_total = sum(source_total[src] for src, _ in pairs)
         overall_done = 0
@@ -524,14 +525,14 @@ async def _run(logger: logging.Logger) -> None:
             )
 
         # Second pass: fix cross-channel links that couldn't be resolved during mirroring
-        logger.info("Второй проход: исправление перекрёстных ссылок...")
+        logger.info("Second pass: fixing cross-channel links...")
         await _edit_links_pass(client, database, pairs, logger)
 
         if TECH_CHANNEL:
             pair_lines = "\n".join(f"• `{s}` → `{t}`" for s, t in pairs)
             header = (
-                f"✅ Past mode завершён. Скопирована история {len(pairs)} пар(ы) каналов "
-                f"({direction_count} направлени(й))."
+                f"✅ Past mode finished. Copied the history of {len(pairs)} channel pair(s) "
+                f"({direction_count} direction(s))."
             )
             full = f"{header}\n\n{pair_lines}"
             await client.send_message(TECH_CHANNEL, full if len(full) <= 4096 else header)

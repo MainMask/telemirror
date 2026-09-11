@@ -361,7 +361,7 @@ def test_replay_mixed_strategies_warns(monkeypatch, caplog):
     ]
     with caplog.at_level(logging.WARNING):
         run(past_mode._replay_direction(FakeClient([_msg(1)]), db, SRC, TGT, cfgs, _LOG))
-    assert any("разные стратегии past_mode" in r.message for r in caplog.records)
+    assert any("different past_mode strategies" in r.message for r in caplog.records)
 
 
 # --- _edit_links_pass ----------------------------------------------------

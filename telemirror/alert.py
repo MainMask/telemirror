@@ -28,23 +28,23 @@ def journal_tail(unit: str, lines: int = 15) -> str:
             ["journalctl", "-u", unit, "-n", str(lines), "--no-pager", "-o", "cat"],
             capture_output=True, text=True, timeout=10, check=False,
         )
-        return out.stdout.strip() or "(журнал пуст)"
+        return out.stdout.strip() or "(journal is empty)"
     except Exception as e:  # noqa: BLE001 - best effort
-        return f"(журнал недоступен: {e})"
+        return f"(journal unavailable: {e})"
 
 
 def _failed_state_message(unit: str) -> str:
-    return f"⚠️ {unit} вошёл в failed state\n\n{journal_tail(unit)[-3000:]}"
+    return f"⚠️ {unit} entered failed state\n\n{journal_tail(unit)[-3000:]}"
 
 
 async def _connect_and_send(text: str) -> None:
     tech_channel = _env("TECH_CHANNEL", default=None)
     if not tech_channel:
-        print("telemirror.alert: TECH_CHANNEL не задан — пропускаю", file=sys.stderr)
+        print("telemirror.alert: TECH_CHANNEL not set — skipping", file=sys.stderr)
         return
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    body = f"{text}\n\nхост: {socket.gethostname()}  •  {now}"
+    body = f"{text}\n\nhost: {socket.gethostname()}  •  {now}"
 
     client = TelegramClient(
         StringSession(_env("SESSION_STRING")),
@@ -54,7 +54,7 @@ async def _connect_and_send(text: str) -> None:
     try:
         await asyncio.wait_for(client.connect(), _CONNECT_TIMEOUT)
         if not await client.is_user_authorized():
-            print("telemirror.alert: сессия не авторизована", file=sys.stderr)
+            print("telemirror.alert: session not authorized", file=sys.stderr)
             return
         await asyncio.wait_for(
             client.send_message(int(tech_channel), body, parse_mode=None),
@@ -71,7 +71,7 @@ def send_alert(text: str) -> None:
         asyncio.run(_connect_and_send(text))
     except Exception as e:  # noqa: BLE001
         print(
-            f"telemirror.alert: не смог отправить ({type(e).__name__}: {e})",
+            f"telemirror.alert: failed to send ({type(e).__name__}: {e})",
             file=sys.stderr,
         )
 

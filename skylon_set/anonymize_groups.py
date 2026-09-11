@@ -1,11 +1,11 @@
-"""Анонимизирует супергруппы, где аккаунт — админ:
+"""Anonymizes supergroups where the account is an admin:
 
-1. Remain Anonymous — сам аккаунт-админ становится анонимным.
-2. Hide Members — список участников группы скрывается от неадминов
-   (доступно только для достаточно крупных групп).
+1. Remain Anonymous — the admin account itself becomes anonymous.
+2. Hide Members — the group's member list is hidden from non-admins
+   (only available for sufficiently large groups).
 
-Broadcast-каналы пропускаются: настройки Hide Members у них нет, а список
-подписчиков и так скрыт.
+Broadcast channels are skipped: they have no Hide Members setting, and their
+subscriber list is already hidden.
 """
 
 import asyncio
@@ -90,23 +90,23 @@ def _titles(lst):
 
 
 async def apply_anonymous(client, me, admin_of):
-    """Проход 1: Remain Anonymous для аккаунта в каждой группе, где он админ."""
+    """Pass 1: Remain Anonymous for the account in every group where it's an admin."""
     print("\n=== Remain Anonymous ===")
     already = [d for d, _p, is_anon in admin_of if is_anon]
     targets = [(d, p) for d, p, is_anon in admin_of if not is_anon]
 
-    print(f"Уже анонимен ({len(already)}):    {_titles(already)}")
-    print(f"Требуют активации ({len(targets)}): {_titles([d for d, _ in targets])}")
+    print(f"Already anonymous ({len(already)}):    {_titles(already)}")
+    print(f"Need activation ({len(targets)}): {_titles([d for d, _ in targets])}")
 
     if not targets:
-        print("Аккаунт уже анонимен во всех группах, где является администратором.")
+        print("The account is already anonymous in every group where it's an admin.")
         return
 
     answer = input(
-        f"\nАктивировать Remain Anonymous в {len(targets)} группах? [y/N]: "
+        f"\nActivate Remain Anonymous in {len(targets)} group(s)? [y/N]: "
     ).strip().lower()
     if answer != "y":
-        print("Пропущено.")
+        print("Skipped.")
         return
 
     for d, participant in targets:
@@ -119,25 +119,25 @@ async def apply_anonymous(client, me, admin_of):
                 EditAdminRequest(channel=e, user_id=me, admin_rights=r, rank=rk)
             ),
         )
-        print("OK" if result is not None else "ОШИБКА")
+        print("OK" if result is not None else "ERROR")
 
-    print("\nПроверка:")
+    print("\nVerification:")
     errors = []
     for d, _ in targets:
         info = await get_admin_participant(client, d.entity, me)
         if info and info[1]:
             print(f"  OK: {d.title}")
         else:
-            print(f"  ОШИБКА: {d.title}")
+            print(f"  ERROR: {d.title}")
             errors.append(d.title)
     if errors:
-        print(f"Не удалось активировать в {len(errors)} группах: {', '.join(errors)}")
+        print(f"Failed to activate in {len(errors)} group(s): {', '.join(errors)}")
     else:
-        print("Всё OK — Remain Anonymous активирован во всех группах.")
+        print("All OK — Remain Anonymous activated in every group.")
 
 
 async def _participants_hidden(client, entity) -> bool | None:
-    """Текущее состояние Hide Members; None — не удалось прочитать."""
+    """Current Hide Members state; None — couldn't be read."""
     result = await safe_call(client, lambda: client(GetFullChannelRequest(entity)))
     if result is None:
         return None
@@ -145,7 +145,7 @@ async def _participants_hidden(client, entity) -> bool | None:
 
 
 async def apply_hide_members(client, admin_of):
-    """Проход 2: Hide Members в каждой группе, где аккаунт админ."""
+    """Pass 2: Hide Members in every group where the account is an admin."""
     print("\n=== Hide Members ===")
     already, targets, unknown = [], [], []
     for d, _p, _is_anon in admin_of:
@@ -157,19 +157,19 @@ async def apply_hide_members(client, admin_of):
         else:
             targets.append(d)
 
-    print(f"Уже скрыты ({len(already)}):        {_titles(already)}")
-    print(f"Требуют включения ({len(targets)}): {_titles(targets)}")
-    print(f"Не прочитано ({len(unknown)}):      {_titles(unknown)}")
+    print(f"Already hidden ({len(already)}):        {_titles(already)}")
+    print(f"Need enabling ({len(targets)}): {_titles(targets)}")
+    print(f"Could not read ({len(unknown)}):      {_titles(unknown)}")
 
     if not targets:
-        print("Список участников уже скрыт во всех группах.")
+        print("The member list is already hidden in every group.")
         return
 
     answer = input(
-        f"\nСкрыть список участников в {len(targets)} группах? [y/N]: "
+        f"\nHide the member list in {len(targets)} group(s)? [y/N]: "
     ).strip().lower()
     if answer != "y":
-        print("Пропущено.")
+        print("Skipped.")
         return
 
     too_few = []
@@ -182,12 +182,12 @@ async def apply_hide_members(client, admin_of):
                     ToggleParticipantsHiddenRequest(channel=e, enabled=True)
                 ),
             )
-            print("OK" if result is not None else "ОШИБКА")
+            print("OK" if result is not None else "ERROR")
         except ParticipantsTooFewError:
             too_few.append(d.title)
-            print("мало участников — настройка недоступна")
+            print("too few members — setting unavailable")
 
-    print("\nПроверка:")
+    print("\nVerification:")
     errors = []
     for d in targets:
         if d.title in too_few:
@@ -195,14 +195,14 @@ async def apply_hide_members(client, admin_of):
         if await _participants_hidden(client, d.entity):
             print(f"  OK: {d.title}")
         else:
-            print(f"  ОШИБКА: {d.title}")
+            print(f"  ERROR: {d.title}")
             errors.append(d.title)
     if too_few:
-        print(f"Пропущено (мало участников): {', '.join(too_few)}")
+        print(f"Skipped (too few members): {', '.join(too_few)}")
     if errors:
-        print(f"Не удалось скрыть в {len(errors)} группах: {', '.join(errors)}")
+        print(f"Failed to hide in {len(errors)} group(s): {', '.join(errors)}")
     elif not too_few:
-        print("Всё OK — список участников скрыт во всех группах.")
+        print("All OK — member list hidden in every group.")
 
 
 async def main():
@@ -213,12 +213,12 @@ async def main():
         name = me.first_name or ""
         if me.username:
             name += f" (@{me.username})"
-        print(f"Аккаунт: {name}")
+        print(f"Account: {name}")
 
-        print("Загружаю диалоги...")
+        print("Loading dialogs...")
         dialogs = await client.get_dialogs()
         supergroups = [d for d in dialogs if entity_type(d.entity) == "supergroup"]
-        print(f"{len(supergroups)} supergroups найдено.")
+        print(f"{len(supergroups)} supergroup(s) found.")
 
         admin_of = []  # [(dialog, participant, is_anonymous)]
         not_admin = []
@@ -228,7 +228,7 @@ async def main():
                 not_admin.append(d)
             else:
                 admin_of.append((d, info[0], info[1]))
-        print(f"Не администратор ({len(not_admin)}): {_titles(not_admin)}")
+        print(f"Not an admin ({len(not_admin)}): {_titles(not_admin)}")
 
         await apply_anonymous(client, me, admin_of)
         await apply_hide_members(client, admin_of)

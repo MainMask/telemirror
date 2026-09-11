@@ -1,5 +1,5 @@
 [Unit]
-Description=telemirror — проверка флапа/зависания живого зеркала
+Description=telemirror — check the live mirror for flapping/hangs
 
 [Service]
 Type=oneshot

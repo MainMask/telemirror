@@ -56,8 +56,8 @@ async def open_client(
     """
     if warn_main_running:
         logger.warning(
-            "Скрипт использует тот же SESSION_STRING, что и main.py. "
-            "Убедитесь, что main.py НЕ запущен."
+            "This script uses the same SESSION_STRING as main.py. "
+            "Make sure main.py is NOT running."
         )
     client = make_client(**client_kwargs)
     client.parse_mode = "markdown"
@@ -66,10 +66,10 @@ async def open_client(
         me = await client.get_me()
         if me is None:
             raise RuntimeError(
-                "Нет авторизации. Запустите login.py для получения SESSION_STRING."
+                "Not authorized. Run login.py to get a SESSION_STRING."
             )
         at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
-        logger.info(f"Вошли как {utils.get_display_name(me)}{at_username}")
+        logger.info(f"Logged in as {utils.get_display_name(me)}{at_username}")
         yield client, me
     finally:
         await client.disconnect()
@@ -96,8 +96,8 @@ async def fetch_all_topics(client, peer) -> list:
         out.extend(real)
         if len(r.topics) < 100:
             return out
-        # курсор — по последнему НЕ удалённому топику страницы: у ForumTopicDeleted
-        # нет top_message/date, а нулевой курсор сбил бы пагинацию
+        # cursor is based on the last NON-deleted topic of the page: ForumTopicDeleted
+        # has no top_message/date, and a zero cursor would break pagination
         last = real[-1] if real else r.topics[-1]
         off_t = last.id
         off_id = getattr(last, "top_message", 0) or 0
@@ -126,25 +126,25 @@ async def safe_call(client, fn, *, skip_errors: tuple = (), max_retries: int = 2
     while True:
         try:
             if not client.is_connected():
-                print("Переподключаюсь...")
+                print("Reconnecting...")
                 await client.connect()
             result = await fn()
             await asyncio.sleep(0.5)
             return result
         except FloodWaitError as e:
-            print(f"FloodWait: ждём {e.seconds}с...")
+            print(f"FloodWait: waiting {e.seconds}s...")
             with contextlib.suppress(Exception):
                 await client.disconnect()
             await asyncio.sleep(e.seconds)
         except skip as e:
-            print(f"  Нет доступа, пропускаю: {e}")
+            print(f"  No access, skipping: {e}")
             return None
         except (ConnectionError, OSError) as e:
             transport_attempts += 1
             if transport_attempts > max_retries:
-                print(f"Соединение потеряно ({e}), исчерпаны {max_retries} попыток — прерываю.")
+                print(f"Connection lost ({e}), {max_retries} attempts exhausted — aborting.")
                 raise
-            print(f"Соединение потеряно ({e}), жду 10с... ({transport_attempts}/{max_retries})")
+            print(f"Connection lost ({e}), waiting 10s... ({transport_attempts}/{max_retries})")
             with contextlib.suppress(Exception):
                 await client.disconnect()
             await asyncio.sleep(10)

@@ -71,10 +71,10 @@ filters:
 # the fan-out, add a `broadcast_targets:` list of specific channels/topics.
 broadcast_channel: -1003926294676
 
-# Mirror directions — доноры → получатели «⚜️ Цитадель», топик→топик по названию.
-#   Пачка 1: «O Λ И M П» / «🪐» / GRIND (собрана по id-парам, генератор удалён).
-#   Пачка 2 (ниже): «🏴‍☠️ DÈ SKLAD», генератор skylon_set/setup_mirrors.py.
-#   Каждая директория тянет всю историю донора при старте (past_mode: full_history).
+# Mirror directions — donors → «⚜️ Цитадель» recipients, topic→topic by title.
+#   Batch 1: «O Λ И M П» / «🪐» / GRIND (assembled by id pairs, generator removed).
+#   Batch 2 (below): «🏴‍☠️ DÈ SKLAD», generator skylon_set/setup_mirrors.py.
+#   Every direction pulls the donor's full history at startup (past_mode: full_history).
 directions:
 - from:
   - -1003007946025

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Ресайз /swapfile до 2 ГБ и vm.swappiness=10. Идемпотентно: повторный запуск
-# ничего не ломает. Причина — на 2 ГБ RAM без запаса ядро уже дважды роняло
-# процессы по OOM во время работы с медиа.
+# Resizes /swapfile to 2 GB and sets vm.swappiness=10. Idempotent: re-running
+# doesn't break anything. Reason: on 2 GB RAM with no headroom, the kernel had
+# already OOM-killed processes twice while working with media.
 set -euo pipefail
 
 TARGET_MB=2048
@@ -9,7 +9,7 @@ SWAPFILE=/swapfile
 SYSCTL_FILE=/etc/sysctl.d/99-telemirror.conf
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Нужен root: sudo $0" >&2
+    echo "Root required: sudo $0" >&2
     exit 1
 fi
 
@@ -18,16 +18,17 @@ cur_bytes=0
 cur_mb=$(( cur_bytes / 1024 / 1024 ))
 
 if [ "$cur_mb" -ge "$TARGET_MB" ]; then
-    echo "swapfile уже ${cur_mb} МБ (>= ${TARGET_MB}) — ресайз не нужен"
+    echo "swapfile is already ${cur_mb} MB (>= ${TARGET_MB}) — no resize needed"
 else
-    echo "ресайз ${SWAPFILE}: ${cur_mb} МБ -> ${TARGET_MB} МБ"
-    # Если swap активен — выключаем строго (без || true): при нехватке RAM для
-    # возврата страниц swapoff упадёт, и удалять активный файл нельзя.
+    echo "resizing ${SWAPFILE}: ${cur_mb} MB -> ${TARGET_MB} MB"
+    # If swap is active — turn it off strictly (no || true): if there isn't
+    # enough RAM to reclaim the pages, swapoff will fail, and an active file
+    # must not be removed.
     if swapon --show=NAME --noheadings 2>/dev/null | grep -qxF "$SWAPFILE"; then
         swapoff "$SWAPFILE"
     fi
     rm -f "$SWAPFILE"
-    # dd, а не fallocate: swap не работает на разрежённом файле
+    # dd, not fallocate: swap doesn't work on a sparse file
     dd if=/dev/zero of="$SWAPFILE" bs=1M count="$TARGET_MB" status=progress
     chmod 600 "$SWAPFILE"
     mkswap "$SWAPFILE"
@@ -35,7 +36,7 @@ else
 fi
 
 if ! grep -qE '^\s*/swapfile\s+(none|swap)\s+swap\s' /etc/fstab; then
-    echo "добавляю /swapfile в /etc/fstab"
+    echo "adding /swapfile to /etc/fstab"
     echo '/swapfile swap swap defaults 0 0' >> /etc/fstab
 fi
 

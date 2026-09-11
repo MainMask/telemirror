@@ -1,5 +1,5 @@
 [Unit]
-Description=telemirror — периодическая проверка здоровья живого зеркала
+Description=telemirror — periodic health check of the live mirror
 
 [Timer]
 OnBootSec=5min

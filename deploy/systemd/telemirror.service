@@ -1,44 +1,46 @@
 [Unit]
-Description=telemirror — живое зеркало
+Description=telemirror — live mirror
 Documentation=https://github.com/MainMask/telemirror
 After=network-online.target postgresql.service
 Wants=network-online.target
-# Делит SESSION_STRING с бэкофиллом истории — одновременно работать нельзя.
+# Shares SESSION_STRING with the history backfill — they can't run at the same time.
 Conflicts=telemirror-past-courses.service
-# Сломанный деплой не должен бесконечно долбить Telegram (риск бана аккаунта).
-# Транзиентные сбои сети/Telegram переживает сам процесс (connection_retries),
-# поэтому 15 падений за час — это уже реальная поломка: гасимся и шлём алерт.
+# A broken deploy must not hammer Telegram forever (risk of an account ban).
+# Transient network/Telegram failures are survived by the process itself
+# (connection_retries), so 15 crashes in an hour is a real breakage: shut
+# down and send an alert.
 StartLimitIntervalSec=3600
 StartLimitBurst=15
 OnFailure=telemirror-alert@%n.service
 
 [Service]
-# Type=notify + WatchdogSec: main.py шлёт READY=1 после логина и WATCHDOG=1,
-# пока клиент подключён. Завис / отвалился дольше WatchdogSec → systemd убивает
-# и перезапускает (Restart=always этого сам не увидел бы — процесс жив).
+# Type=notify + WatchdogSec: main.py sends READY=1 after login and WATCHDOG=1
+# while the client is connected. Hung / disconnected longer than WatchdogSec
+# → systemd kills and restarts it (Restart=always wouldn't see this on its
+# own — the process is alive).
 Type=notify
 NotifyAccess=main
 WatchdogSec=600
 WatchdogSignal=SIGTERM
-# READY=1 шлётся после коннекта + get_me(); на холодной загрузке БД/сеть могут
-# подниматься медленно — дедлайн щедрый, реальный зависон всё равно ограничен.
+# READY=1 is sent after connect + get_me(); on a cold boot the DB/network can
+# come up slowly — the deadline is generous, a real hang is still bounded.
 TimeoutStartSec=300
 WorkingDirectory=/root/telemirror
 ExecStart=/root/telemirror/.venv/bin/python -u main.py
 Restart=always
 RestartSec=10
-# Экспоненциальный бэкофф 10s → 120s; retries бесконечны в пределах burst-лимита
-# выше. Аккаунт не долбится (макс ~1 попытка / 2 мин), сервис не «сдаётся» на
-# ровном месте.
+# Exponential backoff 10s → 120s; retries are unlimited within the burst
+# limit above. The account isn't hammered (at most ~1 attempt / 2 min), and
+# the service doesn't "give up" over nothing.
 RestartSteps=8
 RestartMaxDelaySec=120
 
-# Скачок/утечка памяти прибьёт только telemirror (дальше рестарт + ресинк по
-# таблице binding_id), а не случайный процесс на сервере.
+# A memory spike/leak only kills telemirror (then a restart + resync via the
+# binding_id table), not some unrelated process on the server.
 MemoryHigh=1100M
 MemoryMax=1400M
 
-# Свой /tmp: осиротевшие ffmpeg-темпы (после OOM/краша) исчезают при рестарте.
+# Its own /tmp: orphaned ffmpeg temp files (after an OOM/crash) disappear on restart.
 PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=full

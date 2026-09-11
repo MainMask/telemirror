@@ -129,56 +129,56 @@ This directory appears to be custom additions. For each script:
 
 Structure your output as follows:
 
-### Сводка
-Один абзац: общее качество всех проверяемых коммитов, главные проблемы, готовность к продакшену.
+### Summary
+One paragraph: overall quality of the reviewed commits, the main problems, production readiness.
 
-### Найденные проблемы
-Сортировка: сначала CRITICAL, затем MAJOR, MINOR, DOCS.
+### Issues found
+Sorted: CRITICAL first, then MAJOR, MINOR, DOCS.
 
-Для каждой проблемы:
+For each issue:
 ```
-**[SEVERITY]** `path/to/file.py` — строка N (или имя функции)
-Описание: что не так
-Предлагаемое исправление: конкретный код или действие
+**[SEVERITY]** `path/to/file.py` — line N (or function name)
+Description: what's wrong
+Suggested fix: concrete code or action
 ```
-Уровни severity: `CRITICAL` (может сломать прод) | `MAJOR` (нужно исправить до прода) | `MINOR` (чистка, nice-to-have) | `DOCS` (пробел в документации)
+Severity levels: `CRITICAL` (can break prod) | `MAJOR` (must fix before prod) | `MINOR` (cleanup, nice-to-have) | `DOCS` (a documentation gap)
 
-### Проверено, проблем нет
-Список областей, которые были проверены и не вызвали замечаний — чтобы было понятно, что они реально смотрелись.
+### Checked, no issues
+A list of areas that were checked and raised no concerns — so it's clear they were actually looked at.
 
-### Чеклист готовности к продакшену
-Финальный чеклист:
-- [ ] Нет захардкоженных секретов
-- [ ] Все env-переменные задокументированы в .env-example
-- [ ] requirements.txt полный
-- [ ] Зависимости совместимы с версией Python из .python-version
-- [ ] Dockerfile актуален
-- [ ] docker-compose.yaml актуален
-- [ ] README отражает новые фичи
-- [ ] Нет тихого проглатывания ошибок
-- [ ] Нет debug/dead code
-- [ ] skylon_scripts/ безопасны и задокументированы
+### Production-readiness checklist
+Final checklist:
+- [ ] No hardcoded secrets
+- [ ] Every env variable documented in .env-example
+- [ ] requirements.txt is complete
+- [ ] Dependencies compatible with the Python version in .python-version
+- [ ] Dockerfile is current
+- [ ] docker-compose.yaml is current
+- [ ] README reflects the new features
+- [ ] No errors silently swallowed
+- [ ] No debug/dead code
+- [ ] skylon_scripts/ is safe and documented
 
-### План исправлений (только если найдены проблемы CRITICAL или MAJOR)
+### Remediation plan (only if CRITICAL or MAJOR issues were found)
 
-Если в разделе "Найденные проблемы" есть хотя бы одна проблема уровня CRITICAL или MAJOR — составь пронумерованный план исправлений:
+If the "Issues found" section has at least one CRITICAL or MAJOR issue, write a numbered remediation plan:
 
 ```
-1. [CRITICAL] `path/to/file.py` — короткое название задачи
-   Что делать: одно конкретное действие
-   Риск: низкий / средний / высокий (сломает ли что-то смежное)
+1. [CRITICAL] `path/to/file.py` — short task name
+   What to do: one concrete action
+   Risk: low / medium / high (could it break something adjacent)
 
-2. [MAJOR] `path/to/file.py` — короткое название задачи
-   Что делать: одно конкретное действие
-   Риск: низкий / средний / высокий
+2. [MAJOR] `path/to/file.py` — short task name
+   What to do: one concrete action
+   Risk: low / medium / high
 ```
 
-Порядок в плане — по приоритету: сначала CRITICAL, потом MAJOR. MINOR и DOCS в план не включать.
+Order the plan by priority: CRITICAL first, then MAJOR. Don't include MINOR or DOCS in the plan.
 
-После плана добавь одну строку:
-> Готов приступить к исправлениям по этому плану. Начать с пункта 1?
+After the plan, add one line:
+> Ready to start fixing per this plan. Start with item 1?
 
-Если проблем уровня CRITICAL и MAJOR не найдено — этот раздел не выводить.
+If no CRITICAL or MAJOR issues were found, omit this section.
 
 ---
 

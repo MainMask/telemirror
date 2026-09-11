@@ -1,26 +1,26 @@
-"""Переносит закреплённые сообщения каналов/супергрупп-доноров на соответствующие
-зеркала у получателей.
+"""Copies donor channels'/supergroups' pinned messages onto the matching
+mirrors at the recipients.
 
-Связка «id закрепа донора → id зеркала» берётся из таблицы ``binding_id``, которую
-наполняет ``past_mode.py`` (нужна постоянная Postgres-БД). Закреп зеркала,
-лежащего в топике форума, Telegram делает внутри этого топика автоматически —
-маппинг топиков здесь не нужен.
+The "donor pin id → mirror id" link comes from the ``binding_id`` table, which
+``past_mode.py`` populates (needs a persistent Postgres DB). Pinning a mirror
+that lives in a forum topic is done by Telegram inside that topic
+automatically — no topic mapping is needed here.
 
-По умолчанию режим reconcile: то, что донор открепил, открепляется и у получателя,
-но только среди сообщений, созданных самим миррором (``managed_ids``). Ручные
-закрепы пользователя (без строки в ``binding_id``) не трогаются. ``--additive``
-отключает откреп.
+By default the mode is reconcile: whatever the donor unpinned is also unpinned
+at the recipient, but only among messages the mirror itself created
+(``managed_ids``). A user's manual pins (with no ``binding_id`` row) are left
+alone. ``--additive`` disables unpinning.
 
-Порядок закрепов донора точно воспроизводится только на чистом первом прогоне
-(инкрементальный diff не переупорядочивает уже существующие закрепы).
+The donor's pin order is reproduced exactly only on a clean first run (an
+incremental diff does not reorder pins that already exist).
 
-Использование (при ОСТАНОВЛЕННОМ main.py — общий SESSION_STRING):
+Usage (while main.py is STOPPED — shared SESSION_STRING):
     python -m skylon_set.sync_pins --dry-run
     python -m skylon_set.sync_pins --only -1003007946025
-    python -m skylon_set.sync_pins            # боевой прогон по всем парам
+    python -m skylon_set.sync_pins            # live run across every pair
 
-На большом форуме первый прогон может упереться в FloodWait при закреплении —
-``safe_call`` их пережидает, прогон может занять несколько минут.
+On a large forum the first run may hit a FloodWait while pinning —
+``safe_call`` waits those out, so the run can take several minutes.
 """
 
 import argparse
@@ -50,13 +50,13 @@ from telemirror.storage import MirrorMessage, PostgresDatabase
 from skylon_set._common import open_client, safe_call
 
 
-# ── Значения ─────────────────────────────────────────────────────────────────
+# ── Values ───────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class SyncPair:
     donor_id: int
     recipient_id: int
-    topic_map: Dict[int, int]  # from_topic_id → to_topic_id ({} для канал-пары)
+    topic_map: Dict[int, int]  # from_topic_id → to_topic_id ({} for a channel pair)
 
     @property
     def from_topics(self) -> List[int]:
@@ -69,7 +69,7 @@ class SyncPair:
 
 @dataclass(frozen=True)
 class PinPlan:
-    to_pin: List[int]    # mirror id, порядок: старые → новые
+    to_pin: List[int]    # mirror id, order: oldest → newest
     to_unpin: List[int]  # mirror id
 
 
@@ -85,18 +85,19 @@ class PairSummary:
     dupes: List[int] = field(default_factory=list)
 
 
-# ── Чистые функции ───────────────────────────────────────────────────────────
+# ── Pure functions ───────────────────────────────────────────────────────────
 
 def iter_sync_directions(
     chat_mapping: Dict[int, Dict[int, list]],
     broadcast_channel: Optional[int],
     include_broadcast: bool = False,
 ) -> List[SyncPair]:
-    """CHAT_MAPPING → список пар донор→получатель.
+    """CHAT_MAPPING → list of donor→recipient pairs.
 
-    Пара, где ДОНОР — это broadcast-канал, пропускается (если не include_broadcast):
-    его посты веерятся во все цели, и переносить админский закреп в 8 чужих каналов
-    обычно не нужно. Быть broadcast-ПОЛУЧАТЕЛЕМ — не повод исключать пару.
+    A pair whose DONOR is the broadcast channel is skipped (unless
+    include_broadcast): its posts fan out to every target, and copying an
+    admin pin into 8 unrelated channels usually isn't wanted. Being a
+    broadcast RECIPIENT is not a reason to exclude a pair.
     """
     pairs: List[SyncPair] = []
     for donor_id, tgt_map in chat_mapping.items():
@@ -121,10 +122,10 @@ def iter_sync_directions(
 def build_pin_map(
     rows: List[MirrorMessage],
 ) -> Tuple[Dict[int, int], List[int]]:
-    """rows из get_messages_for_channel_pair → ({original_id: mirror_id}, [дубли]).
+    """rows from get_messages_for_channel_pair → ({original_id: mirror_id}, [dupes]).
 
-    При нескольких разных mirror_id на один original_id берётся наименьший
-    (детерминизм), original_id попадает в список дублей.
+    When several different mirror_ids exist for one original_id, the smallest
+    is used (determinism), and original_id is added to the dupes list.
     """
     grouped: Dict[int, Set[int]] = {}
     for r in rows:
@@ -140,11 +141,11 @@ def resolve_desired_pins(
     logger: logging.Logger,
     label: str,
 ) -> Tuple[List[int], int]:
-    """Закрепы донора → список mirror_id (в порядке donor_pins).
+    """Donor pins → list of mirror_id (in donor_pins order).
 
-    Закрепы без строки в binding_id (сообщение отброшено фильтром при
-    зеркалировании / служебное / старше past_mode) пропускаются.
-    Возвращает (mirror_ids, skipped_no_binding).
+    Donor pins with no binding_id row (message was dropped by a mirroring
+    filter / a service message / older than past_mode's range) are skipped.
+    Returns (mirror_ids, skipped_no_binding).
     """
     desired: List[int] = []
     skipped = 0
@@ -153,7 +154,7 @@ def resolve_desired_pins(
         if mirror_id is None:
             skipped += 1
             logger.info(
-                f"[{label}] закреп донора без зеркала, пропуск: "
+                f"[{label}] donor pin has no mirror, skipping: "
                 f"{private_message_link(msg.chat_id, msg.id)}"
             )
             continue
@@ -170,13 +171,13 @@ def plan_pin_actions(
     allow_clear: bool = False,
 ) -> PinPlan:
     desired_set = set(desired)
-    to_pin = sorted(desired_set - current_pinned_ids)  # по возрастанию ≈ старые первыми
+    to_pin = sorted(desired_set - current_pinned_ids)  # ascending ≈ oldest first
     if not reconcile:
         return PinPlan(to_pin, [])
     stale = (current_pinned_ids & managed_ids) - desired_set
     if not desired_set and stale and not allow_clear:
-        # У донора внезапно ноль закрепов — вероятнее сбой загрузки, чем реальный
-        # массовый откреп. Не трогаем, пока не передан --allow-clear.
+        # The donor suddenly has zero pins — more likely a fetch failure than
+        # a genuine mass-unpin. Leave it alone until --allow-clear is passed.
         return PinPlan(to_pin, [])
     return PinPlan(to_pin, sorted(stale))
 
@@ -191,8 +192,8 @@ async def fetch_pinned(
     thorough: bool,
     logger: logging.Logger,
 ) -> List["types.Message"]:
-    """Закреплённые сообщения peer'а: общий проход по всему чату + (при --thorough)
-    точечно по каждому топику. Объединение по id.
+    """A peer's pinned messages: a general pass over the whole chat + (with
+    --thorough) a targeted pass per topic. Merged by id.
     """
     by_id: Dict[int, "types.Message"] = {}
 
@@ -203,7 +204,7 @@ async def fetch_pinned(
         ),
     )
     if whole is None:
-        logger.warning(f"[{peer}] нет доступа к закрепам, пропуск")
+        logger.warning(f"[{peer}] no access to pins, skipping")
         return []
     for m in whole:
         by_id[m.id] = m
@@ -233,8 +234,8 @@ async def fetch_pinned(
                 continue
             if len(res.messages) == max_pins:
                 logger.warning(
-                    f"[{peer}#{tid}] вернулось ровно {max_pins} закрепов — "
-                    f"возможна обрезка, увеличьте --max-pins"
+                    f"[{peer}#{tid}] got exactly {max_pins} pin(s) back — "
+                    f"possibly truncated, raise --max-pins"
                 )
             for m in res.messages:
                 by_id.setdefault(m.id, m)
@@ -261,10 +262,10 @@ async def sync_pair(
     pin_map, dupes = build_pin_map(rows)
     summary.dupes = dupes
     if dupes:
-        logger.warning(f"[{label}] дубли binding_id для original_id: {dupes}")
+        logger.warning(f"[{label}] duplicate binding_id rows for original_id: {dupes}")
     if not pin_map:
         logger.warning(
-            f"[{label}] нет связок в binding_id — прогоните past_mode.py, пропуск пары"
+            f"[{label}] no rows in binding_id — run past_mode.py first, skipping pair"
         )
         return summary
 
@@ -288,9 +289,9 @@ async def sync_pair(
     )
 
     if not dry_run:
-        # Закрепляем по возрастанию mirror_id (старые → новые). На чистом первом
-        # прогоне это ставит новейший закреп донора сверху; при повторном прогоне
-        # с уже существующими закрепами порядок точно не воспроизводится.
+        # Pin in ascending mirror_id order (oldest → newest). On a clean first
+        # run this puts the donor's newest pin on top; on a re-run with
+        # existing pins, the exact order isn't reproduced.
         for mid in plan.to_pin:
             await safe_call(
                 client,
@@ -325,14 +326,14 @@ async def sync_pair(
 
 async def _run(logger: logging.Logger, args: argparse.Namespace) -> None:
     logger.warning(
-        "sync_pins.py использует тот же SESSION_STRING, что и main.py. "
-        "Убедитесь, что main.py НЕ запущен."
+        "sync_pins.py uses the same SESSION_STRING as main.py. "
+        "Make sure main.py is NOT running."
     )
 
     if USE_MEMORY_DB:
         logger.error(
-            "USE_MEMORY_DB=true — связок нет. Сначала настройте Postgres и "
-            "прогоните past_mode.py."
+            "USE_MEMORY_DB=true — there are no bindings. Set up Postgres and "
+            "run past_mode.py first."
         )
         return
 
@@ -341,17 +342,17 @@ async def _run(logger: logging.Logger, args: argparse.Namespace) -> None:
         wanted = set(args.only)
         pairs = [p for p in pairs if p.donor_id in wanted]
     if not pairs:
-        logger.warning("Нет пар для синхронизации.")
+        logger.warning("No pairs to synchronize.")
         return
 
-    logger.info(f"Пар для синхронизации: {len(pairs)}")
+    logger.info(f"Pairs to synchronize: {len(pairs)}")
 
     db = await PostgresDatabase(connection_string=DB_URL)
     try:
         async with open_client(
             logger, warn_main_running=False, flood_sleep_threshold=60
         ) as (client, _me):
-            # raw SearchRequest требует резолва peer из сессии — прогреваем кэш.
+            # A raw SearchRequest needs the peer resolved from the session — warm the cache.
             peer_ids = {p.donor_id for p in pairs} | {p.recipient_id for p in pairs}
             for cid in peer_ids:
                 await safe_call(
@@ -374,7 +375,7 @@ async def _run(logger: logging.Logger, args: argparse.Namespace) -> None:
                     )
                 except Exception as e:
                     logger.error(
-                        f"[{pair.donor_id}→{pair.recipient_id}] ошибка: "
+                        f"[{pair.donor_id}→{pair.recipient_id}] error: "
                         f"{type(e).__name__}: {e}"
                     )
                     continue
@@ -385,7 +386,7 @@ async def _run(logger: logging.Logger, args: argparse.Namespace) -> None:
 
             suffix = " (dry-run)" if args.dry_run else ""
             logger.info(
-                f"Итого: desired={totals.desired} pinned=+{totals.pinned} "
+                f"Total: desired={totals.desired} pinned=+{totals.pinned} "
                 f"unpinned=-{totals.unpinned} no-binding={totals.skipped_no_binding}{suffix}"
             )
     finally:
@@ -394,28 +395,28 @@ async def _run(logger: logging.Logger, args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Синхронизация закреплённых сообщений донор → получатель"
+        description="Synchronize pinned messages from donor to recipient"
     )
-    parser.add_argument("--dry-run", action="store_true", help="Только показать план")
+    parser.add_argument("--dry-run", action="store_true", help="Only show the plan")
     parser.add_argument(
         "--additive",
         action="store_true",
-        help="Только закреплять недостающее, никогда не откреплять",
+        help="Only pin what's missing, never unpin",
     )
     parser.add_argument(
         "--allow-clear",
         action="store_true",
-        help="Разрешить откреп всех managed-закрепов, когда у донора не осталось ни одного",
+        help="Allow unpinning every managed pin when the donor has none left",
     )
     parser.add_argument(
         "--include-broadcast",
         action="store_true",
-        help="Также синхронизировать закрепы broadcast-канала",
+        help="Also synchronize the broadcast channel's pins",
     )
     parser.add_argument(
         "--thorough",
         action="store_true",
-        help="Дополнительно опрашивать закрепы точечно по каждому топику форума",
+        help="Additionally poll pins per forum topic",
     )
     parser.add_argument("--max-pins", type=int, default=100)
     parser.add_argument(
@@ -423,7 +424,7 @@ def main() -> None:
         type=int,
         action="append",
         metavar="DONOR_ID",
-        help="Ограничить указанными донорами (можно повторять)",
+        help="Restrict to the given donors (repeatable)",
     )
     args = parser.parse_args()
 

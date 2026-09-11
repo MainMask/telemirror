@@ -28,12 +28,12 @@ from skylon_set._common import entity_type, fetch_all_topics, make_client, safe_
 CONFIG_PATH = Path(__file__).resolve().parent.parent / ".configs" / "mirror.config.yml"
 
 MENU_ACTIONS = [
-    ("full-cycle",   "Полный цикл",        "создать → настроить → проверить → конфиг → финал"),
-    ("create-pairs", "Создать пары",        "получателей для доноров без пары"),
-    ("configure",    "Настроить",           "аватарки + эмодзи топиков + видимость General"),
-    ("verify",       "Проверить",           "пары, дубли → пометить → удалить"),
-    ("build-config", "Собрать конфиг",      "сгенерировать mirror.config.yml"),
-    ("final-verify", "Финальная проверка",  "сверить заголовки, исправить расхождения"),
+    ("full-cycle",   "Full cycle",        "create → configure → verify → config → final"),
+    ("create-pairs", "Create pairs",      "recipients for donors without a pair"),
+    ("configure",    "Configure",         "avatars + topic emoji + General visibility"),
+    ("verify",       "Verify",            "pairs, dupes → mark → delete"),
+    ("build-config", "Build config",      "generate mirror.config.yml"),
+    ("final-verify", "Final verification", "reconcile titles, fix discrepancies"),
 ]
 
 _SEP = "─" * 72
@@ -47,9 +47,9 @@ def show_menu() -> str:
     for i, (_, name, desc) in enumerate(MENU_ACTIONS[1:], 2):
         print(f"  {i}. {name:<22} [{desc}]")
     print(f"  {_SEP}")
-    print("  0. Выход\n")
+    print("  0. Exit\n")
     while True:
-        choice = input("Выберите действие: ").strip()
+        choice = input("Choose an action: ").strip()
         if choice == "0":
             sys.exit(0)
         try:
@@ -58,17 +58,17 @@ def show_menu() -> str:
                 return MENU_ACTIONS[idx][0]
         except ValueError:
             pass
-        print(f"  Введите число от 0 до {len(MENU_ACTIONS)}")
+        print(f"  Enter a number from 0 to {len(MENU_ACTIONS)}")
 
 
-# ── Утилиты ──────────────────────────────────────────────────────────────────
+# ── Utilities ────────────────────────────────────────────────────────────────
 
 _DE_SKLAD_VARIANTS = ("DÈ SKLAD", "DÉ SKLAD", "DE SKLAD")
 
 _CITADEL_SUFFIX = "⚜️ Цитадель"
 _PIRATE_FLAG = "🏴‍☠️"
 
-# «🏴‍☠️ DÈ SKLAD» в хвосте заголовка (флаг и пробелы опциональны).
+# A "🏴‍☠️ DÈ SKLAD" trailer at the end of the title (the flag and spacing are optional).
 _DONOR_TRAILER_RE = re.compile(
     r"\s*(?:" + re.escape(_PIRATE_FLAG) + r"\s*)?(?:"
     + "|".join(re.escape(v) for v in _DE_SKLAD_VARIANTS)
@@ -81,10 +81,10 @@ def has_de_sklad(title: str) -> bool:
 
 
 def to_citadel(title: str) -> str:
-    """Заголовок донора → заголовок получателя.
+    """Donor title → recipient title.
 
-    Срезает хвост «🏴‍☠️ DÈ SKLAD» и дописывает «⚜️ Цитадель». Заголовки без хвоста
-    (например «Activity | …») просто получают суффикс.
+    Strips a "🏴‍☠️ DÈ SKLAD" trailer and appends "⚜️ Цитадель". Titles with no
+    trailer (e.g. "Activity | …") simply get the suffix appended.
     """
     return f"{_DONOR_TRAILER_RE.sub('', title).rstrip()} {_CITADEL_SUFFIX}"
 
@@ -103,12 +103,12 @@ def name_key(title: str) -> str:
     return _EMOJI_RE.sub("", title).strip()
 
 
-# ── Классификация доноров: живые (past + live) vs курсы (только past_mode) ─────
+# ── Donor classification: live (past + live) vs courses (past_mode only) ──────
 #
-# Имена — как в диалогах владельца. Живые остаются в .configs/mirror.config.yml;
-# курсы уходят в отдельный citadel_courses.config.yml, который читает только
-# past_mode.py. Всё, что нашлось по «DE SKLAD», но не попало ни в один список,
-# скрипт печатает и не трогает.
+# Names are exactly as they appear in the owner's dialogs. Live donors stay in
+# .configs/mirror.config.yml; courses go to a separate citadel_courses.config.yml,
+# which only past_mode.py reads. Anything found matching "DE SKLAD" but not in
+# either list is printed by the script and left untouched.
 
 _LIVE_DONOR_TITLES = [
     "СЛЕЗЫ САТОШИ 🏴‍☠️ DÈ SKLAD",
@@ -154,15 +154,15 @@ _COURSE_DONOR_TITLES = [
 _LIVE_KEYS = {name_key(t).casefold() for t in _LIVE_DONOR_TITLES}
 _COURSE_KEYS = {name_key(t).casefold() for t in _COURSE_DONOR_TITLES}
 assert _LIVE_KEYS.isdisjoint(_COURSE_KEYS), (
-    f"живые и курсы пересеклись: {_LIVE_KEYS & _COURSE_KEYS}"
+    f"live and course lists overlap: {_LIVE_KEYS & _COURSE_KEYS}"
 )
 
 
 def classify_donor(title: str) -> str:
-    """«live» / «course» / «unknown» по спискам выше (сверка по name_key).
+    """"live" / "course" / "unknown" by the lists above (matched via name_key).
 
-    Уже созданные получатели «⚜️ Цитадель» никогда не доноры: их name_key
-    совпадает с донорским, поэтому исключаем по бренду в заголовке.
+    An already-created "⚜️ Цитадель" recipient is never a donor: its name_key
+    matches the donor's, so exclude by the brand in the title instead.
     """
     if "Цитадель" in title:
         return "unknown"
@@ -191,7 +191,7 @@ def full_id(entity) -> int:
 
 
 def get_all_donors(dialogs) -> list:
-    """Доноры из хардкод-списков (живые + курсы), найденные среди диалогов."""
+    """Donors from the hardcoded lists (live + courses) found among the dialogs."""
     return sorted(
         [d for d in dialogs if classify_donor(d.title or "") != "unknown"],
         key=lambda d: d.title or "",
@@ -199,20 +199,20 @@ def get_all_donors(dialogs) -> list:
 
 
 def report_unmatched(dialogs) -> None:
-    """Печатает «DE SKLAD»-диалоги, которых нет ни в одном списке (не трогаются)."""
+    """Prints "DE SKLAD" dialogs that are in neither list (left untouched)."""
     unmatched = [
         d.title
         for d in dialogs
         if has_de_sklad(d.title or "") and classify_donor(d.title or "") == "unknown"
     ]
     if unmatched:
-        print(f"\nВне списков ({len(unmatched)}, пропускаю):")
+        print(f"\nOutside the lists ({len(unmatched)}, skipping):")
         for title in sorted(unmatched):
             print(f"  ? '{title}'")
 
 
 def build_recipient_index(dialogs) -> dict:
-    """title → dialog for all «Цитадель»-named dialogs (last wins on collision)."""
+    """title → dialog for all "Цитадель"-named dialogs (last wins on collision)."""
     return {d.title: d for d in dialogs if "Цитадель" in (d.title or "")}
 
 
@@ -221,15 +221,15 @@ async def get_premium_status(client) -> bool:
     return bool(getattr(me, "premium", False))
 
 
-# ── Шаг 1: Создать пары ──────────────────────────────────────────────────────
+# ── Step 1: Create pairs ───────────────────────────────────────────────────────
 
 async def _sync_forum_topics(client, donor_e, recip_e, *, enable_forum: bool) -> None:
-    """Создаёт у получателя каждый топик донора (id != 1), которого нет по названию.
+    """Creates every donor topic (id != 1) at the recipient that's missing by title.
 
-    Идемпотентно: повторный запуск после обрыва по FloodWait дозаполняет топики.
+    Idempotent: re-running after a FloodWait abort fills in the remaining topics.
     """
     if enable_forum:
-        print("    Включаю форум...")
+        print("    Enabling forum...")
         await safe_call(client,
             lambda: client(ToggleForumRequest(channel=recip_e, enabled=True, tabs=False))
         )
@@ -239,7 +239,7 @@ async def _sync_forum_topics(client, donor_e, recip_e, *, enable_forum: bool) ->
     for topic in donor_topics:
         if topic.id == 1 or topic.title in recip_titles:
             continue
-        print(f"    Создаю топик '{topic.title}'...")
+        print(f"    Creating topic '{topic.title}'...")
         await safe_call(client,
             lambda t=topic: client(
                 CreateForumTopicRequest(peer=recip_e, title=t.title, icon_color=t.icon_color)
@@ -248,7 +248,7 @@ async def _sync_forum_topics(client, donor_e, recip_e, *, enable_forum: bool) ->
 
 
 async def step_create_pairs(client):
-    print("\n=== ШАГ 1: СОЗДАНИЕ ПАР ===\n")
+    print("\n=== STEP 1: CREATE PAIRS ===\n")
     dialogs = await client.get_dialogs()
     donors = get_all_donors(dialogs)
     recipients = build_recipient_index(dialogs)
@@ -263,25 +263,25 @@ async def step_create_pairs(client):
         rec = find_recipient(expected, recipients)
         if rec and entity_type(rec.entity) == dtype:
             print(f"OK:      '{donor.title}'  →  '{expected}'")
-            # получатель мог остаться без части топиков (обрыв прошлого запуска)
+            # the recipient may be missing some topics (a previous run aborted)
             if getattr(donor.entity, "forum", False):
                 if getattr(rec.entity, "forum", False):
                     await _sync_forum_topics(
                         client, donor.entity, rec.entity, enable_forum=False
                     )
                 else:
-                    print("    ⚠ получатель не форум — топики не синхронизированы")
+                    print("    ⚠ recipient is not a forum — topics not synced")
         else:
             found = entity_type(rec.entity) if rec else None
-            note = f" (найден как {found}, не как {dtype})" if found else " (не найден)"
+            note = f" (found as {found}, not {dtype})" if found else " (not found)"
             print(f"MISSING: '{donor.title}'  →  '{expected}'{note}")
             missing.append(donor)
 
     if not missing:
-        print("\nВсе пары на месте.")
+        print("\nAll pairs are in place.")
         return
 
-    print(f"\nСоздаю {len(missing)} получател(ей)...")
+    print(f"\nCreating {len(missing)} recipient(s)...")
     for donor in missing:
         new_title = to_citadel(donor.title)
         e = donor.entity
@@ -289,35 +289,35 @@ async def step_create_pairs(client):
         is_megagroup = getattr(e, "megagroup", False)
 
         if not is_broadcast and not is_megagroup:
-            print(f"  ПРОПУСК '{new_title}': не канал и не супергруппа")
+            print(f"  SKIP '{new_title}': neither a channel nor a supergroup")
             continue
 
-        kind = "канал" if is_broadcast else "супергруппу"
-        print(f"  Создаю {kind} '{new_title}'...")
+        kind = "channel" if is_broadcast else "supergroup"
+        print(f"  Creating {kind} '{new_title}'...")
         result = await safe_call(client,
             lambda t=new_title, b=is_broadcast, m=is_megagroup: client(
                 CreateChannelRequest(title=t, about="", broadcast=b, megagroup=m)
             )
         )
         if result is None:
-            print(f"    Не удалось создать '{new_title}'")
+            print(f"    Failed to create '{new_title}'")
             continue
 
         created = result.chats[0]
-        print(f"    Создан: id={full_id(created)}  '{created.title}'")
+        print(f"    Created: id={full_id(created)}  '{created.title}'")
 
         if is_megagroup and getattr(e, "forum", False):
             await _sync_forum_topics(client, e, created, enable_forum=True)
 
-    print("Готово.")
+    print("Done.")
 
 
-# ── Шаг 2: Настроить ─────────────────────────────────────────────────────────
+# ── Step 2: Configure ────────────────────────────────────────────────────────
 
 async def step_configure(client):
-    print("\n=== ШАГ 2: НАСТРОЙКА ===\n")
+    print("\n=== STEP 2: CONFIGURE ===\n")
     premium = await get_premium_status(client)
-    print(f"Premium-статус: {'да' if premium else 'нет'}\n")
+    print(f"Premium status: {'yes' if premium else 'no'}\n")
 
     dialogs = await client.get_dialogs()
     donors = get_all_donors(dialogs)
@@ -336,19 +336,19 @@ async def step_configure(client):
         expected = to_citadel(donor.title)
         recipient = find_recipient(expected, recipients)
         if not recipient:
-            print(f"ПРОПУСК '{donor.title}': получатель '{expected}' не найден")
+            print(f"SKIP '{donor.title}': recipient '{expected}' not found")
             continue
 
         print(f"'{donor.title}'  →  '{recipient.title}'")
         d_entity = donor.entity
         r_entity = recipient.entity
 
-        # Аватарка
+        # Avatar
         if isinstance(r_entity.photo, ChatPhotoEmpty):
             buf = io.BytesIO()
             ok = await client.download_profile_photo(d_entity, file=buf, download_big=True)
             if ok is None:
-                print("  Аватарка: у донора нет")
+                print("  Avatar: donor has none")
             else:
                 buf.seek(0)
                 uploaded = await client.upload_file(buf, file_name="photo.jpg")
@@ -357,11 +357,11 @@ async def step_configure(client):
                         EditPhotoRequest(channel=re, photo=InputChatUploadedPhoto(file=u))
                     )
                 )
-                print("  Аватарка: скопирована")
+                print("  Avatar: copied")
         else:
-            print("  Аватарка: уже есть")
+            print("  Avatar: already set")
 
-        # Топики (только для форум-супергрупп)
+        # Topics (forum supergroups only)
         if not getattr(d_entity, "forum", False):
             continue
 
@@ -372,24 +372,24 @@ async def step_configure(client):
         for d_topic in d_topics.values():
             r_topic = r_topics.get(1) if d_topic.id == 1 else r_by_title.get(d_topic.title)
             if not r_topic:
-                print(f"  Топик '{d_topic.title}': у получателя не найден")
+                print(f"  Topic '{d_topic.title}': not found at recipient")
                 continue
 
-            # Эмодзи
+            # Emoji
             d_emoji = d_topic.icon_emoji_id or 0
             r_emoji = r_topic.icon_emoji_id or 0
             if d_emoji != r_emoji:
                 if not premium and d_emoji != 0:
-                    print(f"  Топик '{d_topic.title}': нет Premium для эмодзи")
+                    print(f"  Topic '{d_topic.title}': no Premium for the emoji")
                 else:
                     await safe_call(client,
                         lambda re=r_entity, rid=r_topic.id, eid=d_emoji: client(
                             EditForumTopicRequest(peer=re, topic_id=rid, icon_emoji_id=eid)
                         )
                     )
-                    print(f"  Топик '{d_topic.title}': эмодзи обновлён")
+                    print(f"  Topic '{d_topic.title}': emoji updated")
 
-            # Видимость и название General
+            # General topic visibility and title
             if d_topic.id == 1:
                 if d_topic.title != r_topic.title:
                     await safe_call(client,
@@ -397,7 +397,7 @@ async def step_configure(client):
                             EditForumTopicRequest(peer=re, topic_id=1, title=t)
                         )
                     )
-                    print(f"  General: переименован в '{d_topic.title}'")
+                    print(f"  General: renamed to '{d_topic.title}'")
                 d_hidden = bool(getattr(d_topic, "hidden", False))
                 r_hidden = bool(getattr(r_topic, "hidden", False))
                 if d_hidden != r_hidden:
@@ -406,21 +406,21 @@ async def step_configure(client):
                             EditForumTopicRequest(peer=re, topic_id=1, hidden=h)
                         )
                     )
-                    print(f"  General: {'скрыт' if d_hidden else 'показан'}")
+                    print(f"  General: {'hidden' if d_hidden else 'shown'}")
 
-    print("\nНастройка завершена.")
+    print("\nConfiguration complete.")
 
 
-# ── Шаг 3: Проверить ─────────────────────────────────────────────────────────
+# ── Step 3: Verify ───────────────────────────────────────────────────────────
 
 async def step_verify(client):
-    print("\n=== ШАГ 3: ПРОВЕРКА ПАР И ДУБЛЕЙ ===\n")
+    print("\n=== STEP 3: VERIFY PAIRS AND DUPES ===\n")
     dialogs = await client.get_dialogs()
     donors = get_all_donors(dialogs)
     recipients = build_recipient_index(dialogs)
 
-    # Проверка пар
-    print("--- Пары ---\n")
+    # Verify pairs
+    print("--- Pairs ---\n")
     for donor in donors:
         expected = to_citadel(donor.title)
         dtype = entity_type(donor.entity)
@@ -430,13 +430,13 @@ async def step_verify(client):
             print(f"OK      [{kind}]: '{donor.title}'  →  '{expected}'")
         else:
             found = entity_type(rec.entity) if rec else None
-            note = f" (найден как {found}, не как {dtype})" if found else " (не найден)"
+            note = f" (found as {found}, not {dtype})" if found else " (not found)"
             print(f"MISSING [{kind}]: '{donor.title}'  →  '{expected}'{note}")
 
     report_unmatched(dialogs)
 
-    # Поиск дублей «Цитадель»-названий
-    print("\n--- Дубли ---\n")
+    # Look for duplicate "Цитадель"-named dialogs
+    print("\n--- Dupes ---\n")
     known_ids: set[int] = set()
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -448,9 +448,9 @@ async def step_verify(client):
     for dlg in dialogs:
         title = dlg.title or ""
         key = name_key(title)
-        # пустой ключ = заголовок ровно «Цитадель» (бренд вырезан целиком):
-        # такие каналы схлопнулись бы в одну ложную группу
-        if key and "Цитадель" in title and not title.startswith("[ДУБЛЬ]"):
+        # an empty key = the title is exactly "Цитадель" (the brand cut out
+        # entirely): such channels would collapse into one false group
+        if key and "Цитадель" in title and not title.startswith("[DUPLICATE]"):
             groups[key].append(dlg)
 
     extras = []
@@ -460,57 +460,57 @@ async def step_verify(client):
             continue
         any_dupe = True
         titles = {d.title for d in dlgs}
-        label = "ДУБЛЬ" if len(titles) == 1 else "ПОТЕНЦ. ДУБЛЬ"
+        label = "DUPLICATE" if len(titles) == 1 else "POTENTIAL DUPLICATE"
         real  = [d for d in dlgs if full_id(d.entity) in known_ids] or dlgs[:1]
         extra = [d for d in dlgs if d not in real]
         print(f'{label}: {" / ".join(f"\"{t}\"" for t in sorted(titles))}')
         for d in real:
-            print(f"  [оставить]  id={full_id(d.entity)}  '{d.title}'")
+            print(f"  [keep]    id={full_id(d.entity)}  '{d.title}'")
         for d in extra:
-            print(f"  [лишний]    id={full_id(d.entity)}  '{d.title}'")
+            print(f"  [extra]   id={full_id(d.entity)}  '{d.title}'")
             extras.append(d)
 
     if not any_dupe:
-        print("Дублей не найдено.")
+        print("No dupes found.")
 
     if extras:
-        answer = input(f"\nПометить {len(extras)} лишних как [ДУБЛЬ]? [y/N]: ").strip().lower()
+        answer = input(f"\nMark {len(extras)} extra one(s) as [DUPLICATE]? [y/N]: ").strip().lower()
         if answer == "y":
             for dlg in extras:
-                new_name = f"[ДУБЛЬ] {dlg.title}"
+                new_name = f"[DUPLICATE] {dlg.title}"
                 print(f'  "{dlg.title}" → "{new_name}"...')
                 await safe_call(client,
                     lambda e=dlg.entity, t=new_name: client(EditTitleRequest(channel=e, title=t))
                 )
 
-    # Удаление помеченных (включая уже существовавшие до этого запуска)
-    marked = [d for d in await client.get_dialogs() if (d.title or "").startswith("[ДУБЛЬ]")]
+    # Delete marked ones (including any already marked before this run)
+    marked = [d for d in await client.get_dialogs() if (d.title or "").startswith("[DUPLICATE]")]
     if not marked:
-        print("\nОбъектов с пометкой [ДУБЛЬ] нет.")
+        print("\nNo objects marked [DUPLICATE].")
         return
 
-    print(f"\nНайдено {len(marked)} объект(ов) с пометкой [ДУБЛЬ]:")
+    print(f"\nFound {len(marked)} object(s) marked [DUPLICATE]:")
     for dlg in marked:
         print(f"  {full_id(dlg.entity)}  '{dlg.title}'")
 
-    answer = input("\nУдалить их? Это необратимо! [y/N]: ").strip().lower()
+    answer = input("\nDelete them? This is irreversible! [y/N]: ").strip().lower()
     if answer != "y":
         return
 
     deleted = 0
     for dlg in marked:
-        print(f'  Удаляю "{dlg.title}"...')
+        print(f'  Deleting "{dlg.title}"...')
         result = await safe_call(client, lambda e=dlg.entity: client(DeleteChannelRequest(channel=e)))
         if result is not None:
             deleted += 1
     skipped = len(marked) - deleted
-    print(f"Удалено {deleted}." + (f" Пропущено {skipped} (нет доступа — удалите вручную)." if skipped else ""))
+    print(f"Deleted {deleted}." + (f" Skipped {skipped} (no access — delete manually)." if skipped else ""))
 
 
-# ── Шаг 4: Собрать конфиг ────────────────────────────────────────────────────
+# ── Step 4: Build config ─────────────────────────────────────────────────────
 
 def _direction(frm, to) -> dict:
-    """Одно направление с `past_mode: full_history` (свежий dict — без YAML-алиасов)."""
+    """One direction with `past_mode: full_history` (a fresh dict — no YAML aliases)."""
     return {"from": [frm], "to": [to], "past_mode": {"full_history": True}}
 
 
@@ -522,17 +522,17 @@ def _dir_key(d: dict) -> tuple:
 
 
 def _append_directions_text(config_path: Path, original: str, fresh: list) -> None:
-    """Дописать `fresh` в конец блока `directions:`, сохраняя комментарии файла.
+    """Append `fresh` to the end of the `directions:` block, preserving the file's comments.
 
-    Требует, чтобы `directions:` был последним ключом верхнего уровня (так в
+    Requires `directions:` to be the last top-level key (as it is in
     .configs/mirror.config.yml).
     """
     lines = original.splitlines()
     top_keys = [i for i, ln in enumerate(lines) if re.match(r"[A-Za-z_][\w-]*:", ln)]
     if not top_keys or not lines[top_keys[-1]].startswith("directions:"):
         raise ValueError(
-            "directions: не последний ключ верхнего уровня — дозапись небезопасна, "
-            "правьте конфиг вручную"
+            "directions: is not the last top-level key — appending is unsafe, "
+            "edit the config by hand"
         )
     block = yaml.safe_dump(
         fresh, allow_unicode=True, default_flow_style=False, sort_keys=False
@@ -544,13 +544,14 @@ def _append_directions_text(config_path: Path, original: str, fresh: list) -> No
 def write_directions(
     config_path: Path, directions: list, *, merge: bool = False
 ) -> Path | None:
-    """Записывает `directions` в конфиг, сохраняя остальные ключи.
+    """Writes `directions` to the config, keeping the other keys.
 
-    `merge=False` (умолч.) — заменяет ключ `directions` целиком (комментарии файла
-    теряются). `merge=True` — дописывает только новые направления (дедуп по
-    from→to) в конец блока `directions:` текстом, сохраняя комментарии.
+    `merge=False` (default) — replaces the `directions` key wholesale (the
+    file's comments are lost). `merge=True` — appends only the new directions
+    (deduped by from→to) to the end of the `directions:` block as text,
+    preserving comments.
 
-    Если файл существует — делает `.bak` и возвращает путь к нему.
+    If the file exists, makes a `.bak` and returns its path.
     """
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -590,8 +591,8 @@ COURSES_CONFIG_PATH = CONFIG_PATH.parent / "citadel_courses.config.yml"
 
 
 def write_courses_config(course_dirs: list) -> Path | None:
-    """Пишет citadel_courses.config.yml: глобальный блок из mirror.config.yml
-    (без broadcast_*) + directions курсов. Файл читает только past_mode.py."""
+    """Writes citadel_courses.config.yml: the global block from mirror.config.yml
+    (without broadcast_*) + the course directions. Only past_mode.py reads this file."""
     with open(CONFIG_PATH, encoding="utf-8") as f:
         main_cfg = yaml.safe_load(f) or {}
     carry = {
@@ -609,8 +610,8 @@ def write_courses_config(course_dirs: list) -> Path | None:
         )
 
     header = (
-        "# Сгенерировано skylon_set/setup_mirrors.py — курсы «⚜️ Цитадель».\n"
-        "# main.py этот файл НЕ читает; курсы только прогоняются по истории:\n"
+        "# Generated by skylon_set/setup_mirrors.py — «⚜️ Цитадель» courses.\n"
+        "# main.py does NOT read this file; courses are only replayed through history:\n"
         '#   YAML_CONFIG_ENV="$(cat .configs/citadel_courses.config.yml)" python past_mode.py\n\n'
     )
     body = yaml.safe_dump(
@@ -621,7 +622,7 @@ def write_courses_config(course_dirs: list) -> Path | None:
 
 
 async def step_build_config(client):
-    print("\n=== ШАГ 4: СБОРКА КОНФИГА ===\n")
+    print("\n=== STEP 4: BUILD CONFIG ===\n")
     dialogs = await client.get_dialogs()
     donors = get_all_donors(dialogs)
     recipients = build_recipient_index(dialogs)
@@ -638,7 +639,7 @@ async def step_build_config(client):
         bucket = live_dirs if kind == "live" else course_dirs
 
         if not rec:
-            print(f"НЕ НАЙДЕН [{kind}]: '{donor.title}' → '{expected}'")
+            print(f"NOT FOUND [{kind}]: '{donor.title}' → '{expected}'")
             missing.append(donor.title)
             continue
 
@@ -646,12 +647,12 @@ async def step_build_config(client):
 
         if getattr(e, "broadcast", False):
             bucket.append(_direction(full_id(e), full_id(r_e)))
-            print(f"OK (канал) [{kind}]: '{donor.title}' → '{rec.title}'")
+            print(f"OK (channel) [{kind}]: '{donor.title}' → '{rec.title}'")
 
         elif getattr(e, "megagroup", False):
             if not getattr(e, "forum", False):
                 bucket.append(_direction(f"{full_id(e)}#1", f"{full_id(r_e)}#1"))
-                print(f"OK (супергруппа) [{kind}]: '{donor.title}' → '{rec.title}'")
+                print(f"OK (supergroup) [{kind}]: '{donor.title}' → '{rec.title}'")
                 continue
 
             d_topics = await fetch_all_topics(client, e)
@@ -667,43 +668,43 @@ async def step_build_config(client):
                     r_topic = r_by_title.get(d_topic.title)
 
                 if not r_topic:
-                    print(f"  Топик '{d_topic.title}' не найден у '{rec.title}', пропускаю")
+                    print(f"  Topic '{d_topic.title}' not found at '{rec.title}', skipping")
                     continue
 
                 bucket.append(_direction(
                     f"{full_id(e)}#{d_topic.id}", f"{full_id(r_e)}#{r_topic.id}"
                 ))
 
-            print(f"OK (форум) [{kind}]: '{donor.title}' → '{rec.title}'")
+            print(f"OK (forum) [{kind}]: '{donor.title}' → '{rec.title}'")
 
     report_unmatched(dialogs)
 
-    # Живые — дозапись в основной конфиг (комментарии и текущие направления целы).
+    # Live — appended to the main config (comments and existing directions kept intact).
     live_backup = write_directions(CONFIG_PATH, live_dirs, merge=True)
     if live_backup:
-        print(f"\nЖивые: дозаписано в {CONFIG_PATH} (бэкап: {live_backup})")
+        print(f"\nLive: appended to {CONFIG_PATH} (backup: {live_backup})")
     else:
-        print(f"\nЖивые: новых направлений нет, {CONFIG_PATH} не тронут")
+        print(f"\nLive: no new directions, {CONFIG_PATH} untouched")
 
-    # Курсы — отдельный файл только для past_mode.py.
+    # Courses — a separate file, read only by past_mode.py.
     if course_dirs:
         courses_backup = write_courses_config(course_dirs)
-        note = f" (бэкап: {courses_backup})" if courses_backup else ""
-        print(f"Курсы: {len(course_dirs)} направлений → {COURSES_CONFIG_PATH}{note}")
+        note = f" (backup: {courses_backup})" if courses_backup else ""
+        print(f"Courses: {len(course_dirs)} direction(s) → {COURSES_CONFIG_PATH}{note}")
 
-    for label, dirs in (("живые", live_dirs), ("курсы", course_dirs)):
+    for label, dirs in (("live", live_dirs), ("courses", course_dirs)):
         ch = sum(1 for d in dirs if "#" not in str(d["from"][0]))
-        print(f"  {label}: {ch} каналов + {len(dirs) - ch} топиков")
+        print(f"  {label}: {ch} channel(s) + {len(dirs) - ch} topic(s)")
     if missing:
-        print(f"Пропущено {len(missing)} доноров без пары: {missing}")
+        print(f"Skipped {len(missing)} donor(s) without a pair: {missing}")
 
 
-# ── Шаг 5: Финальная проверка ─────────────────────────────────────────────────
+# ── Step 5: Final verification ─────────────────────────────────────────────────
 
 async def step_final_verify(client):
-    print("\n=== ШАГ 5: ФИНАЛЬНАЯ ПРОВЕРКА ===\n")
+    print("\n=== STEP 5: FINAL VERIFICATION ===\n")
     if not CONFIG_PATH.exists():
-        print(f"Конфиг {CONFIG_PATH} не найден. Сначала выполните шаг 4.")
+        print(f"Config {CONFIG_PATH} not found. Run step 4 first.")
         return
 
     with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -735,26 +736,26 @@ async def step_final_verify(client):
     ok = 0
     fixes = []
 
-    print("--- Каналы ---\n")
+    print("--- Channels ---\n")
     for direction in channel_dirs:
         from_id = int(str(direction["from"][0]))
         to_id   = int(str(direction["to"][0]))
         from_e  = await get_entity(from_id)
         if classify_donor(from_e.title or "") == "unknown":
-            continue  # чужое направление (прежние пачки) — не наша забота
+            continue  # a direction from another batch — not our concern
         to_e    = await get_entity(to_id)
         expected = to_citadel(from_e.title)
         if to_e.title == expected:
             print(f"OK: '{from_e.title}' → '{to_e.title}'")
             ok += 1
         elif name_key(to_e.title) == name_key(expected):
-            print(f"OK (эмодзи): '{from_e.title}' → '{to_e.title}'")
+            print(f"OK (emoji): '{from_e.title}' → '{to_e.title}'")
             ok += 1
         else:
-            print(f"ОШИБКА: '{from_e.title}' → '{to_e.title}' (ожидалось '{expected}')")
+            print(f"ERROR: '{from_e.title}' → '{to_e.title}' (expected '{expected}')")
             fixes.append(("channel", to_e, expected))
 
-    print("\n--- Топики ---\n")
+    print("\n--- Topics ---\n")
     for direction in topic_dirs:
         fv = str(direction["from"][0])
         tv = str(direction["to"][0])
@@ -763,15 +764,15 @@ async def step_final_verify(client):
 
         from_e = await get_entity(from_id)
         if classify_donor(from_e.title or "") == "unknown":
-            continue  # чужое направление (прежние пачки) — не наша забота
+            continue  # a direction from another batch — not our concern
         from_topics = await get_topics(from_id)
         to_topics   = await get_topics(to_id)
         f_topic = from_topics.get(from_tid)
         t_topic = to_topics.get(to_tid)
 
         if not f_topic or not t_topic:
-            label = f"#{from_tid} у {from_id}" if not f_topic else f"#{to_tid} у {to_id}"
-            print(f"ОШИБКА: топик {label} не найден")
+            label = f"#{from_tid} at {from_id}" if not f_topic else f"#{to_tid} at {to_id}"
+            print(f"ERROR: topic {label} not found")
             fixes.append(None)
             continue
 
@@ -780,41 +781,41 @@ async def step_final_verify(client):
                 print(f"OK (General): '{f_topic.title}'")
                 ok += 1
             else:
-                print(f"ОШИБКА (General): '{f_topic.title}' != '{t_topic.title}'")
+                print(f"ERROR (General): '{f_topic.title}' != '{t_topic.title}'")
                 fixes.append(("topic", entity_cache[to_id], to_tid, f_topic.title))
         elif f_topic.title == t_topic.title:
             print(f"OK: '{f_topic.title}'")
             ok += 1
         else:
-            print(f"ОШИБКА: '{f_topic.title}' != '{t_topic.title}'")
+            print(f"ERROR: '{f_topic.title}' != '{t_topic.title}'")
             fixes.append(("topic", entity_cache[to_id], to_tid, f_topic.title))
 
     real_fixes = [x for x in fixes if x is not None]
-    print(f"\n{'Всё верно' if not fixes else 'Есть расхождения'}: {ok} OK, {len(fixes)} ошибок.")
+    print(f"\n{'All correct' if not fixes else 'Discrepancies found'}: {ok} OK, {len(fixes)} error(s).")
 
     if not real_fixes:
         return
 
-    print("Исправляю расхождения...")
+    print("Fixing discrepancies...")
     for fix in real_fixes:
         if fix[0] == "channel":
             _, e, new_title = fix
-            print(f"  Канал → '{new_title}'...")
+            print(f"  Channel → '{new_title}'...")
             await safe_call(client,
                 lambda ent=e, t=new_title: client(EditTitleRequest(channel=ent, title=t))
             )
         elif fix[0] == "topic":
             _, e, tid, new_title = fix
-            print(f"  Топик #{tid} → '{new_title}'...")
+            print(f"  Topic #{tid} → '{new_title}'...")
             await safe_call(client,
                 lambda ent=e, i=tid, t=new_title: client(
                     EditForumTopicRequest(peer=ent, topic_id=i, title=t)
                 )
             )
-    print("Готово.")
+    print("Done.")
 
 
-# ── Полный цикл ───────────────────────────────────────────────────────────────
+# ── Full cycle ───────────────────────────────────────────────────────────────
 
 async def run_full_cycle(client):
     await step_create_pairs(client)
@@ -822,7 +823,7 @@ async def run_full_cycle(client):
     await step_verify(client)
     await step_build_config(client)
     await step_final_verify(client)
-    print("\n=== ПОЛНЫЙ ЦИКЛ ЗАВЕРШЁН ===")
+    print("\n=== FULL CYCLE COMPLETE ===")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

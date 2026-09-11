@@ -1,15 +1,15 @@
 """
-Включает «Restrict Saving Content» (флаг ``noforwards`` — запрет копирования и
-пересылки контента подписчиками) во всех каналах и супергруппах-получателях:
-живых (CHAT_MAPPING из mirror.config.yml) и курсовых
-(citadel_courses.config.yml, который config.py сам не читает).
+Enables "Restrict Saving Content" (the ``noforwards`` flag — blocks
+subscribers from copying/forwarding content) on every recipient channel and
+supergroup: live ones (CHAT_MAPPING from mirror.config.yml) and course ones
+(citadel_courses.config.yml, which config.py itself does not read).
 
-Использование:
-    python -m skylon_set.restrict_saving            # с подтверждением
-    python -m skylon_set.restrict_saving --dry-run  # только показывает план
+Usage:
+    python -m skylon_set.restrict_saving            # with confirmation
+    python -m skylon_set.restrict_saving --dry-run  # only shows the plan
 
-Предупреждение: использует тот же SESSION_STRING, что и основной сервис.
-Не запускайте одновременно с main.py.
+Warning: uses the same SESSION_STRING as the main service.
+Do not run at the same time as main.py.
 """
 
 import argparse
@@ -36,9 +36,9 @@ from telemirror.misc.log_setup import setup_stdout_logger
 from skylon_set._common import open_client
 from skylon_set._common import safe_call as _safe_call
 
-# Курсовой конфиг config.py не грузит (его читает только past_mode.py), но
-# Restrict Saving нужен и на курсовых получателях — берём id прямо из файла,
-# как это делает setup_mirrors.step_final_verify.
+# config.py does not load the courses config (only past_mode.py reads it), but
+# Restrict Saving is needed on course recipients too — read the ids straight
+# from the file, the same way setup_mirrors.step_final_verify does.
 COURSES_CONFIG_PATH = (
     Path(__file__).resolve().parent.parent / ".configs" / "citadel_courses.config.yml"
 )
@@ -51,15 +51,15 @@ safe_call = functools.partial(
 
 
 def collect_recipient_ids(chat_mapping) -> Set[int]:
-    """Собирает множество id каналов-получателей из CHAT_MAPPING.
+    """Collects the set of recipient channel ids from CHAT_MAPPING.
 
-    Топики не важны — ``noforwards`` выставляется на уровне чата.
+    Topics don't matter — ``noforwards`` is set at the chat level.
     """
     return {tgt_id for tgt_map in chat_mapping.values() for tgt_id in tgt_map}
 
 
 def course_recipient_ids(path: Path = COURSES_CONFIG_PATH) -> Set[int]:
-    """id получателей из citadel_courses.config.yml (пусто, если файла нет)."""
+    """Recipient ids from citadel_courses.config.yml (empty if the file is absent)."""
     if not path.exists():
         return set()
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -73,7 +73,7 @@ def course_recipient_ids(path: Path = COURSES_CONFIG_PATH) -> Set[int]:
 async def _run(logger: logging.Logger, dry_run: bool) -> None:
     recipient_ids = collect_recipient_ids(CHAT_MAPPING) | course_recipient_ids()
     if not recipient_ids:
-        logger.warning("CHAT_MAPPING пуст — нечего настраивать.")
+        logger.warning("CHAT_MAPPING is empty — nothing to configure.")
         return
 
     async with open_client(logger) as (client, _me):
@@ -84,7 +84,7 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
                     client, lambda i=chat_id: client.get_entity(i)
                 )
             except Exception as e:
-                logger.error(f"[{chat_id}] не удалось получить сущность: {e}")
+                logger.error(f"[{chat_id}] failed to fetch entity: {e}")
                 entity = None
             if entity is None:
                 unavailable.append(chat_id)
@@ -96,25 +96,25 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
         def titles(lst):
             return ", ".join(getattr(e, "title", str(e)) for e in lst) if lst else "—"
 
-        logger.info(f"Уже включено ({len(already)}):     {titles(already)}")
-        logger.info(f"Требуют включения ({len(targets)}): {titles(targets)}")
-        logger.info(f"Недоступны ({len(unavailable)}):      {unavailable or '—'}")
+        logger.info(f"Already enabled ({len(already)}):     {titles(already)}")
+        logger.info(f"Need enabling ({len(targets)}): {titles(targets)}")
+        logger.info(f"Unavailable ({len(unavailable)}):      {unavailable or '—'}")
 
         if not targets:
-            logger.info("Restrict Saving Content уже включён у всех получателей.")
+            logger.info("Restrict Saving Content is already enabled for every recipient.")
             return
 
         if dry_run:
             logger.info(
-                f"(dry-run) Было бы включено в {len(targets)} чатах."
+                f"(dry-run) Would enable it in {len(targets)} chat(s)."
             )
             return
 
         answer = input(
-            f"\nВключить Restrict Saving Content в {len(targets)} чатах? [y/N] "
+            f"\nEnable Restrict Saving Content in {len(targets)} chat(s)? [y/N] "
         ).strip().lower()
         if answer != "y":
-            logger.info("Отменено.")
+            logger.info("Cancelled.")
             return
 
         for entity in targets:
@@ -126,7 +126,7 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
             )
             logger.info(
                 f"  {getattr(entity, 'title', str(entity))}: "
-                + ("OK" if result is not None else "ОШИБКА")
+                + ("OK" if result is not None else "ERROR")
             )
 
         errors = []
@@ -139,20 +139,20 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
 
         if errors:
             logger.error(
-                f"Не удалось включить в {len(errors)} чатах: {', '.join(errors)}"
+                f"Failed to enable it in {len(errors)} chat(s): {', '.join(errors)}"
             )
         else:
-            logger.info("Всё OK — Restrict Saving Content включён у всех получателей.")
+            logger.info("All OK — Restrict Saving Content enabled for every recipient.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Включить Restrict Saving Content у получателей telemirror"
+        description="Enable Restrict Saving Content on telemirror's recipients"
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Только показать план, без реальных изменений",
+        help="Only show the plan, without making real changes",
     )
     args = parser.parse_args()
 

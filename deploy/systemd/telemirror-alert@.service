@@ -1,6 +1,6 @@
 [Unit]
-Description=telemirror — алерт о том, что %i вошёл в failed state
-# Не тянуть за собой ещё один OnFailure-каскад, если алерт сам упадёт.
+Description=telemirror — alert that %i entered failed state
+# Don't chain into another OnFailure cascade if the alert itself fails.
 
 [Service]
 Type=oneshot
