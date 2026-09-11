@@ -87,3 +87,9 @@ directions:
       #                                       # fresh file; requires mode: copy. No arguments.
       #                                       # If used together with WatermarkRemovalFilter, must
       #                                       # come after it (it replaces the message's media).
+      # - DocumentFilenameFilter:    # rename mirrored document files; requires mode: copy.
+      #     prefix: "@MyChannel"     #   prepended as "{prefix} - {name}" (skipped if already present)
+      #     remove:                  #   substrings stripped from the filename (case-insensitive)
+      #       - "@promo"
+      #       - "promo"
+      #                              # Place after WatermarkRemovalFilter / RestrictSavingContentBypassFilter.
