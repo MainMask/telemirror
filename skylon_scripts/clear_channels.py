@@ -255,7 +255,10 @@ def main() -> None:
     args = parser.parse_args()
 
     logger = _configure_logging(LOG_LEVEL)
-    asyncio.run(_run(logger, args.dry_run))
+    try:
+        asyncio.run(_run(logger, args.dry_run))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

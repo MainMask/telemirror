@@ -112,7 +112,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         # Find configured targets for the referenced source channel
         target_map = self._chat_mapping.get(referenced_channel_id, {})
         if not target_map:
-            return fallback_link_url
+            return None
 
         mirrors = await self._database.get_messages(msg_id, referenced_channel_id)
         mirror = next(
