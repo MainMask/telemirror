@@ -15,6 +15,9 @@ disable_edit: true
 disable_delete: true
 mode: copy # or forward
 
+# (Optional) Admin broadcast channel: messages from this channel are sent to ALL configured targets
+# broadcast_channel: -100123456789
+
 # (Required) Mirror directions
 directions:
   - from: [-1001, -1002, -1003]
