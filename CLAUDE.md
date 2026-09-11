@@ -40,3 +40,10 @@ For multi-step tasks, state a brief plan:
 2. [Step] → verify: [check]
 3. [Step] → verify: [check]
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+### 5. Project Consistency
+**Map the project before touching it.**
+- Find existing modules, handlers, and patterns. Use them — don't duplicate them.
+- Hook into existing plugin/handler mechanisms instead of building parallel infrastructure.
+- Match surrounding style: naming, module layout, abstraction level.
+For any non-trivial feature: read the relevant files → propose a plan (what changes, what's added, why) → wait for approval → implement.
