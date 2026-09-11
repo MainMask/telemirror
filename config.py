@@ -134,6 +134,13 @@ CHAT_MAPPING: Dict[int, Dict[int, List["DirectionConfig"]]] = {}
 _bc = config("BROADCAST_CHANNEL", default=None)
 BROADCAST_CHANNEL: Optional[int] = int(_bc) if _bc else None
 
+_bc_targets_str: Optional[str] = config("BROADCAST_TARGETS", default=None)
+BROADCAST_TARGETS: Optional[List[str]] = (
+    [s.strip() for s in _bc_targets_str.split(",") if s.strip()]
+    if _bc_targets_str
+    else None
+)
+
 _tc = config("TECH_CHANNEL", default=None)
 TECH_CHANNEL: Optional[int] = int(_tc) if _tc else None
 
@@ -200,6 +207,14 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
 
     if "broadcast_channel" in yaml_config:
         BROADCAST_CHANNEL = int(yaml_config["broadcast_channel"])
+
+    if "broadcast_targets" in yaml_config:
+        _raw_bt = yaml_config["broadcast_targets"]
+        if not isinstance(_raw_bt, list):
+            raise ValueError(
+                f"broadcast_targets: expected a list, got {type(_raw_bt).__name__!r}"
+            )
+        BROADCAST_TARGETS = [str(t) for t in _raw_bt]
 
     if "tech_channel" in yaml_config:
         TECH_CHANNEL = int(yaml_config["tech_channel"])
@@ -379,15 +394,32 @@ else:
             "Please provide valid non-empty CHAT_MAPPING environment variable."
         )
 
+if BROADCAST_TARGETS is not None and not BROADCAST_CHANNEL:
+    raise ValueError("BROADCAST_TARGETS requires BROADCAST_CHANNEL to be set")
+
 if BROADCAST_CHANNEL:
     _bc_send_delay: float = config("BROADCAST_SEND_DELAY", default=0.5, cast=float)
     _all_broadcast_targets: Dict[int, set] = {}
-    for _src, _targets in CHAT_MAPPING.items():
-        if _src == BROADCAST_CHANNEL:
-            continue
-        for _tgt_id, _cfgs in _targets.items():
-            for _cfg in _cfgs:
-                _all_broadcast_targets.setdefault(_tgt_id, set()).add(_cfg.to_topic_id)
+    if BROADCAST_TARGETS is not None:
+        for _item in BROADCAST_TARGETS:
+            try:
+                if "#" in _item:
+                    _ch, _tp = _item.split("#", 1)
+                    _all_broadcast_targets.setdefault(int(_ch), set()).add(int(_tp))
+                else:
+                    _all_broadcast_targets.setdefault(int(_item), set()).add(None)
+            except ValueError:
+                raise ValueError(
+                    f"BROADCAST_TARGETS: invalid entry {_item!r} — "
+                    "expected 'channel_id' or 'channel_id#topic_id'"
+                )
+    else:
+        for _src, _targets in CHAT_MAPPING.items():
+            if _src == BROADCAST_CHANNEL:
+                continue
+            for _tgt_id, _cfgs in _targets.items():
+                for _cfg in _cfgs:
+                    _all_broadcast_targets.setdefault(_tgt_id, set()).add(_cfg.to_topic_id)
 
     _bc_filter = EmptyMessageFilter()
     for _tgt_id, _topic_ids in _all_broadcast_targets.items():

@@ -22,6 +22,11 @@ mode: copy # or forward
 # (Optional) Admin broadcast channel: messages from this channel are sent to ALL configured targets
 # broadcast_channel: -100123456789
 
+# (Optional) Whitelist of targets for broadcast channel. When not set, goes to ALL configured targets.
+# broadcast_targets:
+#   - -100123456789
+#   - -100987654321#5     # topic-specific target
+
 # (Optional) Technical monitoring channel: receives log alerts (WARNING+) and DM notifications
 # tech_channel: -100123456789
 
