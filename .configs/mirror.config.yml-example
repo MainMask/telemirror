@@ -35,6 +35,7 @@ directions:
     disable_edit: false
     disable_delete: false
     mode: forward
+    send_delay: 0.0 # override per-direction (0 = no delay)
     # Overwrite global filters
     filters:
       - UrlMessageFilter:
