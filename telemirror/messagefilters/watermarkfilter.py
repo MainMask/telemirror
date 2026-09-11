@@ -12,6 +12,7 @@ from ..watermark.processor import (
     async_remove_watermark_from_video,
     async_stamp_watermark_on_image,
     async_stamp_watermark_on_video,
+    estimate_stamp_encode_s,
 )
 from ._media import UPLOAD_LIMIT_BYTES, ReuploadCache, source_media_id
 from .base import FilterAction, FilterResult, MessageFilter
@@ -89,6 +90,17 @@ class WatermarkRemovalFilter(MessageFilter):
                     None,
                 )
             max_duration = config.stamp_video_max_duration_s
+            max_encode_s = config.stamp_video_max_encode_s
+            est_encode_s = (
+                estimate_stamp_encode_s(
+                    video_attr.w or 0,
+                    video_attr.h or 0,
+                    video_attr.duration or 0,
+                    config.stamp_video_encode_realtime_ratio,
+                )
+                if video_attr is not None
+                else 0.0
+            )
             if video_attr is not None and doc.size > UPLOAD_LIMIT_BYTES:
                 logger.info(
                     "WatermarkRemovalFilter: skipping %.2f GB video (chat_id=%s) — "
@@ -106,6 +118,22 @@ class WatermarkRemovalFilter(MessageFilter):
                     "limit (chat_id=%s) — forwarded as-is without watermark",
                     video_attr.duration,
                     max_duration,
+                    message.chat_id,
+                )
+            elif (
+                video_attr is not None
+                and max_encode_s > 0
+                and est_encode_s > max_encode_s
+            ):
+                logger.info(
+                    "WatermarkRemovalFilter: %dx%d %.0fs video — predicted re-encode "
+                    "≈%.0fs over the %.0fs budget (chat_id=%s) — forwarded as-is "
+                    "without watermark",
+                    video_attr.w or 0,
+                    video_attr.h or 0,
+                    video_attr.duration or 0,
+                    est_encode_s,
+                    max_encode_s,
                     message.chat_id,
                 )
             elif video_attr is not None:

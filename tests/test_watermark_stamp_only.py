@@ -130,6 +130,30 @@ def test_long_video_forwarded_without_watermark(monkeypatch):
     assert isinstance(res.media, types.MessageMediaDocument)  # unchanged
 
 
+def test_costly_video_forwarded_without_watermark(monkeypatch):
+    calls = _video_spies(monkeypatch)
+    msg = _video_message(_Client())
+    # 200s 4K → predicted re-encode ≈ 4 * 200 / 0.73 ≈ 1096s, over the 180s budget
+    msg.media.document.attributes = [
+        types.DocumentAttributeVideo(duration=200, w=3840, h=2160)
+    ]
+    _, res = _run({}, msg)
+    assert calls == {"remove": 0, "stamp": 0}
+    assert isinstance(res.media, types.MessageMediaDocument)  # unchanged
+
+
+def test_cheap_hd_video_still_stamped(monkeypatch):
+    calls = _video_spies(monkeypatch)
+    msg = _video_message(_Client())
+    # 60s 720p → predicted re-encode ≈ 0.44 * 60 / 0.73 ≈ 37s, under the budget
+    msg.media.document.attributes = [
+        types.DocumentAttributeVideo(duration=60, w=1280, h=720)
+    ]
+    _, res = _run({"remove_watermark": False}, msg)
+    assert calls == {"remove": 0, "stamp": 1}
+    assert res.media == "HANDLE"
+
+
 # ── stamp_watermark toggle ───────────────────────────────────────────────────
 
 def test_removal_only_skips_stamp(monkeypatch):
