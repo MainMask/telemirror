@@ -295,6 +295,9 @@ The following environment variables (and their YAML equivalents) extend the base
 ```bash
 # Stop main.py first — both use the same SESSION_STRING
 python past_mode.py
+
+# history-only sets that main.py must not mirror live (e.g. course archives):
+YAML_CONFIG_ENV="$(cat .configs/citadel_courses.config.yml)" python past_mode.py
 ```
 
 Progress is checkpointed after each message: if interrupted, re-running resumes from where it left off. A second pass rewrites cross-channel links in already-sent messages.
@@ -305,9 +308,7 @@ Progress is checkpointed after each message: if interrupted, re-running resumes 
 
 | Script | Description |
 |---|---|
-| `skylon_set/setup_mirrors.py` | Interactive wizard for creating donor/recipient channel pairs and generating the YAML config (updates only the `directions:` key, backs up the old file to `*.bak`). |
-| `skylon_set/setup_citadel.py` | One-off generator for the "⚜️ Цитадель" set: maps hardcoded donor→recipient ids, creates the missing forum topic copies, and prints a `directions:` block (each with `past_mode: full_history`) to paste into the config. Idempotent, safe to re-run after a FloodWait. |
+| `skylon_set/setup_mirrors.py` | Interactive wizard for the "⚜️ Цитадель" set: discovers donors from hardcoded name lists, creates the recipient channels/forum topics + copies avatars, then generates the config — live directions are merge-appended to `.configs/mirror.config.yml` (comments preserved, old file backed up to `*.bak`), course-only directions go to `.configs/citadel_courses.config.yml`. Idempotent, safe to re-run after a FloodWait. |
 | `skylon_set/clear_channels.py` | Purges all messages in recipient channels/topics, then resets the `past_mode_checkpoint` and `binding_id` rows for the cleared targets. Supports `--dry-run`. |
 | `skylon_set/sync_pins.py` | Mirrors donor pinned messages onto their recipient mirrors using the `binding_id` table (needs PostgreSQL + a prior `past_mode.py` run). Reconcile mode by default (also unpins what the donor unpinned, only among mirror-managed pins); `--additive` disables unpinning, `--dry-run` shows the plan. |
-| `skylon_set/rename_emoji.py` | Bulk-renames Archonum recipient channel titles (replaces 🗝 with ⚜️). |
 | `skylon_set/set_anonymous.py` | Enables "Remain Anonymous" for the account in every supergroup where it is an admin. |
