@@ -513,3 +513,64 @@ Tests: 122 → 149.
 closed module is point-targeted only, for a specific reason, adding a
 justification section here. Deferred P3 items are not bugs — they are documented
 edge-case trade-offs; touch them only on an explicit request.
+
+---
+
+# Pass 9 — prophylactic whole-project sweep (explicit request)
+
+Full re-read of every runtime and operator module with the checklist narrowed to
+**memory leaks / performance holes / dead code**. `pyflakes` + `ruff` clean,
+`vulture` shows only false positives (`hints` used in string annotations,
+`_handlers` keeps a strong ref, psycopg `row_factory`, the yaml `ignore_aliases`
+override, `album._HACK_DELAY`). Tests: 196 → 199.
+
+## Fixed
+
+- **P3 (perf)** `skylon_set/setup_citadel.py`: `_run` traversed each forum's
+  topic list twice — `sync_topics` fetched donor + recipient topics, then
+  `build_forum_directions` fetched the same two again. On the 2 `FORUM_PAIRS`
+  that is 4 redundant paginated `GetForumTopicsRequest` sequences (each with a
+  0.3 s per-page sleep and FloodWait exposure on a large forum). Now `_run`
+  fetches the donor list once and the recipient list twice (before and after
+  topic creation — `sync_topics` may add topics), and passes the lists into
+  `sync_topics` (no longer takes `donor_id`) and `build_forum_directions` (now a
+  pure sync function taking `donor_id, recip_id, donor_topics, recip_topics`).
+  Test: `tests/test_setup_citadel.py` (per-peer call count + `directions`
+  title-pairing).
+- **P3 (memory)** `past_mode.py` `_edit_links_pass`: it fetched every source
+  message for a pair into one `src_messages` list before iterating it once —
+  for a `full_history` replay `mirrors` can be tens of thousands, so this was a
+  needless transient spike of `Message` objects. Now each 100-id batch is
+  processed inside the fetch loop; `mirror_map` (needed for lookup) is the only
+  full-size structure. A fetch failure now `break`s (keeping batches already
+  processed) instead of abandoning the whole direction — the pass is
+  idempotent, so partial progress is safe and a re-run finishes the rest.
+  Test: `tests/test_past_mode.py::test_edit_links_pass_streams_source_messages_in_batches`.
+
+## Reviewed, no change — acknowledged trade-offs re-affirmed
+
+- `mirroring._sync_broadcast_channel`: `seen: set[int]` holds every message id of
+  the broadcast channel for the duration of the startup sync. Documented
+  ("only message IDs are held in memory, never the full history"); startup-only,
+  released after. Not a leak.
+- `mirroring.TelegramLogHandler`: `_counts` / `_timers` are popped in `_send`
+  (always fires after `_DEBOUNCE`); `_cooldown_until` is pruned in
+  `_prune_cooldowns`; `_tasks` discards on done-callback. Bounded. `__connect_client`
+  runs once per process so the handler is attached once.
+- LRU capacities (`InMemoryDatabase` 100, `ReuploadCache` 16 / 600 s,
+  `LRUCache` free-factor trim) — sized on purpose, per REVIEW passes 3/5/8.
+- `watermark/processor.py` `_template_cache` / `_stamp_cache`: unbounded by
+  *path* (1–2 paths in practice) and lock-free (a race recomputes, never
+  corrupts — idempotent under the GIL). Already in "Deferred".
+- `telemirror/_patch/sending.py`, `_patch/album.py`: deliberate near-verbatim
+  copies of Telethon functions for easy upstream merges — editing them defeats
+  the purpose.
+- `mixins.copy_message` re-imports `deepcopy` per call (a `sys.modules` dict hit,
+  effectively free) and deep-copies `media`/`entities` by design (filter
+  immutability). No change.
+- Operator scripts (`setup_mirrors.py`, `clear_channels.py`, `set_anonymous.py`,
+  `rename_emoji.py`): each step re-runs `get_dialogs()` — intentional, the view
+  changes between steps (pairs created, dupes deleted). `clear_channels.purge`
+  iterates full channel history client-side for topic-scoped targets — inherent
+  to per-topic filtering, rare destructive op behind a `y/N` prompt.
+- P3 items from passes 1–8 remain documented trade-offs, not touched.

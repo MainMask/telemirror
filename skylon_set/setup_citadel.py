@@ -58,10 +58,9 @@ async def fetch_topics(client, chat_id):
         off_t, off_id, off_d = last.id, last.top_message, getattr(last, "date", 0) or 0
 
 
-async def sync_topics(client, donor_id, recip_id, premium, logger):
+async def sync_topics(client, recip_id, premium, logger, donor_topics, recip_topics):
     """Создаёт у получателя каждый топик донора (id != 1), отсутствующий по названию."""
-    donor_topics = await fetch_topics(client, donor_id)
-    recip_titles = {t.title for t in await fetch_topics(client, recip_id)}
+    recip_titles = {t.title for t in recip_topics}
 
     for t in donor_topics:
         if t.id == 1 or t.title in recip_titles:
@@ -76,9 +75,7 @@ async def sync_topics(client, donor_id, recip_id, premium, logger):
         await safe_call(client, lambda k=kwargs: client(CreateForumTopicRequest(peer=recip_id, **k)))
 
 
-async def build_forum_directions(client, donor_id, recip_id):
-    donor_topics = await fetch_topics(client, donor_id)
-    recip_topics = await fetch_topics(client, recip_id)
+def build_forum_directions(donor_id, recip_id, donor_topics, recip_topics):
     recip_by_title = {t.title: t.id for t in recip_topics}
 
     directions, missing = [], []
@@ -117,9 +114,15 @@ async def _run(logger: logging.Logger) -> None:
         logger.info(f"Premium: {'да' if premium else 'нет'}")
 
         logger.info("=== Создание топиков-копий ===")
+        donor_topics_by_id = {}
         for donor_id, recip_id in FORUM_PAIRS:
             logger.info(f"{donor_id} → {recip_id}")
-            await sync_topics(client, donor_id, recip_id, premium, logger)
+            donor_topics = await fetch_topics(client, donor_id)
+            recip_topics = await fetch_topics(client, recip_id)
+            donor_topics_by_id[donor_id] = donor_topics
+            await sync_topics(
+                client, recip_id, premium, logger, donor_topics, recip_topics
+            )
 
         logger.info("=== Сборка directions ===")
         directions = [
@@ -127,7 +130,12 @@ async def _run(logger: logging.Logger) -> None:
             for d, r in CHANNEL_PAIRS
         ]
         for donor_id, recip_id in FORUM_PAIRS:
-            dirs, missing = await build_forum_directions(client, donor_id, recip_id)
+            # топики получателя перечитываем — sync_topics мог создать новые;
+            # донор не меняется, берём из первого прохода
+            recip_topics = await fetch_topics(client, recip_id)
+            dirs, missing = build_forum_directions(
+                donor_id, recip_id, donor_topics_by_id[donor_id], recip_topics
+            )
             directions.extend(dirs)
             logger.info(
                 f"{donor_id} → {recip_id}: {len(dirs)} топиков"

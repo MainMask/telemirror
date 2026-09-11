@@ -248,3 +248,49 @@ def test_edit_links_pass_rewrites_cross_message_link(monkeypatch):
     entity, message_id, _text, ents = client.edits[0]
     assert (entity, message_id) == (TGT, 910)
     assert ents[0].url == private_message_link(TGT, 907)
+
+
+class _BatchRecordingClient(_EditFakeClient):
+    def __init__(self, src_messages):
+        super().__init__(src_messages)
+        self.batch_sizes = []
+
+    async def get_messages(self, entity, ids=None, limit=None, **kw):
+        if ids is not None:
+            self.batch_sizes.append(len(ids))
+        return await super().get_messages(entity, ids=ids, limit=limit, **kw)
+
+
+def test_edit_links_pass_streams_source_messages_in_batches(monkeypatch):
+    # 150 mirrors -> the source fetch must be split into 100 + 50, and a
+    # rewritable link in either half is still repointed (no master list).
+    db = run(InMemoryDatabase(max_capacity=1000))  # avoid LRU eviction mid-test
+    run(db.insert_batch(
+        [MirrorMessage(oid, SRC, oid + 900, TGT) for oid in range(1, 151)]
+    ))
+
+    src_peer = -SRC - 1000000000000
+
+    def _linker(mid, points_to):
+        return types.Message(
+            id=mid,
+            peer_id=types.PeerChannel(1),
+            message="link",
+            entities=[types.MessageEntityTextUrl(
+                offset=0, length=4, url=f"https://t.me/c/{src_peer}/{points_to}"
+            )],
+        )
+
+    src = [types.Message(id=i, peer_id=types.PeerChannel(1), message="x")
+           for i in range(1, 151)]
+    src[9] = _linker(10, 149)     # in the first batch
+    src[139] = _linker(140, 150)  # in the second batch
+    client = _BatchRecordingClient(src)
+
+    run(past_mode._edit_links_pass(
+        client, db, [(SRC, TGT, _cfg(PastModeConfig(full_history=True, send_delay=0)))],
+        _LOG,
+    ))
+
+    assert client.batch_sizes == [100, 50]
+    assert sorted(m for _e, m, _t, _ents in client.edits) == [910, 1040]
