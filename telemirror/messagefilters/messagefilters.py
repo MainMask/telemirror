@@ -405,46 +405,54 @@ class KeywordReplaceFilter(UpdateEntitiesParams, WordBoundaryRegex, MessageFilte
         filtered_entities = message.entities or []
 
         for regex, replacement, is_regex in self._rules:
-            # `filtered_text` and `filtered_entities` share one coordinate space
-            # per keyword pass, so the running error must restart each pass.
-            offset_error = 0
-
-            def repl(
-                match: "re.Match[str]",
-                replacement: str = replacement,
-                is_regex: bool = is_regex,
-            ) -> str:
-                nonlocal offset_error
-                expanded = match.expand(replacement)
-                match_start, match_end = match.span()
-                diff = len(expanded) - (match_end - match_start)
-                self.update_entities_params(
-                    filtered_entities,
-                    match_start + offset_error,
-                    match_end + offset_error,
-                    diff,
-                )
-                offset_error += diff
-
-                # Case-transfer only for plain word keywords; an explicit
-                # `r'...'` replacement keeps its configured casing.
-                if is_regex:
-                    return expanded
-                full_match = match.group()
-                if full_match.islower():
-                    return expanded.lower()
-                if full_match.istitle():
-                    return expanded.title()
-                if full_match.isupper():
-                    return expanded.upper()
-                return expanded
-
-            filtered_text = regex.sub(repl, filtered_text)
+            filtered_text = self._apply_rule(
+                regex, replacement, is_regex, filtered_text, filtered_entities
+            )
 
         message.entities = filtered_entities
         message.message = utils.del_surrogate(filtered_text)
 
         return FilterResult(FilterAction.CONTINUE, message)
+
+    def _apply_rule(
+        self,
+        regex: re.Pattern[str],
+        replacement: str,
+        is_regex: bool,
+        text: str,
+        entities: list[types.TypeMessageEntity],
+    ) -> str:
+        # `text` and `entities` share one coordinate space per rule, so the
+        # running error starts at zero for every rule.
+        offset_error = 0
+
+        def repl(match: re.Match[str]) -> str:
+            nonlocal offset_error
+            expanded = match.expand(replacement)
+            match_start, match_end = match.span()
+            diff = len(expanded) - (match_end - match_start)
+            self.update_entities_params(
+                entities,
+                match_start + offset_error,
+                match_end + offset_error,
+                diff,
+            )
+            offset_error += diff
+
+            # Case-transfer only for plain word keywords; an explicit `r'...'`
+            # replacement keeps its configured casing.
+            if is_regex:
+                return expanded
+            full_match = match.group()
+            if full_match.islower():
+                return expanded.lower()
+            if full_match.istitle():
+                return expanded.title()
+            if full_match.isupper():
+                return expanded.upper()
+            return expanded
+
+        return regex.sub(repl, text)
 
 
 class SkipWithKeywordsFilter(WordBoundaryRegex, MessageFilter):

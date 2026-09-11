@@ -1,6 +1,6 @@
 telethon==1.41.2
-opencv-python-headless
-pillow
+opencv-python-headless==5.0.0.93
+pillow==12.3.0
 # simple-lama-inpainting: see install.sh (broken pillow<10 pin, install with --no-deps)
 # torch: transitive dep of simple-lama-inpainting, install manually if needed:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu

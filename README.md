@@ -48,16 +48,15 @@
     DB_PASS=test
     # Logging level (debug, info, warning, error or critical). Defaults to info
     LOG_LEVEL=info
-    # Optional parameters can be removed
-    # The next optional parameters can be set to prevent bans/logouts
-    # (Optional) System version info for telegram client. You can set it to `4.16.30-vxCUSTOM` or any other value if you believe it will help fix the bans. Default is `platform.uname().release`
-    # See: https://github.com/LonamiWebs/Telethon/issues/4051 
-    API_SYSTEM_VERSION=
-    # (Optional) Device model info for telegram client. Default is `platform.uname().machine`
-    API_DEVICE_MODEL=
-    # (Optional) Application version info for telegram client. Default is `telethon.version.__version__`
-    API_APP_VERSION=
+    # The next optional parameters can be set to prevent bans/logouts.
+    # Leave them out entirely to use the platform defaults.
+    # See: https://github.com/LonamiWebs/Telethon/issues/4051
+    # API_SYSTEM_VERSION=4.16.30-vxCUSTOM   # default: platform.uname().release
+    # API_DEVICE_MODEL=Desktop              # default: platform.uname().machine
+    # API_APP_VERSION=1.0                   # default: telethon.version.__version__
     ```
+
+    See [.env-example](.env-example) for the full list (broadcast sync, past mode, tech channel, delays).
     </details>
 
 6. Setup mirror forwarding config:
@@ -184,14 +183,14 @@
     <summary><b>Heroku</b></summary>
 <br>
 
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/khoben/telemirror)
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/MainMask/telemirror)
 
 ### or via CLI:
 
 1. Clone project
 
     ```bash
-    git clone https://github.com/khoben/telemirror.git
+    git clone https://github.com/MainMask/telemirror.git
     ```
 2. Create new heroku app within Heroku CLI
 
@@ -203,10 +202,11 @@
     ```bash
     heroku git:remote -a {your app name}
     ```
-4. Set environment variables to your heroku app from .env by running bash script
+4. Set environment variables from your `.env` on the heroku app
 
     ```bash
-    ./set_heroku_env.bash
+    # requires the `heroku-config` plugin: heroku plugins:install heroku-config
+    heroku config:push
     ```
 
 5. Upload on heroku host
@@ -233,7 +233,7 @@ If you deployed manually, move to step 2.
 1. Init upstream repo (this repository or its fork)
 
     ```bash
-    git remote add origin https://github.com/khoben/telemirror
+    git remote add origin https://github.com/MainMask/telemirror
     ```
 2. Get latest changes
 
@@ -303,6 +303,7 @@ Progress is checkpointed after each message: if interrupted, re-running resumes 
 
 | Script | Description |
 |---|---|
-| `skylon_set/setup_mirrors.py` | Interactive wizard for creating donor/recipient channel pairs and generating the YAML config. |
+| `skylon_set/setup_mirrors.py` | Interactive wizard for creating donor/recipient channel pairs and generating the YAML config (updates only the `directions:` key, backs up the old file to `*.bak`). |
 | `skylon_set/clear_channels.py` | Purges all messages in recipient channels/topics and resets past_mode checkpoints. Supports `--dry-run`. |
 | `skylon_set/rename_emoji.py` | Bulk-renames Archonum recipient channel titles (replaces 🗝 with ⚜️). |
+| `skylon_set/set_anonymous.py` | Enables "Remain Anonymous" for the account in every supergroup where it is an admin. |

@@ -196,15 +196,11 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
 
     filters_module: ModuleType = import_module("telemirror.messagefilters")
 
-    yaml_config: dict = None
-
     if YAML_CONFIG_ENV:
-        yaml_config = yaml.load(
-            YAML_CONFIG_ENV.replace("\\n", "\n"), Loader=yaml.FullLoader
-        )
+        yaml_config = yaml.safe_load(YAML_CONFIG_ENV.replace("\\n", "\n"))
     else:
         with open(YAML_CONFIG_FILE, encoding="utf8") as file:
-            yaml_config = yaml.load(file, Loader=yaml.FullLoader)
+            yaml_config = yaml.safe_load(file)
 
     if "broadcast_channel" in yaml_config:
         BROADCAST_CHANNEL = int(yaml_config["broadcast_channel"])

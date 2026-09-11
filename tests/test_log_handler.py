@@ -8,6 +8,10 @@ from telemirror.mirroring import TelegramLogHandler
 class FakeClient:
     def __init__(self, loop):
         self.loop = loop
+        self.sent = []
+
+    async def send_message(self, channel, msg):
+        self.sent.append((channel, msg))
 
 
 def test_prune_cooldowns_drops_expired():

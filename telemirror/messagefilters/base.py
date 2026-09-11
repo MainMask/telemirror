@@ -87,9 +87,9 @@ class MessageFilter(Protocol):
         for idx, message in enumerate(album):
             filter_action, album[idx] = await self._process_message(message, event_type)
             match filter_action:
-                case FilterAction.CONTINUE | True:
+                case FilterAction.CONTINUE:
                     continue
-                case FilterAction.DISCARD | False:
+                case FilterAction.DISCARD:
                     return FilterResult(FilterAction.DISCARD, album)
                 case FilterAction.FORCE_SEND:
                     return FilterResult(FilterAction.FORCE_SEND, album)
@@ -124,9 +124,9 @@ class CompositeMessageFilter(MessageFilter):
         for f in self._filters:
             filter_action, entity = await f.process(entity, event_type)
             match filter_action:
-                case FilterAction.CONTINUE | True:
+                case FilterAction.CONTINUE:
                     continue
-                case FilterAction.DISCARD | False:
+                case FilterAction.DISCARD:
                     return FilterResult(FilterAction.DISCARD, entity)
                 case FilterAction.FORCE_SEND:
                     return FilterResult(FilterAction.FORCE_SEND, entity)
