@@ -5,7 +5,46 @@ fallback_link_url: "https://t.me/Archonum"  # substitute for unresolvable cross-
 
 # Global filters — applied in order to every direction
 filters:
-  # 0. Remove static watermarks from photos and videos
+  # 1. Block messages containing competitor channel links (URL entities — both hyperlinks and bare URLs)
+  - SkipWithUrlFilter:
+      blacklist: !!set
+        ? t.me/deskladchina
+        ? t.me/xpiratovich
+        ? t.me/piratlinks
+        ? t.me/daime
+        ? t.me/pirat
+        ? t.me/kitpaymentbot
+        ? t.me/alliance
+        ? t.me/privateinc
+        ? t.me/skladprivate
+        ? t.me/piratnotes
+        ? t.me/piratovichfeed
+        ? t.me/alliance1000
+        ? t.me/piratVPN
+        ? t.me/Sovetnik1000
+        ? t.me/maximusdesklad
+
+  # 2. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
+  #    Prefix with r'...' to use a regex instead of a plain word.
+  - SkipWithKeywordsFilter:
+      keywords: !!set
+        ? "DE SKLAD"
+        ? "DÈ SKLAD"
+        ? "DÉ SKLAD"
+        ? "Pirat"
+        ? "PRIVATE"
+        ? "Парат"
+        ? "Шеф"
+        ? "Пиратович"
+        ? "Юнга"
+        ? "Альянс"
+        ? "Максимус"
+        ? "Maximus"
+
+  # 3. Remove static watermarks from photos and videos, then stamp our own.
+  #    Placed AFTER the cheap text-discard filters (#1, #2) so a message dropped
+  #    by a stop-word / blacklisted link never pays for the media
+  #    download + detection + inpaint + re-upload.
   - WatermarkRemovalFilter:
       channels:
         -1001350991069: {}
@@ -77,43 +116,7 @@ filters:
         -1003183399976: {}
         -1003465993418: {}
 
-  # 1. Block messages containing competitor channel links (URL entities — both hyperlinks and bare URLs)
-  - SkipWithUrlFilter:
-      blacklist: !!set
-        ? t.me/deskladchina
-        ? t.me/xpiratovich
-        ? t.me/piratlinks
-        ? t.me/daime
-        ? t.me/pirat
-        ? t.me/kitpaymentbot
-        ? t.me/alliance
-        ? t.me/privateinc
-        ? t.me/skladprivate
-        ? t.me/piratnotes
-        ? t.me/piratovichfeed
-        ? t.me/alliance1000
-        ? t.me/piratVPN
-        ? t.me/Sovetnik1000
-        ? t.me/maximusdesklad
-
-  # 2. Drop entire message if it contains a stop-word (case-insensitive, whole-word match)
-  #    Prefix with r'...' to use a regex instead of a plain word.
-  - SkipWithKeywordsFilter:
-      keywords: !!set
-        ? "DE SKLAD"
-        ? "DÈ SKLAD"
-        ? "DÉ SKLAD"
-        ? "Pirat"
-        ? "PRIVATE"
-        ? "Парат"
-        ? "Шеф"
-        ? "Пиратович"
-        ? "Юнга"
-        ? "Альянс"
-        ? "Максимус"
-        ? "Maximus"
-
-  # 3. Bypass Telegram's "restrict saving content" (noforwards) protection —
+  # 4. Bypass Telegram's "restrict saving content" (noforwards) protection —
   #    placed after the cheap text-discard filters above (so messages skipped by
   #    them never pay for a media download+reupload) but must stay after
   #    WatermarkRemovalFilter (it replaces message.media with a freshly
@@ -121,7 +124,7 @@ filters:
   #    against the original media must come before it)
   - RestrictSavingContentBypassFilter
 
-  # 4. Replace words/phrases inline (case preserved, whole-word match by default)
+  # 5. Replace words/phrases inline (case preserved, whole-word match by default)
   #    Prefix key with r'...' to use a regex; value supports back-references.
   - KeywordReplaceFilter:
       keywords:
@@ -130,7 +133,7 @@ filters:
         "r'@daime'": "@Archonor"
         "r'@kitpaymentbot'": "@ArchonumBot"
 
-  # 5. Rename mirrored document files: prepend "@CitadelOS - " and strip promo
+  # 6. Rename mirrored document files: prepend "@CitadelOS - " and strip promo
   #    fragments from the filename. Must stay after RestrictSavingContentBypassFilter
   #    (patches the already re-uploaded file in place; re-uploads plain reference
   #    documents itself).

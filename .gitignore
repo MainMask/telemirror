@@ -91,4 +91,7 @@ ENV/
 
 *.session
 
+# Config backups written by skylon_set/setup_mirrors.py
+*.bak
+
 .vscode

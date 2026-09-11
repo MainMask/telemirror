@@ -13,6 +13,7 @@ from ..watermark.processor import (
     async_stamp_watermark_on_image,
     async_stamp_watermark_on_video,
 )
+from ._media import ReuploadCache, source_media_id
 from .base import FilterAction, FilterResult, MessageFilter
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ class WatermarkRemovalFilter(MessageFilter):
         self._configs: Dict[int, ChannelWatermarkConfig] = {
             int(k): ChannelWatermarkConfig(**v) for k, v in channels.items()
         }
+        # Re-send one processed upload to all fan-out targets (keyed by source id).
+        self._cache = ReuploadCache()
 
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]
@@ -47,14 +50,27 @@ class WatermarkRemovalFilter(MessageFilter):
         if config is None or not message.media:
             return FilterResult(FilterAction.CONTINUE, message)
 
+        key = source_media_id(message.media)
+        if key is not None:
+            cached = self._cache.get(key)
+            if cached is not None:
+                message.media = cached
+                return FilterResult(FilterAction.CONTINUE, message)
+
+        handle = None
         if isinstance(message.media, types.MessageMediaPhoto):
-            await self._process_photo(message, config)
+            handle = await self._process_photo(message, config)
         elif isinstance(message.media, types.MessageMediaDocument):
             doc = message.media.document
             if isinstance(doc, types.Document) and any(
                 isinstance(a, types.DocumentAttributeVideo) for a in doc.attributes
             ):
-                await self._process_video(message, config)
+                handle = await self._process_video(message, config)
+
+        if handle is not None:
+            message.media = handle
+            if key is not None:
+                self._cache.put(key, handle)
 
         return FilterResult(FilterAction.CONTINUE, message)
 
@@ -62,7 +78,8 @@ class WatermarkRemovalFilter(MessageFilter):
         self,
         message: EventMessage,
         config: ChannelWatermarkConfig,
-    ) -> None:
+    ):
+        """Return the re-uploaded file handle, or None on failure."""
         try:
             photo_bytes: bytes = await message._client.download_media(
                 message=message, file=bytes
@@ -71,18 +88,19 @@ class WatermarkRemovalFilter(MessageFilter):
             stamped = await async_stamp_watermark_on_image(
                 cleaned if cleaned is not None else photo_bytes, config
             )
-            handle = await message._client.upload_file(stamped, file_name="photo.jpg")
-            message.media = handle
+            return await message._client.upload_file(stamped, file_name="photo.jpg")
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: photo processing failed (chat_id=%s)", message.chat_id
             )
+            return None
 
     async def _process_video(
         self,
         message: EventMessage,
         config: ChannelWatermarkConfig,
-    ) -> None:
+    ):
+        """Return the re-uploaded file handle, or None if nothing was produced."""
         tmp_in = tmp_out = tmp_stamp = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
@@ -99,12 +117,13 @@ class WatermarkRemovalFilter(MessageFilter):
 
             upload_path = tmp_stamp if stamped else (tmp_out if removed else None)
             if upload_path is not None:
-                handle = await message._client.upload_file(upload_path)
-                message.media = handle
+                return await message._client.upload_file(upload_path)
+            return None
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: video processing failed (chat_id=%s)", message.chat_id
             )
+            return None
         finally:
             for p in (tmp_in, tmp_out, tmp_stamp):
                 if p and os.path.exists(p):

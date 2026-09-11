@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
+from urllib.parse import quote
 
 from decouple import AutoConfig, Csv, RepositoryEnv
 
@@ -112,9 +113,19 @@ if not USE_MEMORY_DB and DB_URL is None and DB_HOST is None:
 
 DB_PROTOCOL: str = "postgres"
 
+
+def build_dsn(user: str, password: str, host: str, name: str) -> str:
+    """Assemble a libpq connection URL, percent-encoding the credentials so a
+    password containing ``@ : / # ?`` doesn't corrupt/redirect the DSN."""
+    return (
+        f"{DB_PROTOCOL}://{quote(user or '', safe='')}:"
+        f"{quote(password or '', safe='')}@{host}/{name}"
+    )
+
+
 # if connection string wasnt set then build it from credentials
 if DB_URL is None:
-    DB_URL = f"{DB_PROTOCOL}://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
+    DB_URL = build_dsn(DB_USER, DB_PASS, DB_HOST, DB_NAME)
 
 LOG_LEVEL: str = config("LOG_LEVEL", default="INFO").upper()
 

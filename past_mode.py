@@ -382,7 +382,8 @@ async def _run(logger: logging.Logger) -> None:
     me = await client.get_me()
     if me is None:
         raise RuntimeError("Нет авторизации. Запустите login.py для получения SESSION_STRING.")
-    logger.info(f"Вошли как {utils.get_display_name(me)} ({me.phone})")
+    _handle = f" (@{me.username})" if getattr(me, "username", None) else ""
+    logger.info(f"Вошли как {utils.get_display_name(me)}{_handle}")
 
     try:
         for source_id, target_id, cfg in directions:

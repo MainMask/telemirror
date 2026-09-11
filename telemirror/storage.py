@@ -157,6 +157,27 @@ class Database(Protocol):
         """Upserts checkpoint for source→target pair"""
         raise NotImplementedError
 
+    @abstractmethod
+    async def get_broadcast_sync(self: "Database", source: int) -> Dict[int, Optional[int]]:
+        """Returns {message_id: synced_edit_ts} for every message of `source`
+        already handled by the startup broadcast sync (`synced_edit_ts` is the
+        unix timestamp of the last synced `edit_date`, or None if never edited)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def set_broadcast_sync(
+        self: "Database", source: int, message_id: int, edit_ts: Optional[int]
+    ) -> None:
+        """Upserts the broadcast-sync state for one source message."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_broadcast_sync(
+        self: "Database", source: int, message_ids: List[int]
+    ) -> None:
+        """Removes broadcast-sync rows for messages deleted from the source."""
+        raise NotImplementedError
+
     def __repr__(self) -> str:
         return self.__class__.__name__
 
@@ -177,6 +198,7 @@ class InMemoryDatabase(Database):
     ) -> "InMemoryDatabase":
         self.__storage = LRUCache[str, List[MirrorMessage]](capacity=max_capacity)
         self.__checkpoints: Dict[Tuple[int, int], int] = {}
+        self.__broadcast_sync: Dict[int, Dict[int, Optional[int]]] = {}
 
     async def _async__init__(self: "InMemoryDatabase") -> "InMemoryDatabase":
         return self
@@ -301,6 +323,24 @@ class InMemoryDatabase(Database):
         self: "InMemoryDatabase", source: int, target: int, message_id: int
     ) -> None:
         self.__checkpoints[(source, target)] = message_id
+
+    async def get_broadcast_sync(
+        self: "InMemoryDatabase", source: int
+    ) -> Dict[int, Optional[int]]:
+        return dict(self.__broadcast_sync.get(source, {}))
+
+    async def set_broadcast_sync(
+        self: "InMemoryDatabase", source: int, message_id: int, edit_ts: Optional[int]
+    ) -> None:
+        self.__broadcast_sync.setdefault(source, {})[message_id] = edit_ts
+
+    async def delete_broadcast_sync(
+        self: "InMemoryDatabase", source: int, message_ids: List[int]
+    ) -> None:
+        bucket = self.__broadcast_sync.get(source)
+        if bucket:
+            for mid in message_ids:
+                bucket.pop(mid, None)
 
     def __build_message_key(
         self: "InMemoryDatabase", original_id: int, original_channel: int
@@ -565,6 +605,13 @@ class PostgresDatabase(Database):
                     last_message_id BIGINT NOT NULL,
                     PRIMARY KEY (source_channel, target_channel)
                 );
+
+                CREATE TABLE IF NOT EXISTS broadcast_sync (
+                    source_channel BIGINT NOT NULL,
+                    message_id     BIGINT NOT NULL,
+                    synced_edit_ts BIGINT,
+                    PRIMARY KEY (source_channel, message_id)
+                );
                 """
             )
 
@@ -592,6 +639,44 @@ class PostgresDatabase(Database):
                 DO UPDATE SET last_message_id = EXCLUDED.last_message_id
                 """,
                 (source, target, message_id),
+            )
+
+    async def get_broadcast_sync(
+        self: "PostgresDatabase", source: int
+    ) -> Dict[int, Optional[int]]:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "SELECT message_id, synced_edit_ts FROM broadcast_sync "
+                "WHERE source_channel = %s",
+                (source,),
+            )
+            rows = await cursor.fetchall()
+        return {mid: ets for mid, ets in rows}
+
+    async def set_broadcast_sync(
+        self: "PostgresDatabase", source: int, message_id: int, edit_ts: Optional[int]
+    ) -> None:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO broadcast_sync (source_channel, message_id, synced_edit_ts)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (source_channel, message_id)
+                DO UPDATE SET synced_edit_ts = EXCLUDED.synced_edit_ts
+                """,
+                (source, message_id, edit_ts),
+            )
+
+    async def delete_broadcast_sync(
+        self: "PostgresDatabase", source: int, message_ids: List[int]
+    ) -> None:
+        if not message_ids:
+            return
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "DELETE FROM broadcast_sync "
+                "WHERE source_channel = %s AND message_id = ANY(%s)",
+                (source, message_ids),
             )
 
     @asynccontextmanager
