@@ -16,4 +16,5 @@ jobs:
           cache: pip
       - run: pip install -r requirements-dev.txt
       - run: python -m pyflakes $(git ls-files '*.py')
+      - run: python -m ruff check
       - run: python -m pytest

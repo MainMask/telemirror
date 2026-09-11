@@ -11,12 +11,15 @@ class LRUCache(Generic[K, V], collections.OrderedDict[K, V]):
 
     Args:
         capacity (int): Maximum number of items the cache can hold.
-        free_factor (float, optional): Fraction of items to keep when purging (default: 0.5).
+        free_factor (float, optional): Fraction of items *evicted* on a purge
+            (default: 0.5 — a full cache is trimmed back to half capacity).
     """
 
     def __init__(self, *args, capacity: int, free_factor: float = 0.5, **kwargs):
-        assert capacity > 0
-        assert free_factor > 0.1 and free_factor <= 1.0
+        if capacity <= 0:
+            raise ValueError("capacity must be > 0")
+        if not 0.1 < free_factor <= 1.0:
+            raise ValueError("free_factor must be in (0.1, 1.0]")
         self.capacity = capacity
         self.keep_last = max(1.0, capacity * (1.0 - free_factor))
 

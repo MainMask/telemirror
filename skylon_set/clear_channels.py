@@ -45,7 +45,7 @@ def _get_msg_topic(msg) -> int:
 def collect_targets(chat_mapping) -> Dict[int, Set[Optional[int]]]:
     """Собирает {channel_id: set(topic_ids)} из целевых каналов CHAT_MAPPING."""
     targets: Dict[int, Set[Optional[int]]] = {}
-    for _, tgt_map in chat_mapping.items():
+    for tgt_map in chat_mapping.values():
         for tgt_id, cfgs in tgt_map.items():
             for cfg in cfgs:
                 targets.setdefault(tgt_id, set()).add(cfg.to_topic_id)

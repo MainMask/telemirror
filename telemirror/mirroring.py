@@ -69,6 +69,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         async def wrapper(self: "EventProcessor", *args, **kw):
             try:
                 return await fn(self, *args, **kw)
+            except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+                # A >threshold FloodWait must reach past_mode's retry wrapper so
+                # the checkpoint isn't advanced past an un-sent message.
+                raise
             except Exception as e:
                 self._logger.error(e, exc_info=True)
 
@@ -347,6 +351,14 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"{type(split_err).__name__}: {split_err}"
                         )
                         continue
+                except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+                    # Let a >threshold FloodWait propagate: past_mode's retry
+                    # wrapper handles it without advancing the checkpoint past
+                    # this un-sent message. In live mode there is no retry, so
+                    # this aborts the rest of the fan-out for this message — an
+                    # accepted trade-off (a >300s wait means the account is
+                    # already heavily limited).
+                    raise
                 except Exception as e:
                     self._logger.error(
                         f"Error while sending message to chat#{outgoing_chat}. "
@@ -368,7 +380,15 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     await asyncio.sleep(config.send_delay)
 
         if inserted:
-            await self._database.insert_batch(inserted)
+            try:
+                await self._database.insert_batch(inserted)
+            except Exception as e:
+                # Messages are already sent; without their DB rows a later
+                # edit/delete can't reach them and a resync may duplicate them.
+                self._logger.error(
+                    f"{len(inserted)} message(s) sent but NOT tracked in DB "
+                    f"({message_link}): {type(e).__name__}: {e}"
+                )
 
     @__handle_exceptions
     async def new_album(
@@ -524,6 +544,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"{type(split_err).__name__}: {split_err}"
                         )
                         continue
+                except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+                    # See new_message: propagate to past_mode's retry wrapper
+                    # (in live mode this aborts the rest of the fan-out).
+                    raise
                 except Exception as e:
                     self._logger.error(
                         f"Error while sending album to chat#{outgoing_chat}. "
@@ -937,10 +961,8 @@ class Mirroring:
     def stringify_config(self: "Mirroring") -> str:
         """Stringify mirror config"""
         mirror_mapping = "\n".join(
-            [
-                f"{source} -> {', '.join(map(lambda x: f'{x} [{targets[x]}]', targets))}"
-                for (source, targets) in self._chat_mapping.items()
-            ]
+            f"{source} -> {', '.join(f'{t} [{cfgs}]' for t, cfgs in targets.items())}"
+            for source, targets in self._chat_mapping.items()
         )
 
         return f"Mirror mapping: \n{mirror_mapping}\nUsing database: {self._database}\n"
@@ -1096,6 +1118,13 @@ class Mirroring:
                 f"Logged in as {utils.get_display_name(me)}{at_username}"
             )
 
+            # Attach before the broadcast sync so its warnings/errors also reach
+            # the tech channel.
+            if self._tech_channel:
+                logging.getLogger("telemirror").addHandler(
+                    TelegramLogHandler(client, self._tech_channel)
+                )
+
             if self._broadcast_channel:
                 try:
                     await self._sync_broadcast_channel(client)
@@ -1105,11 +1134,6 @@ class Mirroring:
                         f"{type(e).__name__}: {e}",
                         exc_info=True,
                     )
-
-            if self._tech_channel:
-                logging.getLogger("telemirror").addHandler(
-                    TelegramLogHandler(client, self._tech_channel)
-                )
 
             self._handlers = EventHandlers(
                 client=self._receiver,

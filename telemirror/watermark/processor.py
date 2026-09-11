@@ -208,7 +208,7 @@ def remove_watermark_from_video(
 
     delogo = f"delogo=x={x}:y={y}:w={w}:h={h}"
     cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", delogo, "-c:a", "copy", output_path]
-    proc = subprocess.run(cmd, capture_output=True, timeout=300)
+    proc = subprocess.run(cmd, capture_output=True, timeout=300, check=False)
     if proc.returncode != 0:
         logger.error(
             "ffmpeg delogo failed (code %d): %s",
@@ -294,7 +294,7 @@ def stamp_watermark_on_video(
         "-c:a", "copy",
         output_path,
     ]
-    proc = subprocess.run(cmd, capture_output=True, timeout=300)
+    proc = subprocess.run(cmd, capture_output=True, timeout=300, check=False)
     if proc.returncode != 0:
         logger.error(
             "ffmpeg overlay failed (code %d): %s",

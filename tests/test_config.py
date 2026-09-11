@@ -2,8 +2,23 @@ import datetime
 
 import pytest
 
-from config import DirectionConfig, PastModeConfig
+from config import DirectionConfig, PastModeConfig, _channel_id
 from telemirror.messagefilters import EmptyMessageFilter
+
+
+@pytest.mark.parametrize("unset", [None, "", "0", "  ", " 0 "])
+def test_channel_id_treats_blank_and_zero_as_unset(unset):
+    assert _channel_id(unset, "BROADCAST_CHANNEL") is None
+
+
+def test_channel_id_parses_marked_id():
+    assert _channel_id("-1001234", "X") == -1001234
+    assert _channel_id(-1001234, "X") == -1001234
+
+
+def test_channel_id_rejects_non_numeric_with_context():
+    with pytest.raises(ValueError, match="BROADCAST_CHANNEL"):
+        _channel_id("not-a-number", "BROADCAST_CHANNEL")
 
 
 def test_past_mode_requires_exactly_one_strategy():

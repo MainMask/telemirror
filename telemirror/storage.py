@@ -178,6 +178,9 @@ class Database(Protocol):
         """Removes broadcast-sync rows for messages deleted from the source."""
         raise NotImplementedError
 
+    async def close(self: "Database") -> None:
+        """Release any held resources (connection pool). No-op by default."""
+
     def __repr__(self) -> str:
         return self.__class__.__name__
 
@@ -651,7 +654,7 @@ class PostgresDatabase(Database):
                 (source,),
             )
             rows = await cursor.fetchall()
-        return {mid: ets for mid, ets in rows}
+        return dict(rows)
 
     async def set_broadcast_sync(
         self: "PostgresDatabase", source: int, message_id: int, edit_ts: Optional[int]
@@ -678,6 +681,10 @@ class PostgresDatabase(Database):
                 "WHERE source_channel = %s AND message_id = ANY(%s)",
                 (source, message_ids),
             )
+
+    async def close(self: "PostgresDatabase") -> None:
+        """Close the connection pool."""
+        await self.connection_pool.close()
 
     @asynccontextmanager
     async def __pg_cursor(self: "PostgresDatabase") -> AsyncIterator[AsyncCursor[Any]]:

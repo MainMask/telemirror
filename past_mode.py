@@ -115,7 +115,8 @@ async def _integrity_check(
     if checkpoint < max_mirrored:
         logger.warning(
             f"{prefix}: checkpoint={checkpoint} < max_mirrored={max_mirrored}, "
-            f"откат checkpoint до {max_mirrored}"
+            f"сдвигаю checkpoint вперёд до {max_mirrored} "
+            f"(сообщения между {checkpoint} и {max_mirrored} без зеркал при resume пропускаются)"
         )
         await database.set_past_mode_checkpoint(source_id, target_id, max_mirrored)
         return max_mirrored, mirror_count
@@ -283,7 +284,9 @@ async def _edit_links_pass(
             text_changed = msg_copy.message != text_before
             url_changed = any(
                 getattr(a, "url", None) != getattr(b, "url", None)
-                for a, b in zip(msg_copy.entities or [], entities_before or [])
+                for a, b in zip(
+                    msg_copy.entities or [], entities_before or [], strict=False
+                )
             )
             if not text_changed and not url_changed:
                 continue
@@ -388,8 +391,7 @@ async def _run(logger: logging.Logger) -> None:
             await client.send_message(TECH_CHANNEL, full if len(full) <= 4096 else header)
     finally:
         await client.disconnect()
-        if hasattr(database, "connection_pool"):
-            await database.connection_pool.close()
+        await database.close()
 
 
 def main() -> None:

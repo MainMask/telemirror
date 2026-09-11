@@ -64,3 +64,19 @@ def test_entity_fully_inside_replacement_covers_placeholder():
     upd([e], 3, 6, -1)
     assert (e.offset, e.length) == (3, 2)
     assert e.offset >= 0 and e.offset + e.length <= len("AAAZZCCC")
+
+
+def test_entity_inside_replacement_touching_start_edge():
+    # bold [3,4) "B" sits at the replacement's start, ends before its end
+    e = ent(3, 1)
+    upd([e], 3, 6, -1)  # "AAABBBCCC" -> "AAAZZCCC"
+    assert (e.offset, e.length) == (3, 2)
+    assert e.offset + e.length <= len("AAAZZCCC")
+
+
+def test_entity_inside_replacement_touching_end_edge():
+    # bold [4,6) "BB" ends exactly at the replacement's end, starts after its start
+    e = ent(4, 2)
+    upd([e], 3, 6, -1)  # "AAABBBCCC" -> "AAAZZCCC"
+    assert (e.offset, e.length) == (3, 2)
+    assert e.offset + e.length <= len("AAAZZCCC")

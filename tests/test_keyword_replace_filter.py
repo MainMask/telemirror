@@ -56,6 +56,13 @@ def test_no_text_passes_through():
     assert res.message == ""
 
 
+def test_broken_regex_keyword_raises_value_error():
+    with pytest.raises(ValueError):
+        KeywordReplaceFilter({"r'(unclosed'": "x"})
+    with pytest.raises(ValueError):
+        SkipWithKeywordsFilter({"r'[z-a]'"})
+
+
 @pytest.mark.parametrize("cls", [SkipWithKeywordsFilter, AllowWithKeywordsFilter])
 def test_empty_keywords_rejected(cls):
     """An empty set would compile to a match-everything regex — fail fast instead."""

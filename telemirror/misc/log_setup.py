@@ -16,4 +16,7 @@ def setup_stdout_logger(name: str, level: int | str) -> logging.Logger:
         handler.setLevel(logging.DEBUG)
         handler.setFormatter(logging.Formatter(LOG_FORMAT))
         logger.addHandler(handler)
+        # own handler only — don't also bubble to the root logger (double lines
+        # once anything calls logging.basicConfig)
+        logger.propagate = False
     return logger
