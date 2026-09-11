@@ -7,6 +7,10 @@ filters:
   - UrlMessageFilter:
       blacklist: !!set
         ? t.me
+      # whitelist: !!set   # keep these URLs even if they match blacklist
+      #   ? example.com
+      # placeholder: "***" # replacement text for removed URLs, default "***"
+      # filter_mention: false  # also filter @mentions
   - SkipUrlFilter:
       skip_mention: false
 
@@ -36,6 +40,14 @@ directions:
     disable_delete: false
     mode: forward
     send_delay: 0.0 # override per-direction (0 = no delay)
+    # (Optional) Sync past messages on startup. Exactly one strategy must be set.
+    past_mode:
+      last_n: 100       # sync last 100 messages
+      send_delay: 1.0   # delay between replayed messages (seconds)
+    # past_mode:
+    #   full_history: true
+    # past_mode:
+    #   since_date: "2024-01-01T00:00:00"
     # Overwrite global filters
     filters:
       - UrlMessageFilter:
