@@ -18,6 +18,9 @@ mode: copy # or forward
 # (Optional) Admin broadcast channel: messages from this channel are sent to ALL configured targets
 # broadcast_channel: -100123456789
 
+# (Optional) Technical monitoring channel: receives log alerts (WARNING+) and DM notifications
+# tech_channel: -100123456789
+
 # (Required) Mirror directions
 directions:
   - from: [-1001, -1002, -1003]

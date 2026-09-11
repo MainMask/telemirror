@@ -533,12 +533,77 @@ class EventProcessor(CopyEventMessage):
         await self._database.delete_messages_batch(message_ids, chat_id)
 
 
+class TelegramLogHandler(logging.Handler):
+    """Sends WARNING+ log records to a Telegram channel.
+
+    Identical messages (by text) are accumulated for _DEBOUNCE seconds,
+    then sent once with ×N count. After sending, the same text is suppressed
+    for _COOLDOWN seconds (total window ~60 s).
+    """
+
+    _DEBOUNCE = 5   # seconds to accumulate before sending
+    _COOLDOWN = 55  # seconds of suppression after send (total ~60 s)
+
+    _PREFIXES = {
+        logging.WARNING:  "⚠️ WARNING",
+        logging.ERROR:    "‼️ ERROR",
+        logging.CRITICAL: "🚨 CRITICAL",
+    }
+
+    def __init__(self, client: TelegramClient, channel: int) -> None:
+        super().__init__(logging.WARNING)
+        self._client = client
+        self._channel = channel
+        self._loop = client.loop
+        self._counts: dict = {}
+        self._timers: dict = {}
+        self._cooldown_until: dict = {}
+
+    def _format_record(self, record: logging.LogRecord) -> str:
+        prefix = self._PREFIXES.get(record.levelno, "⚠️ WARNING")
+        return f"{prefix}: {record.getMessage()}"
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            text = self._format_record(record)
+        except Exception:
+            self.handleError(record)
+            return
+        self._loop.call_soon_threadsafe(self._enqueue, text)  # thread-safe dispatch
+
+    def _enqueue(self, text: str) -> None:
+        """Runs in the event-loop thread — dict ops are safe here."""
+        if self._cooldown_until.get(text, 0) > self._loop.time():
+            return  # в окне подавления
+
+        self._counts[text] = self._counts.get(text, 0) + 1
+
+        if text not in self._timers:  # only first occurrence schedules the send
+            self._timers[text] = self._loop.call_later(self._DEBOUNCE, self._send, text)
+
+    def _send(self, text: str) -> None:
+        count = self._counts.pop(text, 1)
+        self._timers.pop(text, None)
+        self._cooldown_until[text] = self._loop.time() + self._COOLDOWN
+        msg = f"{text} (×{count})" if count > 1 else text
+        if not self._loop.is_closed():
+            self._loop.create_task(self._do_send(msg))
+
+    async def _do_send(self, msg: str) -> None:
+        try:
+            await self._client.send_message(self._channel, msg)
+        except Exception:
+            pass  # handler must not raise; Telegram errors silently swallowed
+
+
 class EventHandlers:
     def __init__(
         self: "EventHandlers",
         client: TelegramClient,
         chats: List[int],
         processor: EventProcessor,
+        sender: Optional[TelegramClient] = None,
+        tech_channel: Optional[int] = None,
     ) -> None:
         """Message event handler
 
@@ -546,6 +611,8 @@ class EventHandlers:
             client (`TelegramClient`): Message receiver client
             chats (`List[int]`): List of chats to be observed
             processor (`EventProcessor`): Event processor
+            sender (`TelegramClient`, optional): Sender client for tech_channel notifications
+            tech_channel (`int`, optional): Tech monitoring channel ID
         """
         client.add_event_handler(self.on_new_message, events.NewMessage(chats=chats))
         client.add_event_handler(self.on_album, events.Album(chats=chats))
@@ -556,6 +623,24 @@ class EventHandlers:
             self.on_deleted_message, events.MessageDeleted(chats=chats)
         )
         self._processor = processor
+
+        if tech_channel and sender:
+            self._sender = sender
+            self._tech_channel = tech_channel
+            client.add_event_handler(
+                self.on_private_message,
+                events.NewMessage(incoming=True, func=lambda e: e.is_private),
+            )
+
+    async def on_private_message(
+        self: "EventHandlers", event: events.NewMessage.Event
+    ) -> None:
+        """Notify tech_channel about incoming private messages."""
+        sender_obj = await event.get_sender()
+        name = utils.get_display_name(sender_obj)
+        username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "нет"
+        msg = f"📩 Личное сообщение от {name} ({username})"
+        await self._sender.send_message(self._tech_channel, msg)
 
     def event_message_link(self: "EventHandlers", event: EventLike) -> str:
         """Get link to event message"""
@@ -644,6 +729,7 @@ class Mirroring:
         sender: TelegramClient,
         logger: Union[str, logging.Logger] = None,
         broadcast_channel: Optional[int] = None,
+        tech_channel: Optional[int] = None,
     ) -> None:
         """Configure channels mirroring
 
@@ -654,12 +740,14 @@ class Mirroring:
             sender (`TelegramClient`): Message sender client, can be same as `receiver`
             logger (`str` | `logging.Logger`, optional): Logger. Defaults to None.
             broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup.
+            tech_channel (`int`, optional): Technical monitoring channel ID.
         """
         self._chat_mapping = chat_mapping
         self._database = database
         self._receiver = receiver
         self._sender = sender
         self._broadcast_channel = broadcast_channel
+        self._tech_channel = tech_channel
 
         self._processor = EventProcessor(
             chat_mapping=chat_mapping,
@@ -801,10 +889,17 @@ class Mirroring:
                         exc_info=True,
                     )
 
+            if self._tech_channel:
+                logging.getLogger().addHandler(
+                    TelegramLogHandler(client, self._tech_channel)
+                )
+
             self._handlers = EventHandlers(
                 client=self._receiver,
                 chats=list(self._chat_mapping.keys()),
                 processor=self._processor,
+                sender=self._sender,
+                tech_channel=self._tech_channel,
             )
 
             await client.run_until_disconnected()
@@ -840,6 +935,7 @@ class Telemirror:
         api_system_version: str = None,
         api_app_version: str = None,
         broadcast_channel: Optional[int] = None,
+        tech_channel: Optional[int] = None,
     ):
         """Telemirror
 
@@ -854,6 +950,7 @@ class Telemirror:
             api_system_version (`str`, optional): Telegram API system version. Defaults to `platform.uname().machine`
             api_app_version (`str`, optional): Telegram API app version. Defaults to `telethon.version.__version__`
             broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup. Defaults to None.
+            tech_channel (`int`, optional): Technical monitoring channel ID. Defaults to None.
         """
         patch_input_media_with_spoiler()
         set_album_event_timeout(delay_sec=1.01)
@@ -884,6 +981,7 @@ class Telemirror:
             sender=send_client,
             logger=logger,
             broadcast_channel=broadcast_channel,
+            tech_channel=tech_channel,
         )
 
     async def run(self: "Telemirror") -> None:
