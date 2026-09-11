@@ -308,16 +308,18 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 )
 
         for outgoing_chat, configs in outgoing_chats.items():
-            if outgoing_chat in already_mirrored:
+            matching = [c for c in configs if self._matches_from_topic(c, message)]
+            # Skip a target we've already mirrored this message to — but only
+            # when it has a single route: `binding_id` has no topic column, so
+            # for a multi-topic target one delivered topic would wrongly skip
+            # the rest.
+            if outgoing_chat in already_mirrored and len(matching) <= 1:
                 self._logger.debug(
                     "[New message]: %s already mirrored to chat#%s, skip",
                     message_link, outgoing_chat,
                 )
                 continue
-            for config in configs:
-                if not self._matches_from_topic(config, message):
-                    continue
-
+            for config in matching:
                 if restricted_saving_content and (
                     not config.filters.restricted_content_allowed
                     or config.mode == "forward"
@@ -513,16 +515,19 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         }
 
         for outgoing_chat, configs in outgoing_chats.items():
-            if outgoing_chat in already_mirrored:
+            matching = [
+                c for c in configs
+                if self._matches_from_topic(c, incoming_first_message)
+            ]
+            # See new_message: only skip a single-route target (binding_id has
+            # no topic column).
+            if outgoing_chat in already_mirrored and len(matching) <= 1:
                 self._logger.debug(
                     "[New album]: %s already mirrored to chat#%s, skip",
                     album_link, outgoing_chat,
                 )
                 continue
-            for config in configs:
-                if not self._matches_from_topic(config, incoming_first_message):
-                    continue
-
+            for config in matching:
                 if restricted_saving_content and (
                     not config.filters.restricted_content_allowed
                     or config.mode == "forward"

@@ -123,6 +123,7 @@ def test_download_retry_exhausts_and_raises_media_download_error(monkeypatch):
         run(download_media_with_retry(_retry_msg(FakeClient()), file=bytes))
     assert calls["n"] == len(_media._DOWNLOAD_RETRY_DELAYS) + 1
     assert excinfo.value.__cause__ is original
+    assert excinfo.value.message_id == 42  # from _retry_msg
 
 
 def test_download_retry_reraises_non_transient_valueerror(monkeypatch):
