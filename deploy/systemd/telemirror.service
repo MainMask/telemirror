@@ -6,15 +6,32 @@ Wants=network-online.target
 # Делит SESSION_STRING с бэкофиллом истории — одновременно работать нельзя.
 Conflicts=telemirror-past-courses.service
 # Сломанный деплой не должен бесконечно долбить Telegram (риск бана аккаунта).
-StartLimitIntervalSec=300
-StartLimitBurst=5
+# Транзиентные сбои сети/Telegram переживает сам процесс (connection_retries),
+# поэтому 15 падений за час — это уже реальная поломка: гасимся и шлём алерт.
+StartLimitIntervalSec=3600
+StartLimitBurst=15
+OnFailure=telemirror-alert@%n.service
 
 [Service]
-Type=simple
+# Type=notify + WatchdogSec: main.py шлёт READY=1 после логина и WATCHDOG=1,
+# пока клиент подключён. Завис / отвалился дольше WatchdogSec → systemd убивает
+# и перезапускает (Restart=always этого сам не увидел бы — процесс жив).
+Type=notify
+NotifyAccess=main
+WatchdogSec=600
+WatchdogSignal=SIGTERM
+# READY=1 шлётся после коннекта + get_me(); на холодной загрузке БД/сеть могут
+# подниматься медленно — дедлайн щедрый, реальный зависон всё равно ограничен.
+TimeoutStartSec=300
 WorkingDirectory=/root/telemirror
 ExecStart=/root/telemirror/.venv/bin/python -u main.py
 Restart=always
 RestartSec=10
+# Экспоненциальный бэкофф 10s → 120s; retries бесконечны в пределах burst-лимита
+# выше. Аккаунт не долбится (макс ~1 попытка / 2 мин), сервис не «сдаётся» на
+# ровном месте.
+RestartSteps=8
+RestartMaxDelaySec=120
 
 # Скачок/утечка памяти прибьёт только telemirror (дальше рестарт + ресинк по
 # таблице binding_id), а не случайный процесс на сервере.

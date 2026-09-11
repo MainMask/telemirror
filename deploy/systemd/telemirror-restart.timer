@@ -1,0 +1,11 @@
+[Unit]
+Description=telemirror — ежесуточный чистый рестарт живого зеркала
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+# Не догонять пропущенный запуск: рестарт зеркала сразу после буста бессмыслен.
+Persistent=false
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -10,7 +10,7 @@ import telemirror.mirroring as mirroring
 from config import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter, MediaDownloadError
 from telemirror.mirroring import EventProcessor
-from telemirror.storage import InMemoryDatabase
+from telemirror.storage import InMemoryDatabase, MirrorMessage
 from tests.conftest import make_message, run
 
 SOURCE = -1001000000000
@@ -163,6 +163,32 @@ def test_media_download_error_propagates_out_of_handle_exceptions():
     )
     with pytest.raises(MediaDownloadError):
         run(proc.new_message(SOURCE, make_message("hi", channel_id=1000), "link"))
+
+
+def test_already_mirrored_target_is_not_resent(monkeypatch):
+    """Idempotency guard: a target that already holds a mirror of this source
+    message is skipped, so a past_mode retry can't create a duplicate."""
+    db = run(InMemoryDatabase())
+    msg = make_message("hi", channel_id=1000)
+    run(db.insert(MirrorMessage(msg.id, SOURCE, 999, TARGETS[0])))
+
+    sent_to = []
+
+    async def spy_send(client, entity, message, **kw):
+        sent_to.append(entity)
+        return types.Message(id=1, peer_id=types.PeerChannel(1), message="x")
+
+    monkeypatch.setattr(mirroring, "send_message", spy_send)
+
+    proc = EventProcessor(
+        chat_mapping={SOURCE: {TARGETS[0]: [_cfg()], TARGETS[1]: [_cfg()]}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test.idem"),
+    )
+    run(proc.new_message(SOURCE, msg, "link"))
+
+    assert sent_to == [TARGETS[1]]  # TARGETS[0] skipped — already mirrored
 
 
 def test_media_download_error_mid_fanout_persists_already_sent_targets(monkeypatch):

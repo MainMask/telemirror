@@ -1,0 +1,11 @@
+[Unit]
+Description=telemirror — проверка флапа/зависания живого зеркала
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/telemirror
+ExecStart=/root/telemirror/.venv/bin/python -m telemirror.health
+TimeoutStartSec=90
+NoNewPrivileges=true
+ProtectSystem=full
+Nice=10

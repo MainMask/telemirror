@@ -8,21 +8,26 @@
 
 | Файл | Назначение |
 |---|---|
-| `bootstrap.sh` | одноразовый установщик: swap + симлинки юнитов + cron + `daemon-reload` |
+| `bootstrap.sh` | одноразовый установщик: swap + симлинки юнитов + журнал + cron + `daemon-reload` |
 | `setup-swap.sh` | идемпотентный ресайз `/swapfile` до 2 ГБ и `vm.swappiness=10` |
 | `systemd/telemirror.service` | живое зеркало (`main.py`), 24/7 |
 | `systemd/telemirror-past-courses.service` | разовый прогон истории курсов (`past_mode.py`) |
+| `systemd/telemirror-alert@.service` | `OnFailure=`: шлёт в `TECH_CHANNEL`, что юнит сдался |
+| `systemd/telemirror-health.{timer,service}` | раз в 10 мин: алерт если зеркало флапает или зависло не-active |
+| `systemd/telemirror-restart.{timer,service}` | чистый рестарт зеркала раз в сутки (04:00) |
+| `systemd/journald.conf.d/telemirror.conf` | `SystemMaxUse=500M` — журнал не забьёт `/var` |
 | `cron.d/telemirror-tmp` | ежечасная подчистка осиротевших `/tmp/tmp*.mp4` |
 
 ## Требования
 
-- Ubuntu + systemd ≥ 249 (нужен `OnSuccess=`).
+- Ubuntu + systemd ≥ 254 (нужны `OnSuccess=`, `RestartSteps=`/`RestartMaxDelaySec=`).
 - Python-venv в `/root/telemirror/.venv` (`bash install.sh` из корня репо).
 - `ffmpeg` в `PATH` (`apt install ffmpeg`) — для водяного знака на видео.
 - PostgreSQL локально (`postgresql.service`), БД и роль `telemirror` созданы,
   параметры совпадают с `.env`.
 - `.env` в корне репо заполнен (`API_ID`, `API_HASH`, `SESSION_STRING`,
-  `DB_*`). `SESSION_STRING` берётся из `python login.py`.
+  `DB_*`). `SESSION_STRING` берётся из `python login.py`. Для алертов о падении
+  нужен `TECH_CHANNEL` (id канала/чата, куда бот пишет).
 - Если сеть поднимается через systemd-networkd — включи
   `systemctl enable systemd-networkd-wait-online.service`, иначе
   `network-online.target` не блокирует старт (не критично: telethon
@@ -46,14 +51,35 @@ sudo deploy/bootstrap.sh
 ## Живое зеркало
 
 ```bash
+systemctl status telemirror.service | grep -q masked && systemctl unmask telemirror.service
 systemctl enable --now telemirror.service
 journalctl -u telemirror.service -f
 ```
 
-Читает `.configs/mirror.config.yml`. При падении — авто-рестарт через 10 с
-(но не более 5 раз за 5 минут: сломанный деплой не должен долбить Telegram).
-При старте зеркало ресинкается по таблице `binding_id`, поэтому краш не теряет
-сообщения.
+Читает `.configs/mirror.config.yml`. При старте ресинкается по таблице
+`binding_id`, поэтому краш не теряет сообщения.
+
+### Как оно держится 24/7
+
+| Отказ | Что происходит |
+|---|---|
+| Краш / OOM-kill / чистый выход | `Restart=always`, бэкофф 10s → 120s |
+| Обрыв сети / сбой Telegram DC | telethon переподключается сам (`connection_retries=1000`); watchdog терпит отключённое состояние до **30 мин**, дольше — рестарт свежим процессом |
+| **Мёртвый receive-loop / висящий RPC** | `Type=notify` + `WatchdogSec=600`: watchdog-таск каждые 300 с делает `updates.GetState` round-trip (допускает 3 сбоя подряд, FloodWait — ок); не отвечает → `WATCHDOG=1` не уходит → systemd шлёт `SIGTERM` и рестартит |
+| Завис именно dispatch апдейтов (RPC жив) | не отличимо от тихой ленты → авто-рестарта нет; после 2 ч без единого апдейта — `warning` в `TECH_CHANNEL` |
+| Быстрый crash-loop (<~4 мин/итерация) | 15 падений за час → `failed` → `OnFailure=telemirror-alert@` в `TECH_CHANNEL`, сервис стоит до `systemctl reset-failed && systemctl start` |
+| Медленный crash-loop / застрял не-`active` | `telemirror-health.timer` (10 мин): алерт в `TECH_CHANNEL` при ≥3 рестартах за интервал или `ActiveState≠active` два раза подряд |
+| Бан аккаунта / отзыв сессии | попадает в crash-loop выше → алерт; чинить через `python login.py` |
+| Медленная утечка памяти | `telemirror-restart.timer` — чистый рестарт в 04:00 |
+
+Проверки:
+```bash
+systemctl show telemirror.service -p Type -p WatchdogUSec -p NRestarts
+systemctl list-timers 'telemirror-*'
+python -m telemirror.health        # разовый прогон проверки
+# симуляция зависания — через ~10 мин ждём watchdog-рестарт:
+systemctl kill -s STOP telemirror.service
+```
 
 ## Прогон истории курсов
 

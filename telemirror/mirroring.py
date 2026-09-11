@@ -1,11 +1,12 @@
 import asyncio
 import logging
 import re
-from typing import Dict, List, Optional, Union
+import time
+from typing import Awaitable, Callable, Dict, List, Optional, Union
 
 from telethon import TelegramClient, errors, events, utils
 from telethon.sessions import StringSession
-from telethon.tl import types
+from telethon.tl import functions, types
 
 from config import DirectionConfig
 from telemirror._patch import (
@@ -17,6 +18,7 @@ from telemirror._patch import (
 from telemirror.hints import EventAlbumMessage, EventLike, EventMessage
 from telemirror.messagefilters import MediaDownloadError, strict_media_mode
 from telemirror.messagefilters.base import FilterAction
+from telemirror.misc import sdnotify
 from telemirror.misc.links import private_message_link
 from telemirror.misc.lrucache import LRUCache
 from telemirror.misc.message_groups import iter_message_groups
@@ -285,6 +287,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         inserted: List[MirrorMessage] = []
         # Resolve each distinct t.me link once for the whole fan-out.
         link_cache: dict = {}
+        # Targets that already hold a mirror of this source message — skip them
+        # so a past_mode retry (or a re-delivered update) can't send a duplicate.
+        already_mirrored = {
+            m.mirror_channel
+            for m in await self._database.get_messages(message.id, chat_id)
+        }
 
         async def flush_inserted() -> None:
             if not inserted:
@@ -300,6 +308,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 )
 
         for outgoing_chat, configs in outgoing_chats.items():
+            if outgoing_chat in already_mirrored:
+                self._logger.debug(
+                    "[New message]: %s already mirrored to chat#%s, skip",
+                    message_link, outgoing_chat,
+                )
+                continue
             for config in configs:
                 if not self._matches_from_topic(config, message):
                     continue
@@ -491,8 +505,20 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         # Resolve each distinct t.me link once for the whole fan-out.
         link_cache: dict = {}
+        already_mirrored = {
+            m.mirror_channel
+            for m in await self._database.get_messages(
+                incoming_first_message.id, chat_id
+            )
+        }
 
         for outgoing_chat, configs in outgoing_chats.items():
+            if outgoing_chat in already_mirrored:
+                self._logger.debug(
+                    "[New album]: %s already mirrored to chat#%s, skip",
+                    album_link, outgoing_chat,
+                )
+                continue
             for config in configs:
                 if not self._matches_from_topic(config, incoming_first_message):
                     continue
@@ -1015,6 +1041,18 @@ class EventHandlers:
 
 class Mirroring:
     CONNECT_TIMEOUT_SEC = 30
+    # Watchdog: how long telethon may stay disconnected (auto-reconnecting)
+    # before we stop feeding systemd's watchdog and let it restart us fresh.
+    WATCHDOG_DISCONNECT_GRACE_SEC = 1800
+    # Bound on a single liveness round-trip; longer than this = the request
+    # path is wedged, not slow.
+    WATCHDOG_PROBE_TIMEOUT_SEC = 30
+    # Consecutive failed round-trips on a live connection before we let systemd
+    # restart us — absorbs a lone dropped packet / brief DC hiccup.
+    WATCHDOG_PROBE_FAIL_STREAK = 3
+    # No update of any kind for this long (while otherwise healthy) → warn to the
+    # tech channel. Not a restart: a genuinely quiet feed looks the same.
+    WATCHDOG_SILENCE_WARN_SEC = 7200
 
     def __init__(
         self: "Mirroring",
@@ -1172,6 +1210,7 @@ class Mirroring:
         )
 
     async def __connect_client(self: "Mirroring", client: TelegramClient) -> None:
+        watchdog_task: Optional[asyncio.Task] = None
         try:
             if not client.is_connected():
                 # Avoid `client.connect` hang forever:
@@ -1227,6 +1266,14 @@ class Mirroring:
                     TelegramLogHandler(client, self._tech_channel)
                 )
 
+            # Auth confirmed — the service is up. Tell systemd (Type=notify) now,
+            # before the potentially slow broadcast sync, and start pinging the
+            # watchdog so a later hang gets us killed + restarted.
+            sdnotify.notify("READY=1")
+            watchdog_task = asyncio.create_task(
+                sdnotify.watchdog_loop(self.__watchdog_probe(client))
+            )
+
             if self._broadcast_channel:
                 try:
                     await self._sync_broadcast_channel(client)
@@ -1262,7 +1309,84 @@ class Mirroring:
                 "try to get a new session key (run login.py)"
             )
         finally:
+            if watchdog_task is not None:
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
+            sdnotify.notify("STOPPING=1")
             await client.disconnect()
+
+    def __watchdog_probe(
+        self: "Mirroring", client: TelegramClient
+    ) -> Callable[[], Awaitable[bool]]:
+        """Liveness check for ``sdnotify.watchdog_loop``. Healthy =
+        connected *and* a bounded ``updates.GetState`` round-trip succeeds
+        (catches a dead receive loop a bare ``is_connected()`` would miss). A
+        few round-trips may fail in a row (``WATCHDOG_PROBE_FAIL_STREAK``) and a
+        FloodWait counts as healthy — both are back-off situations, not hangs.
+        While disconnected we stay 'healthy' for ``WATCHDOG_DISCONNECT_GRACE_SEC``
+        so telethon's auto-reconnect gets a chance before a restart.
+
+        A stalled update *dispatch* while requests still work can't be told from
+        a genuinely quiet feed, so long silence only warns (to the tech channel),
+        never restarts."""
+        disconnected_since: Optional[float] = None
+        fail_streak = 0
+        last_silence_warn = 0.0
+        self._last_update_ts = time.monotonic()
+
+        async def _bump_last_update(_event) -> None:
+            self._last_update_ts = time.monotonic()
+
+        client.add_event_handler(_bump_last_update, events.Raw)
+
+        async def probe() -> bool:
+            nonlocal disconnected_since, fail_streak, last_silence_warn
+            if client.is_connected():
+                disconnected_since = None
+                try:
+                    await asyncio.wait_for(
+                        client(functions.updates.GetStateRequest()),
+                        timeout=self.WATCHDOG_PROBE_TIMEOUT_SEC,
+                    )
+                except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+                    self._logger.warning("watchdog: rate-limited (%ss), still healthy", e.seconds)
+                    fail_streak = 0
+                    return True
+                except Exception as e:  # noqa: BLE001 - transient until the streak runs out
+                    fail_streak += 1
+                    self._logger.warning(
+                        "watchdog: GetState probe failed %d/%d (%s: %s)",
+                        fail_streak, self.WATCHDOG_PROBE_FAIL_STREAK,
+                        type(e).__name__, e,
+                    )
+                    return fail_streak < self.WATCHDOG_PROBE_FAIL_STREAK
+                fail_streak = 0
+                silent_for = time.monotonic() - self._last_update_ts
+                if (
+                    silent_for > self.WATCHDOG_SILENCE_WARN_SEC
+                    and time.monotonic() - last_silence_warn > self.WATCHDOG_SILENCE_WARN_SEC
+                ):
+                    last_silence_warn = time.monotonic()
+                    self._logger.warning(
+                        "watchdog: no update in %.0f min — feed quiet or dispatch stalled",
+                        silent_for / 60,
+                    )
+                return True
+            now = time.monotonic()
+            if disconnected_since is None:
+                disconnected_since = now
+            within_grace = now - disconnected_since < self.WATCHDOG_DISCONNECT_GRACE_SEC
+            if not within_grace:
+                self._logger.error(
+                    "watchdog: disconnected > %ds, giving up on this process",
+                    self.WATCHDOG_DISCONNECT_GRACE_SEC,
+                )
+            return within_grace
+
+        return probe
 
 
 class Telemirror:
@@ -1306,6 +1430,11 @@ class Telemirror:
             system_version=api_system_version,
             app_version=api_app_version,
             flood_sleep_threshold=300,
+            # Keep auto-reconnecting through a long outage instead of exiting;
+            # the watchdog (Mirroring.WATCHDOG_DISCONNECT_GRACE_SEC) is what
+            # bounds how long we wait before a fresh-process restart.
+            connection_retries=1000,
+            retry_delay=5,
         )
         # Set up default parse mode as markdown
         recv_client.parse_mode = send_client.parse_mode = "markdown"

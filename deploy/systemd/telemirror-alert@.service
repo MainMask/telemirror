@@ -1,0 +1,12 @@
+[Unit]
+Description=telemirror — алерт о том, что %i вошёл в failed state
+# Не тянуть за собой ещё один OnFailure-каскад, если алерт сам упадёт.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/telemirror
+ExecStart=/root/telemirror/.venv/bin/python -m telemirror.alert %i
+TimeoutStartSec=60
+NoNewPrivileges=true
+ProtectSystem=full
+Nice=10
