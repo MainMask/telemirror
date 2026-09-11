@@ -144,7 +144,7 @@ class WatermarkRemovalFilter(MessageFilter):
                     message.chat_id,
                 )
             elif video_attr is not None:
-                handle = await self._process_video(message, config)
+                handle = await self._process_video(message, config, doc)
 
         if handle is not None:
             message.media = handle
@@ -193,8 +193,9 @@ class WatermarkRemovalFilter(MessageFilter):
         self,
         message: EventMessage,
         config: WatermarkConfig,
+        doc: types.Document,
     ):
-        """Return the re-uploaded file handle, or None if nothing was produced."""
+        """Return the re-uploaded media, or None if nothing was produced."""
         tmp_in = tmp_out = tmp_stamp = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
@@ -219,7 +220,17 @@ class WatermarkRemovalFilter(MessageFilter):
 
             upload_path = tmp_stamp if stamped else (tmp_out if removed else None)
             if upload_path is not None:
-                return await message._client.upload_file(upload_path)
+                handle = await message._client.upload_file(upload_path)
+                # A bare upload handle carries no metadata, so Telethon's own
+                # attribute inference can't recover it — it would (re-)guess a
+                # generic DocumentAttributeVideo and never add
+                # DocumentAttributeAnimated, turning a mirrored Telegram "GIF"
+                # into a plain video. Re-declare the source doc's attributes
+                # explicitly instead (same pattern as
+                # RestrictSavingContentBypassFilter._process_document).
+                return types.InputMediaUploadedDocument(
+                    file=handle, mime_type=doc.mime_type, attributes=doc.attributes
+                )
             return None
         except MediaDownloadError:
             if strict_media_mode.get():

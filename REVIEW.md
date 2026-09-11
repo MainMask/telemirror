@@ -1234,3 +1234,51 @@ clean on every edited unit, `bash -n` clean on both edited shell scripts.
   contains Cyrillic). Nothing to translate; left untracked for Phase 6 to
   fold into the history rewrite, per the earlier decision to commit it
   translated (no-op here since translation isn't needed).
+
+---
+
+# Pass 12 — watermark-stamped GIFs lose their animated presentation
+
+Targeted investigation (not a full sweep), triggered by a specific bug report about
+mirrored Telegram "GIFs". Tests: 280 green (279 + 1 new), `pyflakes`/`ruff` clean.
+
+## Fixed
+
+- **P2** `telemirror/messagefilters/watermarkfilter.py::WatermarkRemovalFilter._process_video`:
+  Telegram "GIFs" are soundless `.mp4` documents carrying both `DocumentAttributeVideo`
+  *and* `DocumentAttributeAnimated`. `_process_message` only branches on
+  `DocumentAttributeVideo` (it has no separate GIF handling), so a GIF that clears the
+  duration/size/encode-cost gates was routed through `_process_video` like any other
+  video, which returned the **bare re-upload handle** from `upload_file()` and let it
+  flow straight into `message.media`. Read the installed Telethon 1.44 source
+  (`.venv/lib/python3.12/site-packages/telethon`) to confirm rather than assume: an
+  `InputFile`/`InputFileBig` handle carries no media metadata at all
+  (`client/uploads.py:669,757-759`); `mirroring.py`'s send path never forwards an
+  explicit `attributes=` for this branch (`mirroring.py:371-382`,
+  `telemirror/_patch/sending.py:273-289`), so Telethon's own `utils.get_attributes()`
+  auto-infers only a dummy `DocumentAttributeVideo` from the `.mp4` filename extension
+  (no real width/height/duration) — and **never** constructs `DocumentAttributeAnimated`
+  anywhere in that path (confirmed by grep: the only other occurrences are in the
+  unrelated bot `file_id` codec and in `Message.gif`'s own presence-check property,
+  `tl/custom/message.py:615-624`). Net effect: a mirrored GIF was silently re-sent as a
+  plain video (loses autoplay/loop/no-controls presentation) with no error or log line.
+  Fixed by reusing the pattern two sibling filters already use for exactly this
+  re-upload-preserves-attributes problem
+  (`RestrictSavingContentBypassFilter._process_document`,
+  `restrictsavingfilter.py:122-124`, and `DocumentFilenameFilter`,
+  `documentfilenamefilter.py:130-132`): wrap the upload handle in
+  `types.InputMediaUploadedDocument(file=handle, mime_type=doc.mime_type,
+  attributes=doc.attributes)` instead of assigning the bare handle. Verified this
+  passthrough is airtight, not just "probably fine": `client._file_to_media` treats an
+  already-built `InputMedia` instance as final and routes it through
+  `utils.get_input_media`, which for anything with `SUBCLASS_OF_ID ==
+  crc32('InputMedia')` (true for `InputMediaUploadedDocument`) does a bare `return media`
+  (`utils.py:438-439`) — Telethon's attribute-guessing code is never reached, so the
+  original `DocumentAttributeVideo` (real dimensions/duration, not re-guessed) and
+  `DocumentAttributeAnimated` survive verbatim. Test:
+  `tests/test_watermark_stamp_only.py::test_gif_keeps_animated_attribute_after_stamping`
+  (confirmed it fails against the pre-fix code, reproducing the bug, before confirming it
+  passes with the fix). Three existing assertions that expected the pre-fix bare-handle
+  return value for videos (`test_video_stamp_only_skips_detection`,
+  `test_cheap_hd_video_still_stamped`, `test_video_removal_only_skips_stamp`) were updated
+  in lockstep to expect the wrapped `InputMediaUploadedDocument`.

@@ -112,13 +112,35 @@ def test_video_stamp_only_skips_detection(monkeypatch):
     calls = _video_spies(monkeypatch)
     _, res = _run({"remove_watermark": False}, _video_message(_Client()))
     assert calls == {"remove": 0, "stamp": 1}
-    assert res.media == "HANDLE"
+    assert isinstance(res.media, types.InputMediaUploadedDocument)
+    assert res.media.file == "HANDLE"
 
 
 def test_video_default_runs_detection(monkeypatch):
     calls = _video_spies(monkeypatch)
     _run({}, _video_message(_Client()))
     assert calls == {"remove": 1, "stamp": 1}
+
+
+def test_gif_keeps_animated_attribute_after_stamping(monkeypatch):
+    """Telegram "GIFs" are soundless .mp4 documents carrying both
+    DocumentAttributeVideo and DocumentAttributeAnimated. A bare re-upload
+    handle has no metadata of its own, and Telethon's own attribute
+    inference never adds DocumentAttributeAnimated — so without explicitly
+    re-declaring it, a mirrored GIF would be re-sent as a plain video."""
+    calls = _video_spies(monkeypatch)
+    msg = _video_message(_Client())
+    msg.media.document.attributes = [
+        types.DocumentAttributeVideo(duration=3, w=480, h=270),
+        types.DocumentAttributeAnimated(),
+    ]
+    _, res = _run({}, msg)
+    assert calls == {"remove": 1, "stamp": 1}
+    assert isinstance(res.media, types.InputMediaUploadedDocument)
+    assert res.media.mime_type == "video/mp4"
+    assert any(
+        isinstance(a, types.DocumentAttributeAnimated) for a in res.media.attributes
+    )
 
 
 def test_long_video_forwarded_without_watermark(monkeypatch):
@@ -172,7 +194,8 @@ def test_cheap_hd_video_still_stamped(monkeypatch):
     ]
     _, res = _run({"remove_watermark": False}, msg)
     assert calls == {"remove": 0, "stamp": 1}
-    assert res.media == "HANDLE"
+    assert isinstance(res.media, types.InputMediaUploadedDocument)
+    assert res.media.file == "HANDLE"
 
 
 # ── stamp_watermark toggle ───────────────────────────────────────────────────
@@ -199,7 +222,8 @@ def test_video_removal_only_skips_stamp(monkeypatch):
     calls = _video_spies(monkeypatch, removed=True)
     _, res = _run({"stamp_watermark": False}, _video_message(_Client()))
     assert calls == {"remove": 1, "stamp": 0}
-    assert res.media == "HANDLE"
+    assert isinstance(res.media, types.InputMediaUploadedDocument)
+    assert res.media.file == "HANDLE"
 
 
 # ── both off ─────────────────────────────────────────────────────────────────
