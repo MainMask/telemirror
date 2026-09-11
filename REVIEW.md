@@ -325,8 +325,8 @@ Full read ×2. Tests: 143 green, `pyflakes` + `ruff` clean.
 - `DocumentFilenameFilter` / `WatermarkRemovalFilter`: a processing failure →
   log + `CONTINUE` with the original (degrade without losing the message; the
   rename / watermark removal is skipped).
-- `DocumentFilenameFilter._rename` is idempotent (`stem == prefix` or
-  `startswith(f"{prefix} - ")`), safe for media already re-uploaded upstream
+- `DocumentFilenameFilter._rename` is idempotent (`stem == suffix` or
+  `endswith(f" - {suffix}")`), safe for media already re-uploaded upstream
   (`InputMediaUploadedDocument` — `file_name` patched in place).
 
 ### Fixed in this pass
@@ -408,7 +408,7 @@ P1/P2 found.
 - The whole module is best-effort: any failure (no template, no torch/LaMa,
   ffmpeg returned non-zero, no readable frame) → `return None`/`False`, and the
   caller `WatermarkRemovalFilter` sends the original. No message loss.
-- `ChannelWatermarkConfig.__post_init__` coerces YAML strings to float/int.
+- `WatermarkConfig.__post_init__` coerces YAML strings to float/int.
 - `_load_stamp` / `_load_template` — a process-global cache keyed by path; callers
   only read / `.resize()` (a new object), the cached one is not mutated.
 - `_get_lama` — a lazy singleton with a double-checked `threading.Lock`.
@@ -416,7 +416,7 @@ P1/P2 found.
 - CPU-bound work runs in `loop.run_in_executor(None, ...)`.
 
 ### Regression tests for past bugs
-- `ChannelWatermarkConfig` string→number (pass 5) — `tests/test_watermark_config.py`.
+- `WatermarkConfig` string→number (pass 5) — `tests/test_watermark_config.py`.
 - Oversize-video guard — `tests/test_watermark_size_guard.py`.
 - Detection accuracy — the manual `tests/watermark/benchmark_detection.py`
   (not pytest).

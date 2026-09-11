@@ -8,9 +8,6 @@ from telemirror.messagefilters import WatermarkRemovalFilter
 from telemirror.messagefilters._media import UPLOAD_LIMIT_BYTES
 from tests.conftest import make_message, run
 
-CHAT_ID = -1000000001000  # == chat_id of make_message(channel_id=1000)
-
-
 def _video_doc(size):
     return types.MessageMediaDocument(
         document=types.Document(
@@ -22,7 +19,7 @@ def _video_doc(size):
 
 
 def test_oversize_video_left_untouched(monkeypatch):
-    f = WatermarkRemovalFilter(channels={str(CHAT_ID): {}})
+    f = WatermarkRemovalFilter()
 
     async def boom(*a, **kw):
         raise AssertionError("_process_video must not run for an oversize file")
