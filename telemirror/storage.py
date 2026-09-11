@@ -137,6 +137,13 @@ class Database(Protocol):
         raise NotImplementedError
 
     @abstractmethod
+    async def get_messages_for_channel_pair(
+        self: "Database", original_channel: int, mirror_channel: int
+    ) -> List[MirrorMessage]:
+        """Returns all `MirrorMessage` objects for a given source→mirror channel pair."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_past_mode_checkpoint(
         self: "Database", source: int, target: int
     ) -> Optional[int]:
@@ -271,6 +278,18 @@ class InMemoryDatabase(Database):
             for key, msgs in self.__storage.items()
             if key.startswith(prefix)
             for m in msgs
+        ]
+
+    async def get_messages_for_channel_pair(
+        self: "InMemoryDatabase", original_channel: int, mirror_channel: int
+    ) -> List[MirrorMessage]:
+        prefix = f"{original_channel}:"
+        return [
+            m
+            for key, msgs in self.__storage.items()
+            if key.startswith(prefix)
+            for m in msgs
+            if m.mirror_channel == mirror_channel
         ]
 
     async def get_past_mode_checkpoint(
@@ -508,6 +527,19 @@ class PostgresDatabase(Database):
             )
             return await cursor.fetchall()
 
+    async def get_messages_for_channel_pair(
+        self: "PostgresDatabase", original_channel: int, mirror_channel: int
+    ) -> List[MirrorMessage]:
+        async with self.__pg_cursor() as cursor:
+            cursor.row_factory = class_row(MirrorMessage)
+            await cursor.execute(
+                "SELECT original_id, original_channel, mirror_id, mirror_channel "
+                "FROM binding_id "
+                "WHERE original_channel = %s AND mirror_channel = %s",
+                (original_channel, mirror_channel),
+            )
+            return await cursor.fetchall()
+
     async def __create_tables_if_not_exists(self: "PostgresDatabase"):
         """Create tables if not exists"""
         async with self.__pg_cursor() as cursor:
@@ -523,6 +555,9 @@ class PostgresDatabase(Database):
 
                 CREATE INDEX IF NOT EXISTS binding_id_original_idx
                 ON binding_id (original_channel, original_id);
+
+                CREATE INDEX IF NOT EXISTS binding_id_channel_pair_idx
+                ON binding_id (original_channel, mirror_channel);
 
                 CREATE TABLE IF NOT EXISTS past_mode_checkpoint (
                     source_channel BIGINT NOT NULL,

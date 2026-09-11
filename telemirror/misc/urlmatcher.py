@@ -91,7 +91,11 @@ class UrlMatcher:
         ):
             return False
 
-        if self._whitelist and (host in self._whitelist or full_url in self._whitelist):
+        if self._whitelist and (
+            host in self._whitelist
+            or full_url in self._whitelist
+            or any(full_url.startswith(w) for w in self._whitelist)
+        ):
             return False
 
         return True

@@ -1,3 +1,6 @@
+# (Optional) Fallback URL for cross-channel links that cannot be resolved to a mirror
+# fallback_link_url: "https://t.me/yourchannel"
+
 # (Optional) Global filters, will be applied in order
 filters:
   - ForwardFormatFilter: # Filter name under telemirror/messagefilters.py
@@ -9,6 +12,7 @@ filters:
         ? t.me
       # whitelist: !!set   # keep these URLs even if they match blacklist
       #   ? example.com
+      #   ? t.me/c/        # prefix: preserve private channel message links (internal mirrors)
       # placeholder: "***" # replacement text for removed URLs, default "***"
       # filter_mention: false  # also filter @mentions
   - SkipUrlFilter:
