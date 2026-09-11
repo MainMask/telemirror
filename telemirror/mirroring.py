@@ -17,7 +17,9 @@ from telemirror._patch import (
 from telemirror.hints import EventAlbumMessage, EventLike, EventMessage
 from telemirror.messagefilters.base import FilterAction
 from telemirror.misc.links import private_message_link
+from telemirror.misc.lrucache import LRUCache
 from telemirror.misc.message_groups import iter_message_groups
+from telemirror.misc.topics import topic_id_of
 from telemirror.mixins import CopyEventMessage, UpdateEntitiesParams
 from telemirror.storage import Database, MirrorMessage
 
@@ -38,8 +40,6 @@ def _consume_task_result(task: asyncio.Task) -> None:
 
 
 class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
-    GENERAL_TOPIC_ID = 1
-
     def __init__(
         self: "EventProcessor",
         chat_mapping: Dict[int, Dict[int, List[DirectionConfig]]],
@@ -59,6 +59,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         self._database = database
         self._client = client
         self._logger = logger
+        # Public t.me/<username> → Telethon peer id, resolved once per process.
+        # Only successful resolutions are stored; a miss may become resolvable later.
+        self._username_id_cache: LRUCache[str, int] = LRUCache(capacity=256)
 
     @staticmethod
     def __handle_exceptions(fn):
@@ -88,9 +91,15 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         source_username = getattr(source_chat, "username", None)
         if source_username and source_username.lower() == username.lower():
             return source_chat_id
+        key = username.lower()
+        cached = self._username_id_cache.get(key)
+        if cached is not None:
+            return cached
         try:
             entity = await self._client.get_entity(username)
-            return utils.get_peer_id(entity)
+            channel_id = utils.get_peer_id(entity)
+            self._username_id_cache[key] = channel_id
+            return channel_id
         except Exception:
             return None
 
@@ -100,8 +109,32 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         source_chat_id: int,
         message: EventMessage,
         fallback_link_url: Optional[str] = None,
+        link_cache: Optional[dict] = None,
     ) -> Optional[str]:
-        """Rewrite a t.me message URL to its mirror equivalent, or return None."""
+        """Rewrite a t.me message URL to its mirror equivalent, or return None.
+
+        The resolution (DB lookup + entity fetch) depends only on
+        ``(url, fallback_link_url)``, not on the fan-out target, so a per-event
+        ``link_cache`` dict lets one message's links be resolved once instead of
+        once per target/config.
+        """
+        cache_key = (url, fallback_link_url)
+        if link_cache is not None and cache_key in link_cache:
+            return link_cache[cache_key]
+        result = await self.__resolve_tg_link_rewrite(
+            url, source_chat_id, message, fallback_link_url
+        )
+        if link_cache is not None:
+            link_cache[cache_key] = result
+        return result
+
+    async def __resolve_tg_link_rewrite(
+        self: "EventProcessor",
+        url: str,
+        source_chat_id: int,
+        message: EventMessage,
+        fallback_link_url: Optional[str] = None,
+    ) -> Optional[str]:
         m = _TG_MSG_LINK_RE.match(url)
         if not m:
             return None
@@ -140,8 +173,13 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         message: EventMessage,
         source_chat_id: int,
         fallback_link_url: Optional[str] = None,
+        link_cache: Optional[dict] = None,
     ) -> None:
-        """Rewrite t.me message links in entities to point to their mirrors."""
+        """Rewrite t.me message links in entities to point to their mirrors.
+
+        ``link_cache`` (optional): a per-event dict that memoizes link resolution
+        across the fan-out; see ``_try_rewrite_tg_link``.
+        """
         if not message.entities:
             return
 
@@ -153,7 +191,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         for entity in message.entities:
             if isinstance(entity, types.MessageEntityTextUrl):
                 new_url = await self._try_rewrite_tg_link(
-                    entity.url, source_chat_id, message, fallback_link_url
+                    entity.url, source_chat_id, message, fallback_link_url, link_cache
                 )
                 if new_url is not None:
                     entity.url = new_url
@@ -165,7 +203,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     surrogate_text[entity.offset : entity.offset + entity.length]
                 )
                 new_url = await self._try_rewrite_tg_link(
-                    old_url, source_chat_id, message, fallback_link_url
+                    old_url, source_chat_id, message, fallback_link_url, link_cache
                 )
                 if new_url is not None:
                     new_surrogate = utils.add_surrogate(new_url)
@@ -197,16 +235,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         """
         if config.from_topic_id is None:
             return True
-        if message.reply_to is None:
-            return config.from_topic_id == EventProcessor.GENERAL_TOPIC_ID
-        if message.reply_to.forum_topic:
-            incoming_topic_id = (
-                message.reply_to.reply_to_top_id
-                or message.reply_to.reply_to_msg_id
-            )
-        else:
-            incoming_topic_id = EventProcessor.GENERAL_TOPIC_ID
-        return config.from_topic_id == incoming_topic_id
+        return config.from_topic_id == topic_id_of(message)
 
     @__handle_exceptions
     async def new_message(
@@ -245,6 +274,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             message.media.poll.quiz = None
 
         inserted: List[MirrorMessage] = []
+        # Resolve each distinct t.me link once for the whole fan-out.
+        link_cache: dict = {}
 
         async def flush_inserted() -> None:
             if not inserted:
@@ -278,7 +309,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 message_copy = self.copy_message(message)
                 # Rewrite internal t.me links BEFORE filters can strip them (copy mode only)
                 if config.mode == "copy":
-                    await self._rewrite_links(message_copy, chat_id, config.fallback_link_url)
+                    await self._rewrite_links(
+                        message_copy, chat_id, config.fallback_link_url, link_cache
+                    )
 
                 filtered_message: EventMessage
                 filter_action, filtered_message = await config.filters.process(
@@ -436,6 +469,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             else {}
         )
 
+        # Resolve each distinct t.me link once for the whole fan-out.
+        link_cache: dict = {}
+
         for outgoing_chat, configs in outgoing_chats.items():
             for config in configs:
                 if not self._matches_from_topic(config, incoming_first_message):
@@ -456,7 +492,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 # Rewrite internal t.me links BEFORE filters can strip them (copy mode only)
                 if config.mode == "copy":
                     for msg in album_copy:
-                        await self._rewrite_links(msg, chat_id, config.fallback_link_url)
+                        await self._rewrite_links(
+                            msg, chat_id, config.fallback_link_url, link_cache
+                        )
 
                 filtered_album: EventAlbumMessage
                 filter_action, filtered_album = await config.filters.process(

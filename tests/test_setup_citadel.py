@@ -64,10 +64,13 @@ class _FakeClient:
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
+    import skylon_set._common as common
+
     async def _noop(*_a, **_kw):
         pass
 
     monkeypatch.setattr(sc.asyncio, "sleep", _noop)
+    monkeypatch.setattr(common.asyncio, "sleep", _noop)
 
 
 def test_build_forum_directions_pairs_by_title():
@@ -92,7 +95,7 @@ def test_run_traverses_each_forum_once_per_side_plus_recheck(monkeypatch):
         donor_id: [_Topic(1, "General"), _Topic(5, "Alpha"), _Topic(9, "Beta")],
         recip_id: [_Topic(1, "General")],
     })
-    monkeypatch.setattr(sc, "make_client", lambda **kw: client)
+    monkeypatch.setattr("skylon_set._common.make_client", lambda **kw: client)
     monkeypatch.setattr("builtins.print", lambda *a, **kw: None)
 
     run(sc._run(_LOG))

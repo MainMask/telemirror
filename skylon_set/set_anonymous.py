@@ -74,78 +74,78 @@ async def get_admin_participant(client, entity, me):
 async def main():
     client = make_client()
     await client.start()
+    try:
+        me = await client.get_me()
+        name = me.first_name or ""
+        if me.username:
+            name += f" (@{me.username})"
+        print(f"Аккаунт: {name}")
 
-    me = await client.get_me()
-    name = me.first_name or ""
-    if me.username:
-        name += f" (@{me.username})"
-    print(f"Аккаунт: {name}")
+        print("Загружаю диалоги...")
+        dialogs = await client.get_dialogs()
+        supergroups = [d for d in dialogs if entity_type(d.entity) == "supergroup"]
+        print(f"{len(supergroups)} supergroups найдено.\n")
 
-    print("Загружаю диалоги...")
-    dialogs = await client.get_dialogs()
-    supergroups = [d for d in dialogs if entity_type(d.entity) == "supergroup"]
-    print(f"{len(supergroups)} supergroups найдено.\n")
+        already_anon = []
+        targets = []
+        not_admin = []
 
-    already_anon = []
-    targets = []
-    not_admin = []
+        for d in supergroups:
+            info = await get_admin_participant(client, d.entity, me)
+            if info is None:
+                not_admin.append(d)
+            elif info[1]:
+                already_anon.append(d)
+            else:
+                targets.append((d, info[0]))
 
-    for d in supergroups:
-        info = await get_admin_participant(client, d.entity, me)
-        if info is None:
-            not_admin.append(d)
-        elif info[1]:
-            already_anon.append(d)
+        def titles(lst):
+            return ", ".join(d.title for d in lst) if lst else "—"
+
+        print(f"Уже анонимны ({len(already_anon)}):    {titles(already_anon)}")
+        print(f"Требуют активации ({len(targets)}): {titles([d for d, _ in targets])}")
+        print(f"Не администратор ({len(not_admin)}):  {titles(not_admin)}")
+
+        if not targets:
+            print("\nАккаунт уже анонимен везде, где является администратором.")
+            return
+
+        answer = input(
+            f"\nАктивировать Remain Anonymous в {len(targets)} группах? [y/N]: "
+        ).strip().lower()
+        if answer != "y":
+            print("Отменено.")
+            return
+
+        print()
+        for d, participant in targets:
+            print(f"  {d.title} ...", end=" ", flush=True)
+            new_rights = get_rights(participant.admin_rights)
+            rank = getattr(participant, "rank", None) or ""
+            result = await safe_call(
+                client,
+                lambda e=d.entity, r=new_rights, rk=rank: client(
+                    EditAdminRequest(channel=e, user_id=me, admin_rights=r, rank=rk)
+                ),
+            )
+            print("OK" if result is not None else "ОШИБКА")
+
+        print("\nПроверка:")
+        errors = []
+        for d, _ in targets:
+            info = await get_admin_participant(client, d.entity, me)
+            if info and info[1]:
+                print(f"  OK: {d.title}")
+            else:
+                print(f"  ОШИБКА: {d.title}")
+                errors.append(d.title)
+
+        if not errors:
+            print("\nВсё OK — Remain Anonymous активирован во всех группах.")
         else:
-            targets.append((d, info[0]))
-
-    def titles(lst):
-        return ", ".join(d.title for d in lst) if lst else "—"
-
-    print(f"Уже анонимны ({len(already_anon)}):    {titles(already_anon)}")
-    print(f"Требуют активации ({len(targets)}): {titles([d for d, _ in targets])}")
-    print(f"Не администратор ({len(not_admin)}):  {titles(not_admin)}")
-
-    if not targets:
-        print("\nАккаунт уже анонимен везде, где является администратором.")
+            print(f"\nНе удалось активировать в {len(errors)} группах: {', '.join(errors)}")
+    finally:
         await client.disconnect()
-        return
-
-    answer = input(f"\nАктивировать Remain Anonymous в {len(targets)} группах? [y/N]: ").strip().lower()
-    if answer != "y":
-        print("Отменено.")
-        await client.disconnect()
-        return
-
-    print()
-    for d, participant in targets:
-        print(f"  {d.title} ...", end=" ", flush=True)
-        new_rights = get_rights(participant.admin_rights)
-        rank = getattr(participant, "rank", None) or ""
-        result = await safe_call(
-            client,
-            lambda e=d.entity, r=new_rights, rk=rank: client(
-                EditAdminRequest(channel=e, user_id=me, admin_rights=r, rank=rk)
-            ),
-        )
-        print("OK" if result is not None else "ОШИБКА")
-
-    print("\nПроверка:")
-    errors = []
-    for d, _ in targets:
-        info = await get_admin_participant(client, d.entity, me)
-        if info and info[1]:
-            print(f"  OK: {d.title}")
-        else:
-            print(f"  ОШИБКА: {d.title}")
-            errors.append(d.title)
-
-    if not errors:
-        print("\nВсё OK — Remain Anonymous активирован во всех группах.")
-    else:
-        print(f"\nНе удалось активировать в {len(errors)} группах: {', '.join(errors)}")
-
-    await client.disconnect()
 
 
 if __name__ == "__main__":

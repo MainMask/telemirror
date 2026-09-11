@@ -158,6 +158,26 @@ class Database(Protocol):
         raise NotImplementedError
 
     @abstractmethod
+    async def delete_past_mode_checkpoint(
+        self: "Database", source: int, target: int
+    ) -> None:
+        """Removes the checkpoint for a source→target pair (no-op if absent).
+
+        Used by the ``clear_channels`` maintenance script after a target is wiped.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def delete_bindings_for_mirror(
+        self: "Database", mirror_channel: int
+    ) -> None:
+        """Removes every message mapping whose ``mirror_channel`` matches.
+
+        Used by the ``clear_channels`` maintenance script after a target is wiped.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def get_broadcast_sync(self: "Database", source: int) -> Dict[int, Optional[int]]:
         """Returns {message_id: synced_edit_ts} for every message of `source`
         already handled by the startup broadcast sync (`synced_edit_ts` is the
@@ -326,6 +346,23 @@ class InMemoryDatabase(Database):
         self: "InMemoryDatabase", source: int, target: int, message_id: int
     ) -> None:
         self.__checkpoints[(source, target)] = message_id
+
+    async def delete_past_mode_checkpoint(
+        self: "InMemoryDatabase", source: int, target: int
+    ) -> None:
+        self.__checkpoints.pop((source, target), None)
+
+    async def delete_bindings_for_mirror(
+        self: "InMemoryDatabase", mirror_channel: int
+    ) -> None:
+        for key in list(self.__storage.keys()):
+            kept = [
+                m for m in self.__storage[key] if m.mirror_channel != mirror_channel
+            ]
+            if kept:
+                self.__storage[key] = kept
+            else:
+                self.__storage.pop(key, None)
 
     async def get_broadcast_sync(
         self: "InMemoryDatabase", source: int
@@ -642,6 +679,25 @@ class PostgresDatabase(Database):
                 DO UPDATE SET last_message_id = EXCLUDED.last_message_id
                 """,
                 (source, target, message_id),
+            )
+
+    async def delete_past_mode_checkpoint(
+        self: "PostgresDatabase", source: int, target: int
+    ) -> None:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "DELETE FROM past_mode_checkpoint "
+                "WHERE source_channel = %s AND target_channel = %s",
+                (source, target),
+            )
+
+    async def delete_bindings_for_mirror(
+        self: "PostgresDatabase", mirror_channel: int
+    ) -> None:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "DELETE FROM binding_id WHERE mirror_channel = %s",
+                (mirror_channel,),
             )
 
     async def get_broadcast_sync(

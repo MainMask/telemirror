@@ -71,6 +71,24 @@ def test_checkpoint_get_set():
     assert run(db.get_past_mode_checkpoint(SRC, DST_B)) is None
 
 
+def test_delete_past_mode_checkpoint():
+    db = run(InMemoryDatabase())
+    run(db.set_past_mode_checkpoint(SRC, DST_A, 42))
+    run(db.set_past_mode_checkpoint(SRC, DST_B, 7))
+    run(db.delete_past_mode_checkpoint(SRC, DST_A))
+    assert run(db.get_past_mode_checkpoint(SRC, DST_A)) is None
+    assert run(db.get_past_mode_checkpoint(SRC, DST_B)) == 7
+    run(db.delete_past_mode_checkpoint(SRC, DST_A))  # absent → no error
+
+
+def test_delete_bindings_for_mirror_only_named_channel():
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([_mm(1, 11, DST_A), _mm(1, 12, DST_B), _mm(2, 22, DST_A)]))
+    run(db.delete_bindings_for_mirror(DST_A))
+    assert run(db.get_messages(2, SRC)) == []  # only DST_A row → key dropped
+    assert [m.mirror_id for m in run(db.get_messages(1, SRC))] == [12]  # DST_B kept
+
+
 def test_broadcast_sync_get_returns_copy_and_delete_works():
     db = run(InMemoryDatabase())
     run(db.set_broadcast_sync(SRC, 1, None))

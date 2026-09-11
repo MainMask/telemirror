@@ -32,46 +32,44 @@ def normalize_title(title: str) -> str | None:
 async def main():
     client = make_client()
     await client.start()
+    try:
+        print("Загружаю диалоги...")
+        dialogs = await client.get_dialogs()
 
-    print("Загружаю диалоги...")
-    dialogs = await client.get_dialogs()
+        archonum = [
+            d for d in dialogs
+            if "Archonum" in (d.title or "")
+            and entity_type(d.entity) in {"channel", "supergroup"}
+        ]
 
-    archonum = [
-        d for d in dialogs
-        if "Archonum" in (d.title or "")
-        and entity_type(d.entity) in {"channel", "supergroup"}
-    ]
+        renames = []
+        for d in sorted(archonum, key=lambda x: x.title):
+            new_title = normalize_title(d.title)
+            if new_title is not None:
+                renames.append((d, d.title, new_title))
 
-    renames = []
-    for d in sorted(archonum, key=lambda x: x.title):
-        new_title = normalize_title(d.title)
-        if new_title is not None:
-            renames.append((d, d.title, new_title))
+        if not renames:
+            print("Ничего не нужно менять.")
+            return
 
-    if not renames:
-        print("Ничего не нужно менять.")
+        print(f"\nПланируемые переименования ({len(renames)}):\n")
+        for _, old, new in renames:
+            print(f"  {old!r}")
+            print(f"  → {new!r}\n")
+
+        answer = input("Применить изменения? [y/N]: ").strip().lower()
+        if answer != "y":
+            print("Отменено.")
+            return
+
+        for d, old_title, new_title in renames:
+            print(f"  Переименовываю: {old_title!r} → {new_title!r} ...", end=" ")
+            result = await safe_call(client, lambda e=d.entity, t=new_title: client(
+                EditTitleRequest(channel=e, title=t)
+            ))
+            print("OK" if result is not None else "ОШИБКА")
+    finally:
         await client.disconnect()
-        return
-
-    print(f"\nПланируемые переименования ({len(renames)}):\n")
-    for _, old, new in renames:
-        print(f"  {old!r}")
-        print(f"  → {new!r}\n")
-
-    answer = input("Применить изменения? [y/N]: ").strip().lower()
-    if answer != "y":
-        print("Отменено.")
-        await client.disconnect()
-        return
-
-    for d, old_title, new_title in renames:
-        print(f"  Переименовываю: {old_title!r} → {new_title!r} ...", end=" ")
-        result = await safe_call(client, lambda e=d.entity, t=new_title: client(
-            EditTitleRequest(channel=e, title=t)
-        ))
-        print("OK" if result is not None else "ОШИБКА")
-
-    await client.disconnect()
 
 
 if __name__ == "__main__":
