@@ -36,3 +36,8 @@ class LRUCache(Generic[K, V], collections.OrderedDict[K, V]):
         super().move_to_end(key)
 
         return val
+
+    def get(self, key: K, default=None):
+        # dict.get bypasses __getitem__, so without this a read never refreshes
+        # the entry's recency and it can be evicted before staler ones.
+        return self[key] if key in self else default

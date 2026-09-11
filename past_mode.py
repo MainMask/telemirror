@@ -44,31 +44,19 @@ from telethon.tl import types
 
 from telemirror._patch import patch_input_media_with_spoiler
 from telemirror.mirroring import EventProcessor
+from telemirror.misc.links import private_message_link
+from telemirror.misc.log_setup import setup_stdout_logger
+from telemirror.misc.message_groups import iter_message_groups
 from telemirror.storage import Database, InMemoryDatabase, PostgresDatabase
 
 _LOG_EVERY = 25  # логировать прогресс каждые N сообщений/альбомов
 
 
 def _configure_logging(log_level: str) -> logging.Logger:
-    formatter = logging.Formatter(
-        "%(levelname)-5s %(asctime)s [%(filename)s:%(lineno)d]:%(name)s: %(message)s"
-    )
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(formatter)
-
-    logger = logging.getLogger("past_mode")
-    logger.setLevel(log_level)
-    if not logger.handlers:
-        logger.addHandler(handler)
-
-    # Telethon's reconnection messages go through its own logger — attach our handler
-    # so they appear with timestamps alongside our progress logs.
-    telethon_logger = logging.getLogger("telethon")
-    telethon_logger.setLevel(logging.WARNING)
-    if not telethon_logger.handlers:
-        telethon_logger.addHandler(handler)
-
+    logger = setup_stdout_logger("past_mode", log_level)
+    # Telethon's reconnection messages go through its own logger — give it the
+    # same stdout format so they appear with timestamps alongside our progress logs.
+    setup_stdout_logger("telethon", logging.WARNING)
     return logger
 
 
@@ -197,54 +185,43 @@ async def _replay_direction(
 
     processed = 0
     start_time = monotonic()
-    pending_album: List = []
-    pending_gid: Optional[int] = None
 
-    async def flush_album() -> None:
-        nonlocal processed, pending_album, pending_gid
-        if not pending_album:
-            return
-        first = pending_album[0]
-        link = f"https://t.me/c/{utils.resolve_id(source_id)[0]}/{first.id}"
-        await processor.new_album(source_id, pending_album, link)
-        await database.set_past_mode_checkpoint(source_id, target_id, pending_album[-1].id)
-        processed += 1
+    def _log_step() -> None:
         if processed == 1 or processed % _LOG_EVERY == 0:
             _log_progress(logger, prefix, processed, iter_total, start_time)
-        await asyncio.sleep(pm.send_delay)
-        pending_album = []
-        pending_gid = None
 
     async def process_single(msg) -> None:
         nonlocal processed
-        link = f"https://t.me/c/{utils.resolve_id(source_id)[0]}/{msg.id}"
+        link = private_message_link(source_id, msg.id)
         await processor.new_message(source_id, msg, link)
         await database.set_past_mode_checkpoint(source_id, target_id, msg.id)
         processed += 1
-        if processed == 1 or processed % _LOG_EVERY == 0:
-            _log_progress(logger, prefix, processed, iter_total, start_time)
+        _log_step()
         await asyncio.sleep(pm.send_delay)
 
-    async def handle_msg(msg) -> None:
-        nonlocal pending_gid
-        gid = getattr(msg, "grouped_id", None)
-        if gid is not None:
-            if gid != pending_gid:
-                await flush_album()
-                pending_gid = gid
-            pending_album.append(msg)
+    async def process_album(album: List) -> None:
+        nonlocal processed
+        link = private_message_link(source_id, album[0].id)
+        await processor.new_album(source_id, album, link)
+        await database.set_past_mode_checkpoint(source_id, target_id, album[-1].id)
+        processed += 1
+        _log_step()
+        await asyncio.sleep(pm.send_delay)
+
+    async def _aiter(seq):
+        for item in seq:
+            yield item
+
+    source = (
+        _aiter(buffer)
+        if use_buffer
+        else client.iter_messages(source_id, **iter_kwargs)
+    )
+    async for group in iter_message_groups(source):
+        if isinstance(group, list):
+            await process_album(group)
         else:
-            await flush_album()
-            await process_single(msg)
-
-    if use_buffer:
-        for msg in buffer:
-            await handle_msg(msg)
-    else:
-        async for msg in client.iter_messages(source_id, **iter_kwargs):
-            await handle_msg(msg)
-
-    await flush_album()
+            await process_single(group)
 
     logger.info(f"{prefix}: завершено. Обработано {processed} сообщений/альбомов.")
 

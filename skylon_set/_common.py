@@ -28,7 +28,7 @@ from telethon import TelegramClient
 from telethon.errors import ChannelPrivateError, FloodWaitError
 from telethon.sessions import StringSession
 
-_LOG_FORMAT = "%(levelname)-5s %(asctime)s [%(filename)s:%(lineno)d]:%(name)s: %(message)s"
+from telemirror.misc.log_setup import setup_stdout_logger
 
 
 def make_client(**extra_kwargs) -> TelegramClient:
@@ -46,16 +46,7 @@ def make_client(**extra_kwargs) -> TelegramClient:
 
 def configure_logging(name: str, level: str) -> logging.Logger:
     """Attach a stdout handler with the project log format to ``name``."""
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
-
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    if not logger.handlers:
-        logger.addHandler(handler)
-
-    return logger
+    return setup_stdout_logger(name, level)
 
 
 def entity_type(entity) -> str:

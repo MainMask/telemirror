@@ -10,12 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-_DEFAULT_TEMPLATE = str(Path(__file__).parent / "reference_watermark.png")
-_DEFAULT_STAMP = str(Path(__file__).parent / "my_watermark.png")
-
 import cv2
 import numpy as np
 from PIL import Image
+
+_DEFAULT_TEMPLATE = str(Path(__file__).parent / "reference_watermark.png")
+_DEFAULT_STAMP = str(Path(__file__).parent / "my_watermark.png")
 
 logger = logging.getLogger(__name__)
 

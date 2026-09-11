@@ -1,7 +1,12 @@
+import pytest
 from telethon import events
 from telethon.tl import types
 
-from telemirror.messagefilters.messagefilters import KeywordReplaceFilter
+from telemirror.messagefilters.messagefilters import (
+    AllowWithKeywordsFilter,
+    KeywordReplaceFilter,
+    SkipWithKeywordsFilter,
+)
 from tests.conftest import entity_text, make_message, run
 
 
@@ -48,3 +53,20 @@ def test_no_text_passes_through():
     f = KeywordReplaceFilter({"a": "b"})
     action, res = _process(f, make_message(""))
     assert res.message == ""
+
+
+@pytest.mark.parametrize("cls", [SkipWithKeywordsFilter, AllowWithKeywordsFilter])
+def test_empty_keywords_rejected(cls):
+    """An empty set would compile to a match-everything regex — fail fast instead."""
+    with pytest.raises(ValueError):
+        cls(set())
+
+
+def test_skip_with_keywords_still_works():
+    from telemirror.messagefilters.base import FilterAction
+
+    f = SkipWithKeywordsFilter({"spam"})
+    action, _ = _process(f, make_message("this is spam"))
+    assert action is FilterAction.DISCARD
+    action, _ = _process(f, make_message("this is fine"))
+    assert action is FilterAction.CONTINUE

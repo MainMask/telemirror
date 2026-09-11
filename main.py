@@ -1,6 +1,7 @@
 import logging
 
 from telemirror.mirroring import Telemirror
+from telemirror.misc.log_setup import setup_stdout_logger
 from telemirror.storage import InMemoryDatabase, PostgresDatabase
 
 
@@ -22,26 +23,6 @@ async def serve_health_endpoint(host: str, port: int) -> None:
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
-
-
-def configure_logging(logger_name: str, log_level: str) -> logging.Logger:
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(log_level)
-
-    if not logger.handlers:
-        import sys
-
-        handler = logging.StreamHandler(sys.stdout)
-        handler.setLevel(logging.DEBUG)
-        handler.setFormatter(
-            logging.Formatter(
-                "%(levelname)-5s %(asctime)s [%(filename)s:%(lineno)d]:%(name)s: %(message)s"
-            )
-        )
-
-        logger.addHandler(handler)
-
-    return logger
 
 
 async def run_telemirror(
@@ -130,7 +111,7 @@ def main():
             api_app_version=API_APP_VERSION,
             session_string=SESSION_STRING,
             chat_mapping=CHAT_MAPPING,
-            logger=configure_logging("telemirror", LOG_LEVEL),
+            logger=setup_stdout_logger("telemirror", LOG_LEVEL),
             host=HOST,
             port=PORT,
             broadcast_channel=BROADCAST_CHANNEL,

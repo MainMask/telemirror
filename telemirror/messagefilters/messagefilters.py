@@ -101,15 +101,15 @@ class UrlMessageFilter(UpdateEntitiesParams, MessageFilter):
     def __init__(
         self: "UrlMessageFilter",
         placeholder: str = "***",
-        blacklist: Set[str] = set(),
-        whitelist: Set[str] = set(),
+        blacklist: Optional[Set[str]] = None,
+        whitelist: Optional[Set[str]] = None,
         filter_mention: Union[bool, Set[str]] = False,
         filter_by_id_mention: bool = False,
     ) -> None:
         self._placeholder = utils.add_surrogate(placeholder)
         self._placeholder_len = len(self._placeholder)
 
-        self._url_matcher = UrlMatcher(blacklist, whitelist)
+        self._url_matcher = UrlMatcher(blacklist or set(), whitelist or set())
 
         self._filter_mention = None
         self._mention_blacklist = None
@@ -241,6 +241,17 @@ class ForwardFormatFilter(ChannelName, MessageLink, MessageFilter):
 
     def __init__(self, format: str = DEFAULT_FORMAT) -> None:
         self._format = format
+
+        try:
+            probe = self._format.format(
+                channel_name="", message_link="", sender_title="",
+                sender_username="", message_text=self.MESSAGE_PLACEHOLDER,
+            )
+            probe.format(message_text="")
+        except (KeyError, IndexError, ValueError) as e:
+            raise ValueError(
+                f"ForwardFormatFilter: invalid format string {self._format!r}: {e}"
+            ) from e
 
         self._request_channel_name = (
             ForwardFormatFilter.CHANNEL_NAME_PLACEHOLDER in format
@@ -463,6 +474,13 @@ class SkipWithKeywordsFilter(WordBoundaryRegex, MessageFilter):
     """
 
     def __init__(self, keywords: set[str]) -> None:
+        if not keywords:
+            # An empty set compiles to `re.compile("")`, which matches every
+            # string — SkipWith would drop all messages, AllowWith would pass
+            # all. That's a config typo, not a valid setup.
+            raise ValueError(
+                f"{type(self).__name__} requires a non-empty keywords set"
+            )
         self._lookup_regex = re.compile(
             "|".join(
                 k.removeprefix("r'").removesuffix("'")

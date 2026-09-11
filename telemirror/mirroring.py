@@ -17,6 +17,8 @@ from telemirror._patch import (
 )
 from telemirror.hints import EventAlbumMessage, EventLike, EventMessage
 from telemirror.messagefilters.base import FilterAction
+from telemirror.misc.links import private_message_link
+from telemirror.misc.message_groups import iter_message_groups
 from telemirror.mixins import CopyEventMessage, UpdateEntitiesParams
 from telemirror.storage import Database, MirrorMessage
 
@@ -128,8 +130,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         if mirror is None:
             return fallback_link_url
 
-        outgoing_peer_id = utils.resolve_id(mirror.mirror_channel)[0]
-        return f"https://t.me/c/{outgoing_peer_id}/{mirror.mirror_id}"
+        return private_message_link(mirror.mirror_channel, mirror.mirror_id)
 
     async def _rewrite_links(
         self: "EventProcessor",
@@ -214,7 +215,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             )
             return
 
-        restricted_saving_content: bool = message.chat and message.chat.noforwards
+        restricted_saving_content: bool = bool(message.chat and message.chat.noforwards)
 
         outgoing_chats = self._chat_mapping.get(chat_id)
         if not outgoing_chats:
@@ -327,6 +328,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             if outgoing_topic_reply
                             else None,
                         )
+                        # NB: this follow-up text message is intentionally not
+                        # written to the DB — only the media message is tracked,
+                        # so a later edit/delete of the source won't touch it.
+                        # Tracking it would need tail rows flagged so edit_message
+                        # doesn't re-apply media to a text-only message.
                         await send_message(
                             self._client,
                             entity=outgoing_chat,
@@ -369,7 +375,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         self: "EventProcessor", chat_id: int, album: EventAlbumMessage, album_link: str
     ) -> None:
         incoming_first_message: EventMessage = album[0]
-        restricted_saving_content: bool = (
+        restricted_saving_content: bool = bool(
             incoming_first_message.chat and incoming_first_message.chat.noforwards
         )
 
@@ -499,6 +505,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             if outgoing_topic_reply
                             else None,
                         )
+                        # NB: these follow-up text messages are intentionally not
+                        # written to the DB (see the same note in new_message) —
+                        # only the album messages are tracked, so a later
+                        # edit/delete of the source won't touch them.
                         for text, entities in texts_to_send:
                             await send_message(
                                 self._client,
@@ -808,12 +818,10 @@ class EventHandlers:
             incoming_message_id: int = event.message.id
         elif isinstance(event, events.Album.Event):
             incoming_message_id: int = event.messages[0].id
-        elif isinstance(event, events.MessageDeleted.Event):
+        else:  # events.MessageDeleted.Event
             incoming_message_id: int = event.deleted_id
 
-        return (
-            f"https://t.me/c/{utils.resolve_id(event.chat_id)[0]}/{incoming_message_id}"
-        )
+        return private_message_link(event.chat_id, incoming_message_id)
 
     async def on_new_message(
         self: "EventHandlers", event: events.NewMessage.Event
@@ -966,7 +974,6 @@ class Mirroring:
         target added later is NOT backfilled by this sync.
         """
         bc = self._broadcast_channel
-        bc_peer_id = utils.resolve_id(bc)[0]
         self._logger.info(f"[Sync broadcast]: starting sync for channel#{bc}")
 
         synced = await self._database.get_broadcast_sync(bc)  # {msg_id: edit_ts|None}
@@ -983,11 +990,8 @@ class Mirroring:
         seen: set[int] = set()
         sent = edited = 0
 
-        pending_album: List[types.Message] = []
-        pending_gid: Optional[int] = None
-
         def _msg_link(msg_id: int) -> str:
-            return f"https://t.me/c/{bc_peer_id}/{msg_id}"
+            return private_message_link(bc, msg_id)
 
         def _edit_ts(msg: types.Message) -> Optional[int]:
             return int(msg.edit_date.timestamp()) if msg.edit_date else None
@@ -1004,13 +1008,8 @@ class Mirroring:
                 await self._database.set_broadcast_sync(bc, msg.id, ets)
                 edited += 1
 
-        async def flush_album() -> None:
-            nonlocal pending_gid, sent, edited
-            if not pending_album:
-                return
-            album = list(pending_album)
-            pending_album.clear()
-            pending_gid = None
+        async def process_album(album: List[types.Message]) -> None:
+            nonlocal sent, edited
             first = album[0]
             if first.id not in synced:
                 await self._processor.new_album(bc, album, _msg_link(first.id))
@@ -1025,20 +1024,15 @@ class Mirroring:
                         await self._database.set_broadcast_sync(bc, m.id, ets)
                         edited += 1
 
-        async for msg in client.iter_messages(bc, reverse=True):
-            if not isinstance(msg, types.Message):
-                continue
-            seen.add(msg.id)
-            gid = getattr(msg, "grouped_id", None)
-            if gid is not None:
-                if gid != pending_gid:
-                    await flush_album()
-                    pending_gid = gid
-                pending_album.append(msg)
+        async for group in iter_message_groups(
+            client.iter_messages(bc, reverse=True)
+        ):
+            if isinstance(group, list):
+                seen.update(m.id for m in group)
+                await process_album(group)
             else:
-                await flush_album()
-                await process_single(msg)
-        await flush_album()
+                seen.add(group.id)
+                await process_single(group)
 
         deleted = list(synced.keys() - seen)
         if deleted:
