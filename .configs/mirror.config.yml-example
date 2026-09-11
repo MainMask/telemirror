@@ -59,6 +59,10 @@ directions:
     #   since_date: "2024-01-01T00:00:00"
     # Overwrite global filters
     filters:
+      - SkipWithUrlFilter:      # must come before UrlMessageFilter (runs on raw entities)
+          blacklist: !!set      # block messages containing links to these channels
+            ? t.me/channel_a
+            ? t.me/channel_b
       - UrlMessageFilter:
           blacklist: !!set
             ? t.me

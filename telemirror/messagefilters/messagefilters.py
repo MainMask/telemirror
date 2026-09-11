@@ -479,3 +479,60 @@ class AllowWithKeywordsFilter(SkipWithKeywordsFilter):
             else FilterAction.DISCARD,
             message,
         )
+
+
+class SkipWithUrlFilter(MessageFilter):
+    """Skip message if it contains a URL entity matching the blacklist.
+
+    Checks MessageEntityTextUrl (entity.url), MessageEntityUrl (bare URL text),
+    and MessageEntityMention (@username). Matching is case-insensitive,
+    scheme-independent, and prefix-based
+    (e.g. blacklisting "t.me/channel" also blocks "t.me/channel/42").
+
+    Args:
+        blacklist (Set[str]): URL prefixes to block.
+    """
+
+    @staticmethod
+    def _normalize(url: str) -> str:
+        return re.sub(r"^https?://", "", url).lower().rstrip("/")
+
+    def __init__(self, blacklist: Set[str]) -> None:
+        self._blacklist = {self._normalize(u) for u in blacklist}
+        # Extract usernames only from direct t.me/<username> entries (no sub-path)
+        self._usernames = {
+            b[len("t.me/"):]
+            for b in self._blacklist
+            if b.startswith("t.me/") and b.count("/") == 1
+        }
+
+    def _matches(self, url: str) -> bool:
+        norm = self._normalize(url)
+        return any(
+            norm == b or norm.startswith(b + "/") or norm.startswith(b + "?")
+            for b in self._blacklist
+        )
+
+    async def _process_message(
+        self, message: EventMessage, event_type: Type[EventLike]
+    ) -> FilterResult[EventMessage]:
+        surrogate = utils.add_surrogate(message.message or "")
+        for entity in message.entities or []:
+            if isinstance(entity, types.MessageEntityTextUrl):
+                if self._matches(entity.url):
+                    return FilterResult(FilterAction.DISCARD, message)
+            elif isinstance(entity, types.MessageEntityUrl):
+                url_text = utils.del_surrogate(
+                    surrogate[entity.offset : entity.offset + entity.length]
+                )
+                if self._matches(url_text):
+                    return FilterResult(FilterAction.DISCARD, message)
+            elif isinstance(entity, types.MessageEntityMention) and self._usernames:
+                mention = utils.del_surrogate(
+                    surrogate[entity.offset : entity.offset + entity.length]
+                )
+                if mention.lstrip("@").lower() in self._usernames:
+                    return FilterResult(FilterAction.DISCARD, message)
+        return FilterResult(FilterAction.CONTINUE, message)
+
+
