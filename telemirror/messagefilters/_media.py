@@ -29,7 +29,7 @@ class ReuploadCache:
     def __init__(self, size: int = 16, ttl: float = 600.0) -> None:
         self._size = size
         self._ttl = ttl
-        self._data: "OrderedDict[int, tuple[float, Any]]" = OrderedDict()
+        self._data: OrderedDict[int, tuple[float, Any]] = OrderedDict()
 
     def get(self, key: int) -> Optional[Any]:
         entry = self._data.get(key)
@@ -49,7 +49,7 @@ class ReuploadCache:
             self._data.popitem(last=False)
 
 
-def source_media_id(media) -> Optional[int]:
+def source_media_id(media: Optional["types.TypeMessageMedia"]) -> Optional[int]:
     """Stable id of the source photo/document, for `ReuploadCache` keys."""
     if isinstance(media, types.MessageMediaPhoto) and isinstance(
         media.photo, types.Photo

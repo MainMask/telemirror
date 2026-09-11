@@ -23,6 +23,8 @@
 
     [.env-example](.env-example) contains the minimum environment configuration to run with an in-memory database.
 
+    > ⚠️ `.env` holds `SESSION_STRING` — full access to the Telegram account. On a shared/multi-user host run `chmod 600 .env`.
+
     <details>
     <summary><b>.env</b> overview</b></summary>
 

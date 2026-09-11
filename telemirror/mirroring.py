@@ -240,6 +240,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         if isinstance(message.media, types.MessageMediaPoll):
             message.media.poll.quiz = None
 
+        inserted: List[MirrorMessage] = []
+
         for outgoing_chat, configs in outgoing_chats.items():
             for config in configs:
                 if not self._matches_from_topic(config, message):
@@ -347,7 +349,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     continue
 
                 if outgoing_message:
-                    await self._database.insert(
+                    inserted.append(
                         MirrorMessage(
                             original_id=filtered_message.id,
                             original_channel=chat_id,
@@ -358,6 +360,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
                 if config.send_delay:
                     await asyncio.sleep(config.send_delay)
+
+        if inserted:
+            await self._database.insert_batch(inserted)
 
     @__handle_exceptions
     async def new_album(
@@ -789,7 +794,9 @@ class EventHandlers:
     ) -> None:
         """Notify tech_channel about incoming private messages."""
         sender_obj = await event.get_sender()
-        name = utils.get_display_name(sender_obj)
+        # sender-controlled — collapse whitespace and cap length so it can't
+        # break or spam the tech-channel message.
+        name = " ".join((utils.get_display_name(sender_obj) or "").split())[:100]
         username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "нет"
         msg = f"📩 Личное сообщение от {name} ({username})"
         await self._sender.send_message(self._tech_channel, msg)
@@ -949,6 +956,10 @@ class Mirroring:
         A message is marked synced regardless of send outcome; a rare failed
         first-time send won't auto-retry — clear the `broadcast_sync` rows for
         the channel to force a full re-sync.
+
+        `broadcast_sync` is keyed by source channel, not by target: a broadcast
+        target added later is NOT backfilled by this sync (clear the rows to
+        re-send everything).
         """
         bc = self._broadcast_channel
         bc_peer_id = utils.resolve_id(bc)[0]
@@ -974,7 +985,7 @@ class Mirroring:
                 await self._processor.new_message(bc, msg, _msg_link(msg.id))
                 await self._database.set_broadcast_sync(bc, msg.id, ets)
                 sent += 1
-            elif ets is not None and ets > (synced[msg.id] or 0):
+            elif ets is not None and ets > (synced.get(msg.id) or 0):
                 await self._processor.edit_message(bc, msg, _msg_link(msg.id))
                 await self._database.set_broadcast_sync(bc, msg.id, ets)
                 edited += 1
@@ -1072,8 +1083,10 @@ class Mirroring:
                     "try restart or get a new session key (run login.py)"
                 )
 
-            _handle = f" (@{me.username})" if getattr(me, "username", None) else ""
-            self._logger.info(f"Logged in as {utils.get_display_name(me)}{_handle}")
+            at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
+            self._logger.info(
+                f"Logged in as {utils.get_display_name(me)}{at_username}"
+            )
 
             if self._broadcast_channel:
                 try:
