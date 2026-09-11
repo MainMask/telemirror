@@ -1,7 +1,7 @@
 # Global settings
 disable_edit: false      # edits in source sync to mirror (stop-words block the update, not delete)
 disable_delete: true     # deletions in source do NOT delete mirrored posts
-fallback_link_url: "https://t.me/CitadelOS"  # substitute for unresolvable cross-channel links
+fallback_link_url: "https://t.me/CitadelClan"  # substitute for unresolvable cross-channel links
 
 # Global filters — applied in order to every direction
 filters:
@@ -47,19 +47,1042 @@ filters:
   #    Must stay after WatermarkRemovalFilter (that filter swaps message.media).
   - RestrictSavingContentBypassFilter
 
-  # 5. Rename mirrored document files: append " - @CitadelOS" and strip promo
+  # 5. Rename mirrored document files: append " - @CitadelClan" and strip promo
   #    fragments from the filename. Must stay after RestrictSavingContentBypassFilter
   #    (patches the already re-uploaded file in place; re-uploads plain reference
   #    documents itself).
   - DocumentFilenameFilter:
-      suffix: "@CitadelOS"
+      suffix: "@CitadelClan"
       remove:
         - "@openfrm"
         - "openfrm"
 
-# Admin broadcast channel: its posts fan out to every target. Targets not set yet —
-# add `broadcast_targets:` (or entries under `directions:`) before running.
+# Admin broadcast channel: its posts fan out to all 8 recipients configured in
+# `directions:` (every channel and every forum topic). To narrow the fan-out, add
+# a `broadcast_targets:` list of specific channels/topics.
 broadcast_channel: -1003926294676
 
-# Mirror directions — none configured yet.
-directions: []
+# Mirror directions — сгенерировано skylon_set/setup_citadel.py:
+#   доноры «O Λ И M П» / «🪐» → получатели «⚜️ Цитадель», топик→топик по названию.
+#   Каждая директория тянет всю историю донора при старте (past_mode: full_history).
+directions:
+- from:
+  - -1003007946025
+  to:
+  - -1004382220692
+  past_mode:
+    full_history: true
+- from:
+  - -1002738411064
+  to:
+  - -1003930417508
+  past_mode:
+    full_history: true
+- from:
+  - -1002919476953
+  to:
+  - -1004492144131
+  past_mode:
+    full_history: true
+- from:
+  - -1003453434923
+  to:
+  - -1004335381593
+  past_mode:
+    full_history: true
+- from:
+  - -1003442453098
+  to:
+  - -1004461404658
+  past_mode:
+    full_history: true
+- from:
+  - -1003026483451
+  to:
+  - -1004453577173
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#1
+  to:
+  - -1004458106126#1
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#13
+  to:
+  - -1004458106126#3
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#116
+  to:
+  - -1004458106126#4
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#6
+  to:
+  - -1004458106126#5
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#674
+  to:
+  - -1004458106126#6
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#656
+  to:
+  - -1004458106126#7
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#640
+  to:
+  - -1004458106126#8
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#624
+  to:
+  - -1004458106126#9
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#587
+  to:
+  - -1004458106126#10
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#577
+  to:
+  - -1004458106126#11
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#552
+  to:
+  - -1004458106126#12
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#537
+  to:
+  - -1004458106126#13
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#529
+  to:
+  - -1004458106126#14
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#512
+  to:
+  - -1004458106126#15
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#500
+  to:
+  - -1004458106126#16
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#487
+  to:
+  - -1004458106126#17
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#469
+  to:
+  - -1004458106126#18
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#457
+  to:
+  - -1004458106126#19
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#446
+  to:
+  - -1004458106126#20
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#405
+  to:
+  - -1004458106126#21
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#395
+  to:
+  - -1004458106126#22
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#386
+  to:
+  - -1004458106126#23
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#374
+  to:
+  - -1004458106126#24
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#365
+  to:
+  - -1004458106126#25
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#355
+  to:
+  - -1004458106126#26
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#325
+  to:
+  - -1004458106126#27
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#311
+  to:
+  - -1004458106126#28
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#291
+  to:
+  - -1004458106126#29
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#266
+  to:
+  - -1004458106126#30
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#261
+  to:
+  - -1004458106126#31
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#253
+  to:
+  - -1004458106126#32
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#223
+  to:
+  - -1004458106126#33
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#193
+  to:
+  - -1004458106126#34
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#161
+  to:
+  - -1004458106126#35
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#135
+  to:
+  - -1004458106126#36
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#122
+  to:
+  - -1004458106126#37
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#110
+  to:
+  - -1004458106126#38
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#96
+  to:
+  - -1004458106126#39
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#88
+  to:
+  - -1004458106126#40
+  past_mode:
+    full_history: true
+- from:
+  - -1003983984082#149
+  to:
+  - -1004458106126#41
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#1
+  to:
+  - -1004310135623#1
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#13
+  to:
+  - -1004310135623#10
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#19095
+  to:
+  - -1004310135623#11
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#56300
+  to:
+  - -1004310135623#12
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#5
+  to:
+  - -1004310135623#13
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#70177
+  to:
+  - -1004310135623#14
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#68925
+  to:
+  - -1004310135623#15
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#34551
+  to:
+  - -1004310135623#16
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#48844
+  to:
+  - -1004310135623#17
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7412
+  to:
+  - -1004310135623#18
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#49701
+  to:
+  - -1004310135623#19
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#75525
+  to:
+  - -1004310135623#20
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#74994
+  to:
+  - -1004310135623#21
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#28580
+  to:
+  - -1004310135623#22
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#61963
+  to:
+  - -1004310135623#23
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#68620
+  to:
+  - -1004310135623#24
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#33468
+  to:
+  - -1004310135623#25
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7408
+  to:
+  - -1004310135623#26
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#70824
+  to:
+  - -1004310135623#27
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#55666
+  to:
+  - -1004310135623#28
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#36781
+  to:
+  - -1004310135623#29
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#61054
+  to:
+  - -1004310135623#30
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#40238
+  to:
+  - -1004310135623#31
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#25452
+  to:
+  - -1004310135623#32
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#57954
+  to:
+  - -1004310135623#33
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#161
+  to:
+  - -1004310135623#34
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7444
+  to:
+  - -1004310135623#35
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#39843
+  to:
+  - -1004310135623#36
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#49966
+  to:
+  - -1004310135623#37
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#45794
+  to:
+  - -1004310135623#38
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#40193
+  to:
+  - -1004310135623#39
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#4
+  to:
+  - -1004310135623#40
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#74579
+  to:
+  - -1004310135623#41
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#74224
+  to:
+  - -1004310135623#42
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#55700
+  to:
+  - -1004310135623#43
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#205
+  to:
+  - -1004310135623#44
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#41404
+  to:
+  - -1004310135623#45
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#39867
+  to:
+  - -1004310135623#46
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#68592
+  to:
+  - -1004310135623#47
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#62442
+  to:
+  - -1004310135623#48
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#62440
+  to:
+  - -1004310135623#49
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7418
+  to:
+  - -1004310135623#50
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#61347
+  to:
+  - -1004310135623#51
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#14113
+  to:
+  - -1004310135623#52
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#58916
+  to:
+  - -1004310135623#53
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#58780
+  to:
+  - -1004310135623#54
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7432
+  to:
+  - -1004310135623#55
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#58167
+  to:
+  - -1004310135623#56
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7430
+  to:
+  - -1004310135623#57
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#6
+  to:
+  - -1004310135623#58
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#35844
+  to:
+  - -1004310135623#59
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#29971
+  to:
+  - -1004310135623#60
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#29909
+  to:
+  - -1004310135623#61
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#9
+  to:
+  - -1004310135623#62
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#18916
+  to:
+  - -1004310135623#63
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7441
+  to:
+  - -1004310135623#64
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#14193
+  to:
+  - -1004310135623#65
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7413
+  to:
+  - -1004310135623#66
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#62609
+  to:
+  - -1004310135623#67
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#8399
+  to:
+  - -1004310135623#68
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#37140
+  to:
+  - -1004310135623#69
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#56308
+  to:
+  - -1004310135623#70
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#17510
+  to:
+  - -1004310135623#71
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7658
+  to:
+  - -1004310135623#72
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7436
+  to:
+  - -1004310135623#73
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#70937
+  to:
+  - -1004310135623#74
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7348
+  to:
+  - -1004310135623#75
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#69876
+  to:
+  - -1004310135623#76
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#69807
+  to:
+  - -1004310135623#77
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#69284
+  to:
+  - -1004310135623#78
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#68596
+  to:
+  - -1004310135623#79
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#50766
+  to:
+  - -1004310135623#80
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#57823
+  to:
+  - -1004310135623#81
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#8714
+  to:
+  - -1004310135623#82
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#27236
+  to:
+  - -1004310135623#83
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#57773
+  to:
+  - -1004310135623#84
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#64185
+  to:
+  - -1004310135623#85
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#62428
+  to:
+  - -1004310135623#86
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#62169
+  to:
+  - -1004310135623#87
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#62310
+  to:
+  - -1004310135623#88
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#56496
+  to:
+  - -1004310135623#89
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#61804
+  to:
+  - -1004310135623#90
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#61695
+  to:
+  - -1004310135623#91
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#58213
+  to:
+  - -1004310135623#92
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#14
+  to:
+  - -1004310135623#93
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#56512
+  to:
+  - -1004310135623#94
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#57724
+  to:
+  - -1004310135623#95
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7434
+  to:
+  - -1004310135623#96
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7473
+  to:
+  - -1004310135623#97
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#58248
+  to:
+  - -1004310135623#98
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#56501
+  to:
+  - -1004310135623#99
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#57869
+  to:
+  - -1004310135623#100
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#57841
+  to:
+  - -1004310135623#101
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7426
+  to:
+  - -1004310135623#102
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#56648
+  to:
+  - -1004310135623#103
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#49674
+  to:
+  - -1004310135623#104
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#55625
+  to:
+  - -1004310135623#105
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#55568
+  to:
+  - -1004310135623#106
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#50058
+  to:
+  - -1004310135623#107
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#50065
+  to:
+  - -1004310135623#108
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#47011
+  to:
+  - -1004310135623#109
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#46336
+  to:
+  - -1004310135623#110
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#45733
+  to:
+  - -1004310135623#111
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#44289
+  to:
+  - -1004310135623#112
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#43129
+  to:
+  - -1004310135623#113
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7446
+  to:
+  - -1004310135623#114
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#41424
+  to:
+  - -1004310135623#115
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#42748
+  to:
+  - -1004310135623#116
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#42590
+  to:
+  - -1004310135623#117
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#42587
+  to:
+  - -1004310135623#118
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#41798
+  to:
+  - -1004310135623#119
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7448
+  to:
+  - -1004310135623#120
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#41493
+  to:
+  - -1004310135623#121
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#41378
+  to:
+  - -1004310135623#122
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#104
+  to:
+  - -1004310135623#123
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#37534
+  to:
+  - -1004310135623#124
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#2
+  to:
+  - -1004310135623#125
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#34843
+  to:
+  - -1004310135623#126
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#25432
+  to:
+  - -1004310135623#127
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#8339
+  to:
+  - -1004310135623#128
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7987
+  to:
+  - -1004310135623#129
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#8063
+  to:
+  - -1004310135623#130
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7622
+  to:
+  - -1004310135623#131
+  past_mode:
+    full_history: true
+- from:
+  - -1002307710800#7480
+  to:
+  - -1004310135623#132
+  past_mode:
+    full_history: true
