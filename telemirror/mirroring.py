@@ -345,6 +345,19 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             if outgoing_topic_reply
                             else None,
                         )
+                    except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+                        # Media not delivered: let past_mode's retry wrapper wait
+                        # it out without advancing the checkpoint past this
+                        # message (same contract as the outer handler below).
+                        await flush_inserted()
+                        raise
+                    except Exception as split_err:
+                        self._logger.error(
+                            f"Error while sending split message to chat#{outgoing_chat}. "
+                            f"{type(split_err).__name__}: {split_err}"
+                        )
+                        continue
+                    try:
                         # NB: this follow-up text message is intentionally not
                         # written to the DB — only the media message is tracked,
                         # so a later edit/delete of the source won't touch it.
@@ -360,11 +373,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         )
                     except Exception as split_err:
                         self._logger.error(
-                            f"Error while sending split message to chat#{outgoing_chat}. "
+                            f"Error while sending split message tail to chat#{outgoing_chat}. "
                             f"{type(split_err).__name__}: {split_err}"
                         )
-                        # Fall through: the media message may already be sent —
-                        # it must still be tracked (only the text tail is lost).
+                        # Fall through: the media message is already sent — it
+                        # must still be tracked (only the text tail is lost).
                 except (errors.FloodWaitError, errors.FloodPremiumWaitError):
                     # Let a >threshold FloodWait propagate: past_mode's retry
                     # wrapper handles it without advancing the checkpoint past
@@ -532,6 +545,17 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             if outgoing_topic_reply
                             else None,
                         )
+                    except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+                        # Album not delivered: propagate to past_mode's retry
+                        # wrapper (same contract as the outer handler below).
+                        raise
+                    except Exception as split_err:
+                        self._logger.error(
+                            f"Error while sending split album to chat#{outgoing_chat}. "
+                            f"{type(split_err).__name__}: {split_err}"
+                        )
+                        continue
+                    try:
                         # NB: these follow-up text messages are intentionally not
                         # written to the DB (see the same note in new_message) —
                         # only the album messages are tracked, so a later
@@ -547,11 +571,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             )
                     except Exception as split_err:
                         self._logger.error(
-                            f"Error while sending split album to chat#{outgoing_chat}. "
+                            f"Error while sending split album tail to chat#{outgoing_chat}. "
                             f"{type(split_err).__name__}: {split_err}"
                         )
-                        # Fall through: the album may already be sent — it must
-                        # still be tracked (only the caption tails are lost).
+                        # Fall through: the album is already sent — it must still
+                        # be tracked (only the caption tails are lost).
                 except (errors.FloodWaitError, errors.FloodPremiumWaitError):
                     # See new_message: propagate to past_mode's retry wrapper
                     # (in live mode this aborts the rest of the fan-out).
@@ -565,19 +589,32 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
                 # Expect non-empty list of messages
                 if utils.is_list_like(outgoing_messages):
-                    await self._database.insert_batch(
-                        [
-                            MirrorMessage(
-                                original_id=idxs[message_index],
-                                original_channel=chat_id,
-                                mirror_id=outgoing_message.id,
-                                mirror_channel=outgoing_chat,
-                            )
-                            for message_index, outgoing_message in enumerate(
-                                outgoing_messages
-                            )
-                        ]
-                    )
+                    if len(outgoing_messages) != len(idxs):
+                        # The positional zip below maps each sent message back to
+                        # a source id; a count mismatch means we can't trust that
+                        # mapping. Skip tracking rather than write wrong rows —
+                        # the album is delivered, it just won't be reachable by a
+                        # later edit/delete of the source.
+                        self._logger.error(
+                            f"[New album]: send to chat#{outgoing_chat} returned "
+                            f"{len(outgoing_messages)} message(s) for {len(idxs)} "
+                            f"source item(s) — album NOT tracked (edit/delete of "
+                            f"the source won't reach it)"
+                        )
+                    else:
+                        await self._database.insert_batch(
+                            [
+                                MirrorMessage(
+                                    original_id=idxs[message_index],
+                                    original_channel=chat_id,
+                                    mirror_id=outgoing_message.id,
+                                    mirror_channel=outgoing_chat,
+                                )
+                                for message_index, outgoing_message in enumerate(
+                                    outgoing_messages
+                                )
+                            ]
+                        )
 
                 if config.send_delay:
                     await asyncio.sleep(config.send_delay)
