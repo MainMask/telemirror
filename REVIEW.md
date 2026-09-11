@@ -694,3 +694,543 @@ topic; `setup_mirrors._sync_forum_topics` makes topic creation idempotent after 
 FloodWait abort; `classify_donor` excludes already-created «⚜️ Цитадель» recipients
 so they can't be re-picked as donors; the duplicate detector skips an empty
 `name_key` (bare-«Цитадель» titles no longer collapse into one false group).
+
+---
+
+# Pass 11 — full restart (production-readiness overhaul)
+
+This is a ground-up restart, not a continuation: every module gets a full
+independent re-read regardless of any earlier "closed" status. Prior entries
+above remain as historical record and a source of previously-found invariants
+to re-verify, not as a reason to shorten this pass. Batches are audited and
+fixed in the order listed below, each with its own gate run.
+
+## Batch A — `telemirror/storage.py`, `config.py`, `telemirror/hints.py`
+
+Full read ×2. Tests: 271 green (270 + 1 new), `pyflakes` + `ruff` clean. No
+P1/P2 found.
+
+### Correction to a previously recorded invariant
+
+The `telemirror/storage.py` (pass 7) "Deferred" section states: *"`insert` via
+`setdefault` on an existing key does not `move_to_end` (a second mirror of the
+same message doesn't bump recency)."* Verified empirically (Python 3.12,
+`collections.OrderedDict` C implementation) that this is no longer accurate,
+if it ever was: `OrderedDict.setdefault` resolves an existing key through the
+subclass's overridden `__getitem__`, so it *does* bump recency, and resolves a
+missing key through the overridden `__setitem__`, so eviction still fires on
+capacity overflow via `setdefault`-based inserts too. Both paths were traced
+directly (instrumented `__getitem__`/`__setitem__`) and pinned down with a new
+regression test, `test_setdefault_on_existing_key_refreshes_recency` in
+`tests/test_lrucache.py`, alongside the existing `test_get_refreshes_recency`.
+No code change — the actual behavior was already correct; only the record was
+wrong. The rest of pass 7/9/10's `storage.py`/`config.py` invariants and
+deferred P3 items were independently re-verified and still hold as documented
+(YAML-vs-env fail-fast priority, `_channel_id` blank/zero handling,
+`PastModeConfig` single-strategy validation, `build_dsn` percent-encoding,
+broadcast-direction dedup by `(target, to_topic_id)`, `PostgresDatabase`
+reviewed by inspection only).
+
+### Deferred (P3, non-blocking, re-affirmed from pass 7)
+
+- Empty YAML `directions:`/file → an opaque `TypeError` instead of a clear
+  startup error.
+- `build_filters`: a YAML filter dict with >1 key silently takes only the
+  first.
+- Synthetic broadcast directions ignore the global YAML `filters:`/`mode:` by
+  design (always `EmptyMessageFilter` + copy) — non-obvious but intentional.
+- Several `config.py` module-level annotations (e.g. `DB_URL: str = ...
+  default=None`) are typed as non-Optional despite a `None` default —
+  cosmetic, no runtime effect.
+
+---
+
+## Batch B — `telemirror/mirroring.py`, `telemirror/mixins.py`, `telemirror/messagefilters/*`, `telemirror/watermark/processor.py`
+
+Full read ×2. Tests: 273 green (271 + 2 new), `pyflakes` + `ruff` clean.
+
+### Fixed in this pass
+
+- **P2** `Mirroring._Mirroring__connect_client`: `EventHandlers` was constructed
+  *after* `await self._sync_broadcast_channel(...)`. Read Telethon 1.44's actual
+  dispatch code (`client/updates.py::_dispatch_update`) to settle what pass 8
+  left as "not re-verified against Telethon's actual update-buffering behaviour
+  — raise to P2 if a normal path is shown to drop updates": `_dispatch_update`
+  iterates `self._event_builders` live, at the moment an update is dispatched,
+  not a snapshot from when it was received — a handler added later never sees
+  updates dispatched before it existed, and Telethon does not replay them. On a
+  broadcast channel with real history (or just a slow first run), any live
+  update on *any* mirrored source channel arriving during that window was
+  silently and permanently lost — the same "silent message loss" class as
+  pass 7/8's P2 fixes. Now `EventHandlers` is constructed first. Trade-off this
+  accepts: a broadcast-channel post arriving exactly during the sync can be both
+  dispatched live and picked up by the sync's own history walk → a visible
+  duplicate, not a silent loss. Test:
+  `tests/test_broadcast_sync.py::test_handlers_registered_before_broadcast_sync`
+  (asserts call order via stubs, since exercising Telethon's live dispatch race
+  itself isn't practical to simulate in a unit test).
+- **P2** `telemirror/watermark/processor.py::remove_watermark_from_video`: the
+  ffmpeg `delogo` re-encode used a flat `timeout=300`, while the comparable (or
+  cheaper — `stamp_watermark_on_video` has no `-c:v copy` either, same libx264
+  path) stamp step uses `_ffmpeg_timeout(duration)` (300s floor, scales up).
+  `deploy/README.md` documents 6-13 minute real-world stamp times on the
+  production single-vCPU host — a video that clears the `stamp_video_max_duration_s`
+  gate (default 300s) could legitimately take longer than 300s to delogo-encode
+  and hit a false `TimeoutExpired`, silently discarding a would-have-succeeded
+  removal (caught by `WatermarkRemovalFilter`'s broad `except Exception`, so no
+  message loss — the source is mirrored unwatermarked instead — but the feature
+  quietly doesn't work for exactly the videos it's supposed to handle). Now uses
+  the same `_ffmpeg_timeout(duration)`, with `duration` computed the same way
+  `stamp_watermark_on_video` does (`frame_count / fps`). Test:
+  `tests/test_watermark_video_encode.py::test_remove_watermark_timeout_scales_with_duration`.
+
+### Correction to a previously recorded item
+
+Pass 8's watermark/processor.py review did not flag the `remove_watermark_from_video`
+timeout inconsistency (it predates `_ffmpeg_timeout`, added later alongside
+`stamp_watermark_on_video`'s dynamic budget, without updating the sibling
+function) — noted here since it's a real behavioral gap, not a re-affirmation.
+
+### Re-verified, no change
+
+- `telemirror/watermark/processor.py`'s missing bundled `reference_watermark.png`
+  (`_DEFAULT_TEMPLATE`) is intentional and already handled: `_load_template`
+  explicitly special-cases the default path, logs a warning, and disables
+  detection (stamping still runs) — matches the documented "whole module is
+  best-effort" invariant. Not a defect.
+- All other pass-7/8 invariants for `mirroring.py` (flood/media-error
+  propagation contract, broadcast-sync idempotency, `edit_message`/`delete_message`
+  semantics) and pass-7's media-filters/messagefilters invariants re-read and
+  still hold as documented.
+
+### Deferred (P3, non-blocking, re-affirmed from pass 7/8)
+
+- All P3 items listed under the pass-7/8 `mirroring.py`, messagefilters, and
+  watermark/processor.py sections above still apply and were independently
+  re-checked against the current code.
+
+---
+
+## Batch C — `past_mode.py`
+
+Full read ×2. Tests: 273 green (unchanged), `pyflakes` + `ruff` clean. No code
+change — no P1/P2 found.
+
+The pass-7 `past_mode.py` section was closed 2026-08-30, before the most recent
+commit on this file (`0677f37`, 2026-09-10: topic-safe dedup in `mirroring.py` +
+skip-stuck-message in `_replay_with_retry`) — so the closed snapshot predates
+current behavior. Independently re-verified the current code, focusing on what
+that commit changed:
+
+- `_replay_with_retry`'s stuck-message skip: traced the
+  `media_failure_checkpoint` sentinel/reset logic by hand against
+  `_MEDIA_RETRY_LIMIT` — a fresh checkpoint value (progress since the last
+  stall) resets the failure count and re-arms a full retry budget for the new
+  stuck point; skipping past a message sets the checkpoint to `e.message_id`
+  and correctly seeds `media_failure_checkpoint` so the very next message's
+  first failure isn't miscounted as a continuation of the skipped one. Matches
+  `tests/test_past_mode.py::test_replay_with_retry_skips_stuck_message_after_limit`.
+  No `message_id` on the error → re-raise (can't skip what can't be named) —
+  matches `..._reraises_when_stuck_message_unknown`.
+  `MediaDownloadError` is excluded from `EventProcessor.__handle_exceptions`'s
+  broad catch (confirmed in Batch B) and propagates uncaught through
+  `process_single`/`process_album`'s plain `async for` loop, reaching this
+  retry wrapper — no swallow point in between.
+- Multi-topic-per-pair replay: `_replay_direction` builds one `EventProcessor`
+  per (source, target) pair with *all* the pair's topic `cfgs`, so
+  `_matches_from_topic` alone decides routing per message — one history pass,
+  one checkpoint, no per-topic re-fetch. Matches
+  `..._replay_multi_topic_single_pass`.
+- `_integrity_check`'s `get_messages_for_channel_pair` is intentionally
+  topic-blind (`binding_id` has no topic column — confirmed in Batch A) so
+  `max_mirrored` correctly spans every topic of the pair, consistent with the
+  single-checkpoint-per-pair design above.
+
+### Re-verified, no change
+
+- Checkpoint-advances-only-after-send, `min_id` exclusivity, flood propagation
+  not advancing the checkpoint, `_integrity_check` rollback, `last_n`
+  buffer-vs-stream selection, service-message drop, and `_edit_links_pass`'s
+  best-effort second pass — all re-read against the current code and still
+  hold as pass-7 documented them.
+
+### Deferred (P3, non-blocking, re-affirmed from pass 7)
+
+- `_run`: `await client.connect()` has no time bound (unlike
+  `Mirroring.__connect_client`) — an operator script, the operator will see it
+  hang.
+- `_run`: `database` and `client.connect()`/`get_me()` run before the
+  `try/finally` — on their failure, cleanup is skipped (the process exits
+  anyway).
+- `_edit_links_pass`: `except Exception` on `client.edit_message` also
+  swallows a FloodWait > 300s — edits are simply skipped (best-effort pass).
+
+---
+
+## Batch D — `main.py`, `login.py`, `telemirror/misc/*`, `telemirror/alert.py`, `telemirror/health.py`
+
+Full read ×2. Tests: 274 green (273 + 1 new), `pyflakes` + `ruff` clean.
+
+`telemirror/alert.py` and `telemirror/health.py` had **no prior REVIEW.md
+section at all** — grepped the whole file for both names and found zero hits,
+despite both shipping in the same "24/7 hardening" work that pass 7-10 covered
+for everything else. Read them with the same scrutiny a from-scratch module
+gets, cross-checked directly against the actual `deploy/systemd/*.service`
+files (not just `deploy/README.md`'s prose) since their whole job is reacting
+correctly to those units' real state transitions.
+
+### Fixed in this pass
+
+- **P2** `telemirror/health.py::check`: the "stuck outside `active` for two
+  checks" alert fired on `ActiveState == "inactive"` too. Cross-checked against
+  `deploy/systemd/telemirror.service` and `telemirror-past-courses.service`:
+  the latter's `Conflicts=telemirror.service` + former's `Restart=always` mean
+  starting a course backfill *cleanly stops* the live mirror
+  (`ActiveState=inactive`) for the whole backfill — which `citadel_courses.config.yml`'s
+  ~85 `full_history` directions can keep running for hours — and
+  `OnSuccess=telemirror.service` on the backfill unit restarts it after.
+  `telemirror-health.timer` runs every ~10 min, so every single backfill run
+  (a normal, documented, operator-triggered workflow, not a failure) would have
+  paged `TECH_CHANNEL` repeatedly for its whole duration — exactly the kind of
+  noise that trains an operator to ignore real alerts. `Restart=always` also
+  means a unit that's actually crash-looping essentially never settles into a
+  stable `inactive` on its own (it cycles through `activating`/`failed`
+  instead, both already covered by the flap-count and `failed`-state checks),
+  so excluding `inactive` doesn't weaken real-failure detection. Test:
+  `tests/test_health.py::test_deliberate_stop_for_course_backfill_does_not_alert`.
+
+### Re-verified, no change
+
+- `main.py`/`login.py`: matches pass-7 invariants (uvloop selection,
+  `try/finally` around `telemirror.run()`, `USE_MEMORY_DB` always a real bool).
+- `telemirror/misc/*` (`links.py`, `log_setup.py`, `message_groups.py`,
+  `urlmatcher.py`, `lrucache.py`): matches pass-7 invariants, re-read in full.
+  `topics.py` and `sdnotify.py` (added after pass 7) read for the first time as
+  part of this restart — `topic_id_of`'s General-topic/reply fallback and
+  `sdnotify`'s no-op-without-`NOTIFY_SOCKET` contract match their docstrings and
+  existing tests (`test_matches_from_topic.py`, `test_sdnotify.py`).
+- `telemirror/alert.py`: `send_alert` never raises (broad `except Exception` in
+  both `send_alert` and `journal_tail`); `_connect_and_send`'s `finally:
+  client.disconnect()` runs even when `is_user_authorized()` is False or the
+  connect/send `wait_for` times out.
+
+### Deferred (P3, non-blocking)
+
+- `telemirror/alert.py`: `TECH_CHANNEL` is read raw via `decouple`
+  (`_env("TECH_CHANNEL", default=None)`), not through `config.py`'s
+  `_channel_id` (which treats `""`/`"0"` as "unset" everywhere else in the
+  project). Setting `TECH_CHANNEL=0` here would not print the "TECH_CHANNEL
+  not set — skipping" line and would instead attempt `client.send_message(0,
+  ...)`, failing and being swallowed by `send_alert`'s broad `except`. Same
+  outcome either way (no alert sent) — deliberately setting a channel id to
+  the literal zero-string is not a realistic config, and `alert.py`'s
+  docstring explains it avoids `config.py` on purpose (must work on a broken
+  env).
+- `telemirror/alert.py::journal_tail`: a non-zero `journalctl` exit with empty
+  stdout (e.g. permission denied) is reported as "(journal is empty)" — the
+  message says "empty" when it may mean "inaccessible". Cosmetic; `check=False`
+  was a deliberate choice not to raise here.
+- (Phase 5) `telemirror/alert.py`, `telemirror/health.py`: all remaining
+  Russian strings translated to English (log/print text, error messages);
+  `tests/test_health.py`'s two assertions on the alert text updated to match.
+  No behavior change — only the emitted text.
+- Pre-existing `main.py`/`login.py` P3s (health site/DB before `try/finally`,
+  `login.py` needs a fully-valid `.env` including a placeholder
+  `SESSION_STRING`) still apply.
+
+---
+
+## Batch E — `telemirror/_patch/*` (vendored/patched Telethon)
+
+Full read ×2. Tests: 274 green (unchanged), `pyflakes` + `ruff` clean. No code
+change — no P1/P2 found.
+
+Different judgment call here than the rest of the project: a "defect" in a
+vendored patch means an unintended deviation from the upstream function it
+forks, not a correctness bug in isolation. Pass 9 recorded these as "deliberate
+near-verbatim copies... editing them defeats the purpose" but that was a
+by-eye read, not a verified diff. This pass extracted the actual matching
+`send_message`/`send_file`/`_send_album`/`forward_messages` implementations
+from the installed Telethon 1.44.0 (`.venv/lib/.../telethon/client/{messages,uploads}.py`)
+and diffed them structurally against `_patch/sending.py` (normalizing
+`self`→`client`, quote style, and Black-style wrapping so only real content
+differences remain).
+
+### Re-verified, no change
+
+- The diff confirms the *only* functional deviations across all four functions
+  are the `reply_to_topic_id`/`top_msg_id` additions this patch exists for —
+  threaded consistently into every `InputReplyToMessage`/`ForwardMessagesRequest`
+  construction, with no upstream call site missed.
+- `_patch/album.py`'s `set_album_event_timeout` still targets a real, present
+  attribute: confirmed `telethon.events.album._HACK_DELAY` exists in the
+  installed version (module-level default `0.5`, read by `AlbumHack` at
+  instantiation) — the monkeypatch isn't silently dead against this Telethon
+  version.
+
+### Deferred (P3, non-blocking)
+
+- `_patch/sending.py::send_file` dropped upstream's `mime_type` parameter (and
+  its forwarding into `client._file_to_media(..., mime_type=...)`) — the one
+  incidental (not topic-related) gap the diff surfaced. Confirmed harmless
+  today: nothing in this project calls `send_file`/`send_message` with a
+  `mime_type` argument (checked all call sites in `mirroring.py` and the
+  `messagefilters/` package in Batch B), and `_file_to_media`'s own default is
+  `mime_type=None`, identical to never passing it. Not adding it back
+  speculatively — record it here so a future filter that needs to pin a MIME
+  type doesn't waste time discovering this fork silently drops it.
+
+---
+
+## Batch F — `skylon_set/*` (`_common.py`, `anonymize_groups.py`, `clear_channels.py`, `restrict_saving.py`, `sync_pins.py`, `setup_mirrors.py`)
+
+Full read ×2 (dependency order: `_common.py` first, `setup_mirrors.py` last as
+the largest). Tests: 275 green (274 + 1 new), `pyflakes` + `ruff` clean.
+
+### Fixed in this pass
+
+- **P2** `clear_channels.py::_run`: DB state (`past_mode_checkpoint` +
+  `binding_id`) was reset via `_reset_db_state(targets, ...)` using the *full*
+  target set collected from `CHAT_MAPPING`, not the subset that was actually
+  cleared. Both `purge()` and `DeleteHistoryRequest` failures are caught,
+  logged, and the loop moves on to the next channel (correct — one bad channel
+  shouldn't abort the whole run) — but the channel stayed in `targets` and so
+  still got its checkpoint deleted and `binding_id` rows wiped at the end. A
+  channel whose purge failed (network blip, exhausted FloodWait retries, no
+  admin rights) would then look "clean" to a later `past_mode.py`/live run,
+  which would re-mirror its entire history into a channel that still holds the
+  old, un-deleted messages — duplicating content, the opposite of what
+  `clear_channels.py` exists to do. Now a `cleared` dict is built incrementally
+  from only the channels whose `purge()`/`DeleteHistoryRequest` call actually
+  returned, and only that subset is passed to `_reset_db_state`. Test:
+  `tests/test_clear_channels.py::test_run_only_resets_db_state_for_successfully_cleared_channels`.
+
+### Re-verified, no change
+
+- `_common.safe_call`/`open_client`/`fetch_all_topics`: matches pass-10
+  invariants (FloodWait always waited out, transport errors retried up to
+  `max_retries`, forum-topic pagination past 100 with tombstone-safe cursor).
+- `anonymize_groups.py`, `restrict_saving.py`, `sync_pins.py`: re-read in full,
+  matches existing test coverage (`test_anonymize_groups.py`,
+  `test_restrict_saving.py`, `test_sync_pins_*.py`) — no new findings.
+- `setup_mirrors.py` (851 lines, the largest and most business/brand-specific
+  script): re-read in full including `write_directions`/`_append_directions_text`'s
+  merge-dedup, `step_final_verify`'s config-vs-reality reconciliation, and the
+  donor/recipient classification helpers — matches pass-9/10's documented
+  invariants and existing test coverage
+  (`test_setup_mirrors_config.py`, `test_setup_mirrors_helpers.py`,
+  `test_setup_mirrors_sync_topics.py`, `test_setup_mirrors_forum_api.py`).
+
+### Deferred (P3, non-blocking)
+
+- `_common.fetch_all_topics`: if an *entire* 100-topic page were all
+  `ForumTopicDeleted` tombstones, the cursor falls back to `r.topics[-1]` (a
+  tombstone), whose missing `top_message`/`date` reset `offset_id`/`offset_date`
+  to 0 — exactly the "zero cursor breaks pagination" failure the tombstone-aware
+  cursor was added to avoid (pass 10), just for this specific all-deleted-page
+  case. Not fixed: the actual behavior of `GetForumTopicsRequest` with a
+  zeroed offset_id/date alongside a real offset_topic isn't documented, so a
+  guess-based fix risks trading a rare hang for a rare wrong-page skip. 100
+  consecutive deleted topics with no live one in between is an extreme edge
+  even for a forum with heavy topic churn; flagging for awareness rather than
+  guessing at Telegram's undocumented semantics.
+- `_common.safe_call`: reconnects the client on every `FloodWaitError`, not
+  only on the transport errors it's built for — heavier than necessary but
+  harmless for an operator script (not perf-sensitive).
+- Pre-existing pass-9/10 `skylon_set/*` P3s (config `KeyError` on hand-edit,
+  `full_id`'s string-built id, scripts requiring a valid `.env`) still apply.
+
+---
+
+## Batch G — `deploy/*` (bootstrap.sh, setup-swap.sh, systemd units, cron, README)
+
+Not covered by `pyflakes`/`ruff`/`pytest`. Manual verification performed and
+recorded per-item below, per the plan's requirement for this batch.
+
+**Verified**:
+- `bash -n deploy/bootstrap.sh` and `bash -n deploy/setup-swap.sh` — both clean
+  (syntax only; no `shellcheck` available in this environment, so unused-var/
+  quoting-style classes of issues were checked by manual reading instead, not
+  tooling).
+- `systemd-analyze verify --recursive-errors=no` (systemd 255, meets the
+  documented `≥254` requirement) against all 5 `.service` and 2 `.timer` files
+  in `deploy/systemd/` — zero errors/warnings from any unit, including the one
+  this pass edited.
+- `deploy/cron.d/telemirror-tmp`: manually confirmed the 5 time fields +
+  `root` user field match `/etc/cron.d/*` syntax (not a user crontab, which
+  has no user field), and that the `find` invocation's flags
+  (`-maxdepth 1 -name 'tmp*.mp4' -mmin +180 -delete`) are individually valid.
+  No sandbox execution attempted (destructive-by-design, targets `/tmp`).
+- Re-read `deploy/README.md` in full directly (not from a prior summary) and
+  cross-checked its failure-mode table and unit inventory against the actual
+  current `deploy/systemd/*` files line by line — accurate except for the gap
+  fixed below, now updated.
+
+### Fixed in this pass
+
+- **P2** `deploy/systemd/telemirror-past-courses.service`: had no `OnFailure=`,
+  unlike `telemirror.service`. Traced the failure path by hand: this unit's
+  `Conflicts=telemirror.service` stops the live mirror the moment a course
+  backfill starts; `OnSuccess=telemirror.service` brings it back only on a
+  *successful* finish. If `past_mode.py` instead fails outright — `Restart=
+  on-failure`/`RestartSec=60` exhausts `StartLimitBurst=3` within
+  `StartLimitIntervalSec=600` and the unit settles into `failed` — nothing
+  brings the live mirror back up, and nothing tells anyone: `OnSuccess=` never
+  fires on failure, and this pass's own Batch D fix to `telemirror-health.py`
+  (excluding `ActiveState=inactive` from the "stuck" alert, precisely so a
+  *normal* backfill doesn't page anyone) means the live mirror can now sit
+  silently stopped indefinitely with no alert at all. Added
+  `OnFailure=telemirror-alert@%n.service`, the exact mechanism
+  `telemirror.service` already uses, so a failed backfill pages `TECH_CHANNEL`
+  immediately instead of relying on an operator to notice the mirror is down.
+  `deploy/README.md`'s course-replay section updated to document this and the
+  manual recovery step (`systemctl start telemirror.service`). No automated
+  test possible (systemd unit semantics); verified via
+  `systemd-analyze verify` and by hand-tracing the `Restart=`/`StartLimit*=`/
+  `OnFailure=`/`OnSuccess=` interaction against `telemirror.service`'s already
+  battle-tested pattern.
+- **P3** `deploy/bootstrap.sh`: step counter printed `1/4` for the first of 5
+  steps (steps 2-5 correctly said `.../5`) — a leftover from before a step was
+  added. Fixed to `1/5`.
+
+### Deferred (P3, non-blocking)
+
+- A course backfill that hangs indefinitely without ever exiting (neither
+  succeeding nor reaching `failed`) would still evade both `OnSuccess=`/
+  `OnFailure=` and `telemirror-health.py` (which only watches
+  `telemirror.service`, not `telemirror-past-courses.service`). Not fixed: a
+  `RuntimeMaxSec=` timeout would misfire on a legitimately slow multi-hour
+  `full_history` run, and extending `health.py` to also watch the
+  courses unit's state adds real complexity for a failure mode with no
+  concrete evidence it occurs (past_mode.py has its own FloodWait/
+  MediaDownloadError retry loops that already terminate or propagate). Flagging
+  for awareness rather than guessing at a fix.
+- `telemirror-alert@.service`'s `TimeoutStartSec=60` is not generously above
+  `telemirror/alert.py`'s own worst-case budget (10s journalctl + 20s connect +
+  20s send ≈ 50s) once Python/venv startup overhead is added — plausible to
+  occasionally hit under load. Low impact (an alert-about-a-failure failing
+  doesn't cascade, by design) and no incident evidence; not tuned speculatively.
+
+---
+
+## Phase 3+4 — dead code sweep + SOLID cleanup (whole-tree pass)
+
+### Phase 3 — dead code
+
+Ran `vulture` (min-confidence 0) over `telemirror/`, `skylon_set/`, `main.py`,
+`past_mode.py`, `login.py`, `config.py`, plus manual greps for commented-out
+code blocks and a full cross-check of every `config.py` env/YAML key against
+its consumers. All 9 vulture hits are the same confirmed false positives
+independently re-verified during Batches B/E (`_HACK_DELAY` — read by Telethon
+internally; `hints` import — used only in string type-annotations vulture
+doesn't parse; `file_handle` tuple-unpack — matches upstream Telethon's own
+pattern; `.quiz`/`row_factory` — writes that configure behavior, not values
+ever read back in this codebase; `self._handlers` — kept alive intentionally,
+not read again). No commented-out code found anywhere in the tree. No unused
+config keys found — every `config()`-sourced name is consumed somewhere.
+**Nothing removed — no real dead code found**, beyond what earlier passes
+already deleted (`rename_emoji.py`, `setup_citadel.py`, etc., pre-dating this
+restart).
+
+### Phase 4 — SOLID/DRY
+
+Two candidates identified across the batches, both approved by the project
+owner before implementation, both verified with a new regression test and a
+full green gate:
+
+- **`config.py`**: the YAML and legacy-env branches each parsed a
+  `"chat_id"` / `"chat_id#topic_id"` value with the *identical* 5-line
+  `if "#" in x: ... else: int(x)` snippet, twice per branch (source and
+  target). Extracted to `_parse_chat_topic(value) -> (chat_id, topic_id)`,
+  called from both branches; behavior unchanged (verified: bare id, `#`-suffixed
+  id, and YAML's already-parsed-int case all produce the same result as
+  before). Test: `tests/test_config.py::test_parse_chat_topic_shared_by_yaml_and_env_branches`.
+  The YAML-vs-env branches were deliberately **not** unified further: they have
+  genuinely different feature sets (YAML supports per-direction filters/mode/
+  `past_mode`; env applies one global filter/`past_mode` to every direction),
+  both are documented in README as supported configuration methods, and a
+  deeper merge would be a speculative rewrite for a code path that only runs
+  once at process startup — not "the smallest change that fixes a genuine
+  violation."
+- **`telemirror/mirroring.py` (`Telemirror.__init__`) + `past_mode.py` (`_run`)**:
+  both built an almost-identical `TelegramClient` (same session/API args,
+  same `flood_sleep_threshold=300`, same `parse_mode="markdown"`), differing
+  only in `connection_retries`/`retry_delay` (the live mirror retries
+  indefinitely through an outage — the watchdog decides when to give up;
+  `past_mode.py` is a bounded operator run and gives up after ~1 minute).
+  Extracted to `telemirror/misc/telegram_client.py::build_telegram_client(...)`,
+  keeping the retry policy as caller-supplied parameters so each call site's
+  distinct trade-off is preserved exactly, not merged away. `skylon_set/_common.py::make_client`
+  was deliberately left alone — different shape (generic `**extra_kwargs`
+  passthrough, no baked-in `flood_sleep_threshold`/`parse_mode`, used by five
+  different operator scripts with their own override needs) and out of the
+  approved scope. Tests: `tests/test_telegram_client_factory.py` (parse mode,
+  `flood_sleep_threshold`, and that two callers can independently choose a
+  retry policy).
+
+Both refactors: `pyflakes`/`ruff` clean, full suite green (275 → 279: +1
+`_parse_chat_topic` test, +3 `build_telegram_client` tests), re-ran `vulture`
+afterward with no new findings.
+
+---
+
+## Phase 5 — full English conversion
+
+Translated every remaining Russian string in tracked files: `config.py` (2
+error strings, already fixed in Batch A), `telemirror/mirroring.py` (1
+comment + `on_private_message`'s TECH_CHANNEL notification text),
+`telemirror/alert.py`, `telemirror/health.py`, `past_mode.py` (549 lines,
+was ~100% Russian), all of `skylon_set/*` (`_common.py`,
+`anonymize_groups.py`, `clear_channels.py`, `restrict_saving.py`,
+`sync_pins.py`, `setup_mirrors.py` — 851 lines, the largest and most
+business/brand-specific file), all of `deploy/*` (`bootstrap.sh`,
+`setup-swap.sh`, `cron.d/telemirror-tmp`, all 5 `.service` + 2 `.timer`
+files, `journald.conf.d/telemirror.conf`, `README.md`), the "Output Format"
+section of `skylon_set/telemirror-review-prompt.md`, and the two
+structural/generator comments in `.configs/citadel_courses.config.yml` /
+`.configs/mirror.config.yml`. `REVIEW.md` itself was already fully English
+(confirmed by re-scanning — pass 7-10's authors already wrote it that way).
+Tests: 279 green throughout (no new tests needed — pure text changes),
+`pyflakes`/`ruff` clean after every file, `systemd-analyze verify` re-run
+clean on every edited unit, `bash -n` clean on both edited shell scripts.
+
+### Explicitly NOT translated (product content / functional data, verified case by case)
+
+- `.configs/*.yml`'s `SkipWithKeywordsFilter`/`SkipWithUrlFilter` entries
+  (`"O Λ И M П"`, `"Олимп"`, `"Золотой билет"`, the `t.me/...` bot handles) —
+  literal spam-detection data matched against real incoming message text.
+  Translating these would silently change what the filter actually catches.
+- Brand strings everywhere («⚜️ Цитадель», «🏴‍☠️ DÈ SKLAD»/variants, «Archonum»
+  historical references) — per the Language section's explicit exception.
+- `setup_mirrors.py`'s `_LIVE_DONOR_TITLES`/`_COURSE_DONOR_TITLES` lists —
+  literal real Telegram channel titles (several already Russian, e.g.
+  "Обучение от КОВЧЕГА...", "Activity | Курс для новичков 2024") matched
+  exactly against live dialog titles; translating them would break donor
+  classification outright, not just cosmetics.
+- `README.md` (root) and `tests/test_setup_mirrors_helpers.py` — brand/donor-title
+  references only, same reasoning as above.
+
+### Checkpoints resolved during this phase (asked, not guessed)
+
+- Confirmed with the project owner: no external tooling/saved commands grep
+  specific Russian substrings from `TECH_CHANNEL` alerts, `journalctl`, or
+  operator-script stdout — cleared to translate all log/print text normally.
+  (3 test assertions that checked Russian substrings in alert/log text —
+  `test_health.py` ×2, `test_past_mode.py` ×1 — were updated in lockstep with
+  their source strings.)
+- Confirmed with the project owner: no live Telegram channels currently carry
+  the `setup_mirrors.py` `"[ДУБЛЬ]"` duplicate-marker prefix from a prior run
+  — cleared to translate it to `"[DUPLICATE]"` (the script both writes this
+  marker into real channel titles via `EditTitleRequest` and searches for it
+  on the next run, so a live-state mismatch here would have orphaned
+  previously-marked channels).
+- Confirmed with the project owner: `skylon_set/telemirror-review-prompt.md`'s
+  own `## Language: All output must be in Russian` directive governs a
+  *future, separate* review run and must be preserved as-is; only the
+  document's own English-language instructions and its Russian "Output
+  Format" template section were translated.
+- `skylon_set/telemirror-production-overhaul-prompt.md` (untracked): read in
+  full — already entirely English prose (only a quoted brand-name example
+  contains Cyrillic). Nothing to translate; left untracked for Phase 6 to
+  fold into the history rewrite, per the earlier decision to commit it
+  translated (no-op here since translation isn't needed).
