@@ -1,4 +1,4 @@
-"""Replace 🏴‍☠️ with 🗝 in all Archonum channels/supergroups and normalize spacing."""
+"""Replace 🗝 with ⚜️ in all Archonum channels/supergroups and normalize spacing."""
 
 import asyncio
 import sys
