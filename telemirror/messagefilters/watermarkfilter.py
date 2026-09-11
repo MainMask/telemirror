@@ -14,7 +14,12 @@ from ..watermark.processor import (
     async_stamp_watermark_on_video,
     estimate_stamp_encode_s,
 )
-from ._media import UPLOAD_LIMIT_BYTES, ReuploadCache, source_media_id
+from ._media import (
+    UPLOAD_LIMIT_BYTES,
+    ReuploadCache,
+    download_media_with_retry,
+    source_media_id,
+)
 from .base import FilterAction, FilterResult, MessageFilter
 
 logger = logging.getLogger(__name__)
@@ -153,9 +158,7 @@ class WatermarkRemovalFilter(MessageFilter):
     ):
         """Return the re-uploaded file handle, or None on failure."""
         try:
-            photo_bytes: bytes = await message._client.download_media(
-                message=message, file=bytes
-            )
+            photo_bytes: bytes = await download_media_with_retry(message, file=bytes)
             cleaned = (
                 await async_remove_watermark_from_image(photo_bytes, config)
                 if config.remove_watermark
@@ -191,7 +194,7 @@ class WatermarkRemovalFilter(MessageFilter):
             with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
                 tmp_stamp = f.name
 
-            await message._client.download_media(message=message, file=tmp_in)
+            await download_media_with_retry(message, file=tmp_in)
             removed = (
                 await async_remove_watermark_from_video(tmp_in, config, tmp_out)
                 if config.remove_watermark

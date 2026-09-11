@@ -1,8 +1,16 @@
+import asyncio
 import os
 
+import pytest
+from telethon import errors
 from telethon.tl import types
 
-from telemirror.messagefilters._media import downloaded_tempfile, filename_of
+from telemirror.messagefilters import _media
+from telemirror.messagefilters._media import (
+    download_media_with_retry,
+    downloaded_tempfile,
+    filename_of,
+)
 from tests.conftest import run
 
 
@@ -65,4 +73,107 @@ def test_downloaded_tempfile_cleans_up_on_error():
         run(go())
     except RuntimeError:
         pass
+    assert not os.path.exists(seen["path"])
+
+
+def _retry_msg(client):
+    class Msg:
+        _client = client
+        chat_id = -1001234567890
+        id = 42
+
+    return Msg()
+
+
+def _no_sleep(monkeypatch):
+    async def instant(_delay):
+        pass
+
+    monkeypatch.setattr(_media.asyncio, "sleep", instant)
+
+
+def test_download_retry_succeeds_after_transient_failures(monkeypatch):
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def download_media(self, message, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise (asyncio.TimeoutError() if calls["n"] == 1
+                       else ValueError("Request was unsuccessful 6 time(s)"))
+            return b"payload"
+
+    assert run(download_media_with_retry(_retry_msg(FakeClient()), file=bytes)) == b"payload"
+    assert calls["n"] == 3
+
+
+def test_download_retry_exhausts_and_reraises(monkeypatch):
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def download_media(self, message, **kwargs):
+            calls["n"] += 1
+            raise ConnectionError("dc down")
+
+    with pytest.raises(ConnectionError):
+        run(download_media_with_retry(_retry_msg(FakeClient()), file=bytes))
+    assert calls["n"] == len(_media._DOWNLOAD_RETRY_DELAYS) + 1
+
+
+def test_download_retry_reraises_non_transient_valueerror(monkeypatch):
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def download_media(self, message, **kwargs):
+            calls["n"] += 1
+            raise ValueError("bad file argument")
+
+    with pytest.raises(ValueError, match="bad file argument"):
+        run(download_media_with_retry(_retry_msg(FakeClient()), file=bytes))
+    assert calls["n"] == 1  # deterministic failure — no retry
+
+
+def test_download_retry_does_not_swallow_floodwait(monkeypatch):
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def download_media(self, message, **kwargs):
+            calls["n"] += 1
+            raise errors.FloodWaitError(request=None)
+
+    with pytest.raises(errors.FloodWaitError):
+        run(download_media_with_retry(_retry_msg(FakeClient()), file=bytes))
+    assert calls["n"] == 1  # propagated immediately, no retry
+
+
+def test_downloaded_tempfile_retries_then_yields(monkeypatch):
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def download_media(self, message, file):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise asyncio.TimeoutError()
+            with open(file, "wb") as f:
+                f.write(b"data")
+
+    class Msg:
+        _client = FakeClient()
+        chat_id = -1001234567890
+        id = 7
+
+    seen = {}
+
+    async def go():
+        async with downloaded_tempfile(Msg(), suffix=".bin") as path:
+            seen["path"] = path
+            assert os.path.exists(path)
+
+    run(go())
+    assert calls["n"] == 2
     assert not os.path.exists(seen["path"])

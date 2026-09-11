@@ -1,5 +1,7 @@
 """Shared media helpers for filters that re-upload a message's media."""
 
+import asyncio
+import logging
 import os
 import tempfile
 import time
@@ -10,10 +12,48 @@ from typing import Any, Optional
 from telethon.tl import types
 
 from ..hints import EventMessage
+from ..misc.links import private_message_link
+
+logger = logging.getLogger(__name__)
 
 # Telegram upload limit for accounts without a Premium subscription.
 # Larger files can't be re-uploaded through this session.
 UPLOAD_LIMIT_BYTES = 2 * 1024**3
+
+_DOWNLOAD_RETRY_DELAYS = (15, 45, 90)  # seconds between attempts
+
+
+async def download_media_with_retry(message: EventMessage, **kwargs):
+    """``message._client.download_media(message=message, **kwargs)`` with spaced
+    retries over transient Telegram file-serving errors.
+
+    A Telegram DC hiccup makes ``GetFileRequest`` time out; Telethon's own ``_call``
+    retries its server errors ~6× over ~12s and, with ``raise_last_call_error``
+    off, collapses them into ``ValueError('Request was unsuccessful N time(s)')`` —
+    so that string is the only ValueError worth a slow retry, a bare one is a real
+    bug. FloodWaitError is a deliberate omission: it must reach past_mode's retry
+    wrapper. After the last attempt the exception propagates and the caller keeps
+    its existing fallback.
+    """
+    attempts = len(_DOWNLOAD_RETRY_DELAYS) + 1
+    for i in range(attempts):
+        try:
+            return await message._client.download_media(message=message, **kwargs)
+        except (ConnectionError, asyncio.TimeoutError, ValueError) as e:
+            transient = not isinstance(e, ValueError) or "unsuccessful" in str(e)
+            if not transient or i == attempts - 1:
+                raise
+            delay = _DOWNLOAD_RETRY_DELAYS[i]
+            logger.warning(
+                "media download failed (%s: %s) %s — retry %d/%d in %ds",
+                type(e).__name__,
+                e,
+                private_message_link(message.chat_id, message.id),
+                i + 1,
+                attempts - 1,
+                delay,
+            )
+            await asyncio.sleep(delay)
 
 
 class ReuploadCache:
@@ -81,7 +121,7 @@ async def downloaded_tempfile(message: EventMessage, suffix: str = ""):
     try:
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
             tmp_path = f.name
-        await message._client.download_media(message=message, file=tmp_path)
+        await download_media_with_retry(message, file=tmp_path)
         yield tmp_path
     finally:
         if tmp_path and os.path.exists(tmp_path):
