@@ -119,6 +119,17 @@ def test_video_default_runs_detection(monkeypatch):
     assert calls == {"remove": 1, "stamp": 1}
 
 
+def test_long_video_forwarded_without_watermark(monkeypatch):
+    calls = _video_spies(monkeypatch)
+    msg = _video_message(_Client())
+    msg.media.document.attributes = [
+        types.DocumentAttributeVideo(duration=600, w=2, h=2)
+    ]
+    _, res = _run({}, msg)  # default limit is 300s
+    assert calls == {"remove": 0, "stamp": 0}
+    assert isinstance(res.media, types.MessageMediaDocument)  # unchanged
+
+
 # ── stamp_watermark toggle ───────────────────────────────────────────────────
 
 def test_removal_only_skips_stamp(monkeypatch):
