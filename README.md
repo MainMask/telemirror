@@ -247,21 +247,26 @@ If you deployed manually, move to step 2.
     ```
 </details>
 
-### Locally:
+### Linux (recommended):
+
+Use the provided [Dockerfile](Dockerfile) — it includes all dependencies (ffmpeg, torch, LaMa inpainting) and works out of the box.
+
+### Locally (macOS):
 1. Create and activate python virtual environment
 
     ```bash
-    python -m venv venv
-    source ./venv/Scripts/activate # linux
-    venv\Scripts\activate # windows
+    python3.13 -m venv .venv
+    source ./.venv/bin/activate
     ```
-2. Install dependencies
+2. Install dependencies via [install.sh](install.sh) (handles broken pillow pin in simple-lama-inpainting)
 
     ```bash
-    pip install -r requirements.txt
+    bash install.sh
     ```
 3. Run
 
     ```bash
     python main.py
     ```
+
+> ⚠️ **Note:** Watermark removal (LaMa inpainting) does **not** work on macOS — PyTorch does not publish binary wheels for Intel Mac, and Apple Silicon wheels are unavailable for Python 3.13. Photos are forwarded as-is (without removing the source watermark). Watermark removal works only on Linux via Docker.
