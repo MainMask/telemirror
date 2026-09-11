@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, List, Union
+from typing import Dict, List, Optional, Union
 
 from telethon import TelegramClient, errors, events, utils
 from telethon.sessions import StringSession
@@ -643,6 +643,7 @@ class Mirroring:
         receiver: TelegramClient,
         sender: TelegramClient,
         logger: Union[str, logging.Logger] = None,
+        broadcast_channel: Optional[int] = None,
     ) -> None:
         """Configure channels mirroring
 
@@ -652,23 +653,20 @@ class Mirroring:
             receiver (`TelegramClient`): Message receiver client
             sender (`TelegramClient`): Message sender client, can be same as `receiver`
             logger (`str` | `logging.Logger`, optional): Logger. Defaults to None.
+            broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup.
         """
         self._chat_mapping = chat_mapping
         self._database = database
         self._receiver = receiver
         self._sender = sender
+        self._broadcast_channel = broadcast_channel
 
-        self._handlers = EventHandlers(
-            client=receiver,
-            chats=list(chat_mapping.keys()),
-            processor=EventProcessor(
-                chat_mapping=chat_mapping,
-                database=database,
-                client=sender,
-                logger=logger,
-            ),
+        self._processor = EventProcessor(
+            chat_mapping=chat_mapping,
+            database=database,
+            client=sender,
+            logger=logger,
         )
-
         self._logger = logger
 
     async def run(self: "Mirroring") -> None:
@@ -689,6 +687,80 @@ class Mirroring:
         )
 
         return f"Mirror mapping: \n{mirror_mapping}\nUsing database: {self._database}\n"
+
+    async def _sync_broadcast_channel(
+        self: "Mirroring", client: TelegramClient
+    ) -> None:
+        """Full sync of broadcast channel to all recipient channels/topics on startup.
+
+        - Sends messages missing from DB to all configured targets.
+        - Edits messages already in DB (picks up source edits).
+        - Deletes mirror messages whose originals no longer exist in the source channel.
+        """
+        bc = self._broadcast_channel
+        bc_peer_id = utils.resolve_id(bc)[0]
+        self._logger.info(f"[Sync broadcast]: starting sync for channel#{bc}")
+
+        # 1. Fetch all current source messages (oldest → newest)
+        # Skip MessageService/MessageEmpty — only regular messages can be forwarded
+        source_messages: Dict[int, types.Message] = {}
+        async for msg in client.iter_messages(bc, reverse=True):
+            if isinstance(msg, types.Message):
+                source_messages[msg.id] = msg
+
+        # 2. Remove mirrors for messages deleted from source
+        all_db = await self._database.get_all_messages_for_channel(bc)
+        mirrored_ids = {m.original_id for m in all_db}
+        deleted = list(mirrored_ids - source_messages.keys())
+        if deleted:
+            self._logger.info(
+                f"[Sync broadcast]: deleting {len(deleted)} removed message(s)"
+            )
+            await self._processor.delete_message(bc, deleted)
+            mirrored_ids -= set(deleted)
+
+        # 3. Send missing / edit existing — with album grouping (same as past_mode.py)
+        pending_album: List[types.Message] = []
+        pending_gid: Optional[int] = None
+
+        def _msg_link(msg_id: int) -> str:
+            return f"https://t.me/c/{bc_peer_id}/{msg_id}"
+
+        async def flush_album() -> None:
+            nonlocal pending_album, pending_gid
+            if not pending_album:
+                return
+            first = pending_album[0]
+            if first.id in mirrored_ids:
+                for msg in pending_album:
+                    await self._processor.edit_message(bc, msg, _msg_link(msg.id))
+            else:
+                await self._processor.new_album(bc, pending_album, _msg_link(first.id))
+            pending_album.clear()
+            pending_gid = None
+
+        async def process_single(msg: types.Message) -> None:
+            if msg.id in mirrored_ids:
+                await self._processor.edit_message(bc, msg, _msg_link(msg.id))
+            else:
+                await self._processor.new_message(bc, msg, _msg_link(msg.id))
+
+        for msg in source_messages.values():
+            gid = getattr(msg, "grouped_id", None)
+            if gid is not None:
+                if gid != pending_gid:
+                    await flush_album()
+                    pending_gid = gid
+                pending_album.append(msg)
+            else:
+                await flush_album()
+                await process_single(msg)
+
+        await flush_album()
+
+        self._logger.info(
+            f"[Sync broadcast]: done, {len(source_messages)} message(s) processed"
+        )
 
     async def __connect_client(self: "Mirroring", client: TelegramClient) -> None:
         try:
@@ -718,6 +790,22 @@ class Mirroring:
                 )
 
             self._logger.info(f"Logged in as {utils.get_display_name(me)} ({me.phone})")
+
+            if self._broadcast_channel:
+                try:
+                    await self._sync_broadcast_channel(client)
+                except Exception as e:
+                    self._logger.error(
+                        f"[Sync broadcast]: failed, live mirroring will continue. "
+                        f"{type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+
+            self._handlers = EventHandlers(
+                client=self._receiver,
+                chats=list(self._chat_mapping.keys()),
+                processor=self._processor,
+            )
 
             await client.run_until_disconnected()
         except (errors.UserDeactivatedBanError, errors.UserDeactivatedError):
@@ -751,6 +839,7 @@ class Telemirror:
         api_device_model: str = None,
         api_system_version: str = None,
         api_app_version: str = None,
+        broadcast_channel: Optional[int] = None,
     ):
         """Telemirror
 
@@ -764,6 +853,7 @@ class Telemirror:
             api_device_model (`str`, optional): Telegram API device model. Defaults to `platform.uname().release`
             api_system_version (`str`, optional): Telegram API system version. Defaults to `platform.uname().machine`
             api_app_version (`str`, optional): Telegram API app version. Defaults to `telethon.version.__version__`
+            broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup. Defaults to None.
         """
         patch_input_media_with_spoiler()
         set_album_event_timeout(delay_sec=1.01)
@@ -793,6 +883,7 @@ class Telemirror:
             receiver=recv_client,
             sender=send_client,
             logger=logger,
+            broadcast_channel=broadcast_channel,
         )
 
     async def run(self: "Telemirror") -> None:
