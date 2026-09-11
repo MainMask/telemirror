@@ -94,3 +94,40 @@ def test_purge_sweeps_history_once_and_routes_by_topic():
     assert client.iter_calls == 1  # one pass for both topics, not one per topic
     assert sorted(client.deleted) == [2, 3, 4]  # topics 7 and 9 only
     assert deleted_count == 3
+
+
+def test_run_only_resets_db_state_for_successfully_cleared_channels(monkeypatch):
+    """A purge failure on one channel must not wipe its checkpoint/binding_id —
+    otherwise a later past_mode/live run thinks that channel is clean and
+    re-mirrors everything into content that was never actually deleted."""
+    import contextlib
+    import logging
+
+    good, bad = -9001, -9002
+    mapping = {-1001: {good: [_cfg(topic=None)], bad: [_cfg(topic=None)]}}
+    monkeypatch.setattr(clear_channels, "CHAT_MAPPING", mapping)
+    monkeypatch.setattr(clear_channels, "channels_for_full_clear", lambda targets: [])
+
+    async def fake_purge(client, channel_id, tids, dry_run, logger):
+        if channel_id == bad:
+            raise RuntimeError("boom")
+        return 5
+
+    reset_calls = []
+
+    async def fake_reset_db_state(cleared_targets, dry_run, logger):
+        reset_calls.append(dict(cleared_targets))
+
+    @contextlib.asynccontextmanager
+    async def fake_open_client(logger, **kw):
+        yield (object(), object())
+
+    monkeypatch.setattr(clear_channels, "purge", fake_purge)
+    monkeypatch.setattr(clear_channels, "_reset_db_state", fake_reset_db_state)
+    monkeypatch.setattr(clear_channels, "open_client", fake_open_client)
+
+    # dry_run=True: purge() still runs (and can still fail) without the
+    # interactive y/N confirmation prompt blocking the test on stdin.
+    run(clear_channels._run(logging.getLogger("t"), True))
+
+    assert reset_calls == [{good: {None}}]

@@ -2,7 +2,7 @@ import datetime
 
 import pytest
 
-from config import DirectionConfig, PastModeConfig, _channel_id
+from config import DirectionConfig, PastModeConfig, _channel_id, _parse_chat_topic
 from telemirror.messagefilters import EmptyMessageFilter
 
 
@@ -44,6 +44,16 @@ def test_past_mode_since_date_coercion():
         cfg = PastModeConfig(since_date=raw)
         assert isinstance(cfg.since_date, datetime.datetime)
         assert cfg.since_date == expected
+
+
+def test_parse_chat_topic_shared_by_yaml_and_env_branches():
+    """Extracted from duplicated YAML/env parsing (Phase 4 DRY cleanup) — both
+    branches must keep exactly this behavior: plain id -> (id, None), a
+    '#'-suffixed string -> (id, topic_id), and a YAML-native int passes
+    through unchanged (no '#' possible on a non-string)."""
+    assert _parse_chat_topic("-1001234") == (-1001234, None)
+    assert _parse_chat_topic("-1001234#5") == (-1001234, 5)
+    assert _parse_chat_topic(-1001234) == (-1001234, None)  # YAML bare int
 
 
 def test_direction_config_defaults():

@@ -39,7 +39,7 @@ def _save_state(state: dict) -> None:
     try:
         _STATE.write_text(json.dumps(state))
     except OSError as e:
-        print(f"telemirror.health: не смог записать состояние: {e}", file=sys.stderr)
+        print(f"telemirror.health: failed to write state: {e}", file=sys.stderr)
 
 
 def check() -> list[str]:
@@ -55,13 +55,19 @@ def check() -> list[str]:
     delta = nrestarts - prev.get("nrestarts", nrestarts)
     if delta >= _FLAP_THRESHOLD:
         problems.append(
-            f"⚠️ {_UNIT}: {delta} рестарт(ов) за интервал (всего {nrestarts}) — флапает"
+            f"⚠️ {_UNIT}: {delta} restart(s) in this interval (total {nrestarts}) — flapping"
         )
     if active == "failed":
         problems.append(f"⚠️ {_UNIT}: ActiveState=failed")
-    # Two consecutive checks stuck outside 'active' = not just a transient restart.
-    if active != "active" and prev.get("active") not in (None, "active"):
-        problems.append(f"⚠️ {_UNIT}: не active два раза подряд (сейчас {active})")
+    # Two consecutive checks stuck outside 'active'/'inactive' = not just a
+    # transient restart. 'inactive' is excluded: Restart=always means a crashing
+    # unit cycles through activating/failed and essentially never settles into
+    # inactive on its own — a stable 'inactive' means systemd stopped it on
+    # purpose (the telemirror-past-courses.service Conflicts= switch-over, or an
+    # operator's manual stop), not a stuck unit.
+    _settled = (None, "active", "inactive")
+    if active not in _settled and prev.get("active") not in _settled:
+        problems.append(f"⚠️ {_UNIT}: not active twice in a row (currently {active})")
 
     _save_state({"nrestarts": nrestarts, "active": active})
     return problems

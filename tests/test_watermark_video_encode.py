@@ -5,7 +5,11 @@ whole call, so nothing else exercises the command build)."""
 import pytest
 
 from telemirror.watermark import processor
-from telemirror.watermark.processor import WatermarkConfig, stamp_watermark_on_video
+from telemirror.watermark.processor import (
+    WatermarkConfig,
+    remove_watermark_from_video,
+    stamp_watermark_on_video,
+)
 
 
 class _Cap:
@@ -67,3 +71,22 @@ def test_ffmpeg_timeout_scales_with_duration(monkeypatch):
 def test_bad_preset_rejected_at_config_time():
     with pytest.raises(ValueError, match="x264 preset"):
         WatermarkConfig(stamp_video_preset="fastest")
+
+
+def test_remove_watermark_timeout_scales_with_duration(monkeypatch):
+    """`remove_watermark_from_video`'s delogo re-encode is not cheaper than the
+    stamp step (no `-c:v copy`), so it must use the same duration-scaled budget
+    instead of a flat 300s that a long clip's real ffmpeg run can outlast (see
+    deploy/README.md's measured 6-13 min stamp time on the production host)."""
+    seen = _capture_cmd(monkeypatch)
+    monkeypatch.setattr(_Cap, "set", lambda self, prop, value: None, raising=False)
+
+    class _Frame:
+        shape = (1080, 1920)  # fh, fw
+
+    monkeypatch.setattr(_Cap, "read", lambda self: (True, _Frame()), raising=False)
+    monkeypatch.setattr(processor, "_detect_watermark", lambda frame, config: (10, 10, 50, 20))
+
+    assert remove_watermark_from_video("in.mp4", WatermarkConfig(), "out.mp4") is True
+    # 120 s clip (3600 frames / 30 fps) → max(300, 120*4 + 120) = 600
+    assert seen["timeout"] == 600.0

@@ -236,6 +236,7 @@ def remove_watermark_from_video(
 ) -> bool:
     cap = cv2.VideoCapture(video_path)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
     if total > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(total * 0.1))
     ok, frame = cap.read()
@@ -258,8 +259,11 @@ def remove_watermark_from_video(
     h = min(fh - y - 1, h + 2 * d)
 
     delogo = f"delogo=x={x}:y={y}:w={w}:h={h}"
+    duration = total / fps if fps > 0 else 0.0
     cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", delogo, "-c:a", "copy", output_path]
-    proc = subprocess.run(cmd, capture_output=True, timeout=300, check=False)
+    proc = subprocess.run(
+        cmd, capture_output=True, timeout=_ffmpeg_timeout(duration), check=False
+    )
     if proc.returncode != 0:
         logger.error(
             "ffmpeg delogo failed (code %d): %s",

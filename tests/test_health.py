@@ -26,7 +26,7 @@ def test_flapping_alerts(monkeypatch, tmp_path):
           {"NRestarts": "9", "ActiveState": "active"},
           prev={"nrestarts": 4, "active": "active"})
     problems = health.check()
-    assert any("флапает" in p for p in problems)
+    assert any("flapping" in p for p in problems)
 
 
 def test_failed_state_alerts(monkeypatch, tmp_path):
@@ -40,7 +40,7 @@ def test_stuck_not_active_twice_alerts(monkeypatch, tmp_path):
     _wire(monkeypatch, tmp_path,
           {"NRestarts": "2", "ActiveState": "activating"},
           prev={"nrestarts": 2, "active": "activating"})
-    assert any("два раза подряд" in p for p in health.check())
+    assert any("twice in a row" in p for p in health.check())
 
 
 def test_first_run_seeds_state_without_alerting(monkeypatch, tmp_path):
@@ -48,3 +48,18 @@ def test_first_run_seeds_state_without_alerting(monkeypatch, tmp_path):
                   {"NRestarts": "7", "ActiveState": "active"})
     assert health.check() == []
     assert json.loads(state.read_text())["nrestarts"] == 7
+
+
+def test_deliberate_stop_for_course_backfill_does_not_alert(monkeypatch, tmp_path):
+    """telemirror-past-courses.service's `Conflicts=telemirror.service` cleanly
+    stops the live mirror (ActiveState=inactive) for the whole backfill, which
+    can run for hours — this must not be mistaken for a stuck unit."""
+    _wire(monkeypatch, tmp_path,
+          {"NRestarts": "2", "ActiveState": "inactive"},
+          prev={"nrestarts": 2, "active": "active"})
+    assert health.check() == []
+
+    _wire(monkeypatch, tmp_path,
+          {"NRestarts": "2", "ActiveState": "inactive"},
+          prev={"nrestarts": 2, "active": "inactive"})
+    assert health.check() == []

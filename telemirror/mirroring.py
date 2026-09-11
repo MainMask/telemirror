@@ -5,7 +5,6 @@ import time
 from typing import Awaitable, Callable, Dict, List, Optional, Union
 
 from telethon import TelegramClient, errors, events, utils
-from telethon.sessions import StringSession
 from telethon.tl import functions, types
 
 from config import DirectionConfig
@@ -22,6 +21,7 @@ from telemirror.misc import sdnotify
 from telemirror.misc.links import private_message_link
 from telemirror.misc.lrucache import LRUCache
 from telemirror.misc.message_groups import iter_message_groups
+from telemirror.misc.telegram_client import build_telegram_client
 from telemirror.misc.topics import topic_id_of
 from telemirror.mixins import CopyEventMessage, UpdateEntitiesParams
 from telemirror.storage import Database, MirrorMessage
@@ -896,7 +896,7 @@ class TelegramLogHandler(logging.Handler):
         """Runs in the event-loop thread — dict ops are safe here."""
         self._prune_cooldowns()
         if self._cooldown_until.get(text, 0) > self._loop.time():
-            return  # в окне подавления
+            return  # within the suppression window
 
         self._counts[text] = self._counts.get(text, 0) + 1
 
@@ -964,8 +964,8 @@ class EventHandlers:
         # sender-controlled — collapse whitespace and cap length so it can't
         # break or spam the tech-channel message.
         name = " ".join((utils.get_display_name(sender_obj) or "").split())[:100]
-        username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "нет"
-        msg = f"📩 Личное сообщение от {name} ({username})"
+        username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "none"
+        msg = f"📩 Private message from {name} ({username})"
         await self._sender.send_message(self._tech_channel, msg)
 
     def event_message_link(self: "EventHandlers", event: EventLike) -> str:
@@ -1279,6 +1279,23 @@ class Mirroring:
                 sdnotify.watchdog_loop(self.__watchdog_probe(client))
             )
 
+            # Register handlers BEFORE the broadcast sync: Telethon dispatches an
+            # update to whatever is in `_event_builders` at the moment it arrives,
+            # not a snapshot from when it was received — a handler added only
+            # after the (potentially long) sync finishes would silently and
+            # permanently miss any live update on ANY mirrored source channel
+            # that arrived during the sync window. The trade-off this accepts is
+            # narrower: a live broadcast-channel post arriving mid-sync could be
+            # both dispatched live and picked up by the sync's own history walk,
+            # sending it twice — a visible duplicate, not a silent loss.
+            self._handlers = EventHandlers(
+                client=self._receiver,
+                chats=list(self._chat_mapping.keys()),
+                processor=self._processor,
+                sender=self._sender,
+                tech_channel=self._tech_channel,
+            )
+
             if self._broadcast_channel:
                 try:
                     await self._sync_broadcast_channel(client)
@@ -1288,14 +1305,6 @@ class Mirroring:
                         f"{type(e).__name__}: {e}",
                         exc_info=True,
                     )
-
-            self._handlers = EventHandlers(
-                client=self._receiver,
-                chats=list(self._chat_mapping.keys()),
-                processor=self._processor,
-                sender=self._sender,
-                tech_channel=self._tech_channel,
-            )
 
             await client.run_until_disconnected()
         except (errors.UserDeactivatedBanError, errors.UserDeactivatedError):
@@ -1426,23 +1435,20 @@ class Telemirror:
         """
         set_album_event_timeout(delay_sec=1.01)
 
-        # Preparation for splitting receiver and sender
-        recv_client = send_client = TelegramClient(
-            StringSession(session_string),
+        # Preparation for splitting receiver and sender. connection_retries=1000
+        # keeps auto-reconnecting through a long outage instead of exiting; the
+        # watchdog (Mirroring.WATCHDOG_DISCONNECT_GRACE_SEC) is what bounds how
+        # long we wait before a fresh-process restart.
+        recv_client = send_client = build_telegram_client(
+            session_string,
             api_id,
             api_hash,
             device_model=api_device_model,
             system_version=api_system_version,
             app_version=api_app_version,
-            flood_sleep_threshold=300,
-            # Keep auto-reconnecting through a long outage instead of exiting;
-            # the watchdog (Mirroring.WATCHDOG_DISCONNECT_GRACE_SEC) is what
-            # bounds how long we wait before a fresh-process restart.
             connection_retries=1000,
             retry_delay=5,
         )
-        # Set up default parse mode as markdown
-        recv_client.parse_mode = send_client.parse_mode = "markdown"
 
         if isinstance(logger, str):
             logger = logging.getLogger(logger)

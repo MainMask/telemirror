@@ -1,54 +1,54 @@
-# deploy/ — запуск telemirror на VPS под systemd
+# deploy/ — running telemirror on a VPS under systemd
 
-Обвязка для постоянной (24/7) работы живого зеркала и разового прогона истории
-курсов. Рассчитана на bare-metal Ubuntu с systemd (не Docker; для Docker есть
-`docker-compose.yaml` в корне).
+The wiring for keeping the live mirror running 24/7 and for a one-off course
+history replay. Built for bare-metal Ubuntu with systemd (not Docker; a
+`docker-compose.yaml` for Docker lives at the repo root).
 
-## Что внутри
+## What's inside
 
-| Файл | Назначение |
+| File | Purpose |
 |---|---|
-| `bootstrap.sh` | одноразовый установщик: swap + симлинки юнитов + журнал + cron + `daemon-reload` |
-| `setup-swap.sh` | идемпотентный ресайз `/swapfile` до 2 ГБ и `vm.swappiness=10` |
-| `systemd/telemirror.service` | живое зеркало (`main.py`), 24/7 |
-| `systemd/telemirror-past-courses.service` | разовый прогон истории курсов (`past_mode.py`) |
-| `systemd/telemirror-alert@.service` | `OnFailure=`: шлёт в `TECH_CHANNEL`, что юнит сдался |
-| `systemd/telemirror-health.{timer,service}` | раз в 10 мин: алерт если зеркало флапает или зависло не-active |
-| `systemd/telemirror-restart.{timer,service}` | чистый рестарт зеркала раз в сутки (04:00) |
-| `systemd/journald.conf.d/telemirror.conf` | `SystemMaxUse=500M` — журнал не забьёт `/var` |
-| `cron.d/telemirror-tmp` | ежечасная подчистка осиротевших `/tmp/tmp*.mp4` |
+| `bootstrap.sh` | one-time installer: swap + unit symlinks + journal + cron + `daemon-reload` |
+| `setup-swap.sh` | idempotent resize of `/swapfile` to 2 GB and `vm.swappiness=10` |
+| `systemd/telemirror.service` | the live mirror (`main.py`), 24/7 |
+| `systemd/telemirror-past-courses.service` | one-off course history replay (`past_mode.py`) |
+| `systemd/telemirror-alert@.service` | `OnFailure=`: tells `TECH_CHANNEL` that a unit gave up |
+| `systemd/telemirror-health.{timer,service}` | every 10 min: alerts if the mirror is flapping or stuck non-active |
+| `systemd/telemirror-restart.{timer,service}` | a clean restart of the mirror once a day (04:00) |
+| `systemd/journald.conf.d/telemirror.conf` | `SystemMaxUse=500M` — the journal won't fill up `/var` |
+| `cron.d/telemirror-tmp` | hourly cleanup of orphaned `/tmp/tmp*.mp4` files |
 
-## Требования
+## Requirements
 
-- Ubuntu + systemd ≥ 254 (нужны `OnSuccess=`, `RestartSteps=`/`RestartMaxDelaySec=`).
-- Python-venv в `/root/telemirror/.venv` (`bash install.sh` из корня репо).
-- `ffmpeg` в `PATH` (`apt install ffmpeg`) — для водяного знака на видео.
-- PostgreSQL локально (`postgresql.service`), БД и роль `telemirror` созданы,
-  параметры совпадают с `.env`.
-- `.env` в корне репо заполнен (`API_ID`, `API_HASH`, `SESSION_STRING`,
-  `DB_*`). `SESSION_STRING` берётся из `python login.py`. Для алертов о падении
-  нужен `TECH_CHANNEL` (id канала/чата, куда бот пишет).
-- Если сеть поднимается через systemd-networkd — включи
-  `systemctl enable systemd-networkd-wait-online.service`, иначе
-  `network-online.target` не блокирует старт (не критично: telethon
-  переподключается сам, `Restart=always` подстрахует).
+- Ubuntu + systemd ≥ 254 (needs `OnSuccess=`, `RestartSteps=`/`RestartMaxDelaySec=`).
+- A Python venv at `/root/telemirror/.venv` (`bash install.sh` from the repo root).
+- `ffmpeg` in `PATH` (`apt install ffmpeg`) — for the video watermark.
+- PostgreSQL running locally (`postgresql.service`), with the `telemirror`
+  database and role created and matching `.env`.
+- `.env` filled in at the repo root (`API_ID`, `API_HASH`, `SESSION_STRING`,
+  `DB_*`). `SESSION_STRING` comes from `python login.py`. Crash alerts need
+  `TECH_CHANNEL` (the id of the channel/chat the bot writes to).
+- If networking comes up through systemd-networkd — enable
+  `systemctl enable systemd-networkd-wait-online.service`, otherwise
+  `network-online.target` won't block the start (not critical: telethon
+  reconnects on its own, and `Restart=always` covers the rest).
 
-## Установка
+## Installation
 
 ```bash
 cd /root/telemirror
 sudo deploy/bootstrap.sh
 ```
 
-Скрипт: увеличит swap, поставит симлинки юнитов в `/etc/systemd/system/`,
-положит cron-файл, сделает `daemon-reload`. Сервисы **не запускает** — это
-делается вручную ниже.
+The script: grows swap, installs unit symlinks into `/etc/systemd/system/`,
+drops the cron file, runs `daemon-reload`. It does **not** start the
+services — that's done by hand below.
 
-Юниты — симлинки на репо, cron-файл — копия. Если правишь
-`deploy/cron.d/telemirror-tmp` — прогони `bootstrap.sh` ещё раз (или скопируй
-руками); если правишь юниты — хватит `git pull` + `systemctl daemon-reload`.
+Units are symlinks into the repo, the cron file is a copy. If you edit
+`deploy/cron.d/telemirror-tmp`, re-run `bootstrap.sh` (or copy it by hand); if
+you edit a unit, `git pull` + `systemctl daemon-reload` is enough.
 
-## Живое зеркало
+## Live mirror
 
 ```bash
 systemctl status telemirror.service | grep -q masked && systemctl unmask telemirror.service
@@ -56,79 +56,90 @@ systemctl enable --now telemirror.service
 journalctl -u telemirror.service -f
 ```
 
-Читает `.configs/mirror.config.yml`. При старте ресинкается по таблице
-`binding_id`, поэтому краш не теряет сообщения.
+Reads `.configs/mirror.config.yml`. Resyncs against the `binding_id` table on
+startup, so a crash doesn't lose messages.
 
-### Как оно держится 24/7
+### How it stays up 24/7
 
-| Отказ | Что происходит |
+| Failure | What happens |
 |---|---|
-| Краш / OOM-kill / чистый выход | `Restart=always`, бэкофф 10s → 120s |
-| Обрыв сети / сбой Telegram DC | telethon переподключается сам (`connection_retries=1000`); watchdog терпит отключённое состояние до **30 мин**, дольше — рестарт свежим процессом |
-| **Мёртвый receive-loop / висящий RPC** | `Type=notify` + `WatchdogSec=600`: watchdog-таск каждые 300 с делает `updates.GetState` round-trip (допускает 3 сбоя подряд, FloodWait — ок); не отвечает → `WATCHDOG=1` не уходит → systemd шлёт `SIGTERM` и рестартит |
-| Завис именно dispatch апдейтов (RPC жив) | не отличимо от тихой ленты → авто-рестарта нет; после 2 ч без единого апдейта — `warning` в `TECH_CHANNEL` |
-| Быстрый crash-loop (<~4 мин/итерация) | 15 падений за час → `failed` → `OnFailure=telemirror-alert@` в `TECH_CHANNEL`, сервис стоит до `systemctl reset-failed && systemctl start` |
-| Медленный crash-loop / застрял не-`active` | `telemirror-health.timer` (10 мин): алерт в `TECH_CHANNEL` при ≥3 рестартах за интервал или `ActiveState≠active` два раза подряд |
-| Бан аккаунта / отзыв сессии | попадает в crash-loop выше → алерт; чинить через `python login.py` |
-| Медленная утечка памяти | `telemirror-restart.timer` — чистый рестарт в 04:00 |
+| Crash / OOM-kill / clean exit | `Restart=always`, backoff 10s → 120s |
+| Network drop / Telegram DC failure | telethon reconnects on its own (`connection_retries=1000`); the watchdog tolerates being disconnected for up to **30 min**, longer than that triggers a restart with a fresh process |
+| **Dead receive loop / hung RPC** | `Type=notify` + `WatchdogSec=600`: a watchdog task does an `updates.GetState` round-trip every 300s (tolerates 3 failures in a row, a FloodWait is fine); no response → `WATCHDOG=1` stops going out → systemd sends `SIGTERM` and restarts it |
+| Update dispatch itself is stuck (RPC still alive) | indistinguishable from a genuinely quiet feed → no auto-restart; after 2h with no update at all — a `warning` to `TECH_CHANNEL` |
+| Fast crash-loop (<~4 min/iteration) | 15 crashes in an hour → `failed` → `OnFailure=telemirror-alert@` to `TECH_CHANNEL`, the service stays down until `systemctl reset-failed && systemctl start` |
+| Slow crash-loop / stuck non-`active` | `telemirror-health.timer` (10 min): alerts `TECH_CHANNEL` on ≥3 restarts in the interval, or `ActiveState≠active` twice in a row |
+| Account ban / session revoked | falls into the crash-loop path above → alert; fix via `python login.py` |
+| Slow memory leak | `telemirror-restart.timer` — a clean restart at 04:00 |
 
-Проверки:
+Checks:
 ```bash
 systemctl show telemirror.service -p Type -p WatchdogUSec -p NRestarts
 systemctl list-timers 'telemirror-*'
-python -m telemirror.health        # разовый прогон проверки
-# симуляция зависания — через ~10 мин ждём watchdog-рестарт:
+python -m telemirror.health        # a one-off check
+# simulate a hang — wait ~10 min for the watchdog restart:
 systemctl kill -s STOP telemirror.service
 ```
 
-## Прогон истории курсов
+## Course history replay
 
 ```bash
 systemctl start telemirror-past-courses.service
 journalctl -u telemirror-past-courses.service -f
 ```
 
-- Конфиг подставляется из `.configs/citadel_courses.config.yml` через
-  `YAML_CONFIG_ENV` (файл `main.py` сам не читает).
-- `Conflicts=telemirror.service`: старт бэкофилла **останавливает** живое
-  зеркало (общий `SESSION_STRING`), по успешному завершению `OnSuccess=`
-  поднимает его обратно.
-- При загрузке сервера юнит не стартует (нет `[Install]`).
-- `past_mode.py` держит чекпоинты в БД — прерывание резюмится с места. Полный
-  сброс истории и получателей — `skylon_set/clear_channels.py`.
+- The config is injected from `.configs/citadel_courses.config.yml` via
+  `YAML_CONFIG_ENV` (`main.py` itself never reads this file).
+- `Conflicts=telemirror.service`: starting the backfill **stops** the live
+  mirror (shared `SESSION_STRING`); `OnSuccess=` brings it back up once the
+  backfill finishes successfully.
+- If the backfill fails outright (after `Restart=on-failure`/`RestartSec=60`
+  and `StartLimitBurst=3` exhaust within 10 minutes, the unit goes to
+  `failed`) — `OnFailure=` alerts `TECH_CHANNEL`, same as `telemirror.service`.
+  Without this, the live mirror would stay silently stopped by `Conflicts=`:
+  `OnSuccess=` never fires, and `telemirror-health.timer` deliberately doesn't
+  treat `inactive` as stuck (it's the normal state during a backfill) — bring
+  the mirror back up by hand (`systemctl start telemirror.service`) once
+  you've fixed whatever caused the failure.
+- The unit doesn't start on boot (no `[Install]`).
+- `past_mode.py` keeps checkpoints in the DB — an interruption resumes from
+  where it left off. A full reset of history and recipients —
+  `skylon_set/clear_channels.py`.
 
-## Память и мониторинг
+## Memory and monitoring
 
-Сервер тесный (2 ГБ RAM). Юниты ограничены `MemoryHigh=1100M` / `MemoryMax=1400M`
-— при утечке ядро прибьёт только telemirror, не случайный процесс.
+The server is tight on RAM (2 GB). Units are capped at `MemoryHigh=1100M` /
+`MemoryMax=1400M` — a leak only kills telemirror, not some unrelated process.
 
 ```bash
 systemctl status telemirror.service
-systemd-cgtop                       # потребление по cgroup
+systemd-cgtop                       # per-cgroup usage
 free -h
-journalctl -k | grep -i oom        # были ли OOM-kill
+journalctl -k | grep -i oom        # any OOM-kills?
 ```
 
-Не держи VS Code Remote Server запущенным в проде — он ест ~1.2 ГБ RAM и
-раньше провоцировал OOM.
+Don't leave the VS Code Remote Server running in production — it uses
+~1.2 GB RAM and has caused OOM before.
 
-## Обновление
+## Updating
 
 ```bash
 cd /root/telemirror && git pull
-systemctl daemon-reload            # если менялись файлы в deploy/systemd/
+systemctl daemon-reload            # if files under deploy/systemd/ changed
 systemctl restart telemirror.service
 ```
 
-## Заметки
+## Notes
 
-- **Одно ядро CPU.** Водяной знак на видео = полное перекодирование: ролик
-  ≤ 5 мин (`stamp_video_max_duration_s` в `mirror.config.yml`) пинит ядро на
-  6–13 минут, на это время растёт задержка пересылки остального. Если критично —
-  снизь порог до 120–180 или ставь 2+ ядра. Видео длиннее порога уходят как
-  оригинал, без знака.
-- **Строгий сэндбоксинг не включён** (`ProtectHome`, `ProtectSystem=strict`):
-  ломает запись `__pycache__` в `/root/telemirror`, выигрыш для solo-бота мал.
-  Оставлены `PrivateTmp`, `NoNewPrivileges`, `ProtectSystem=full`.
-- **cron-очистка `/tmp`** нужна в основном для ручных запусков `past_mode.py`
-  вне systemd — у юнитов `PrivateTmp=true` подчищает темпы сам.
+- **Single CPU core.** The video watermark is a full re-encode: a clip
+  ≤ 5 min (`stamp_video_max_duration_s` in `mirror.config.yml`) pins the core
+  for 6-13 minutes, and forwarding everything else gets delayed for that
+  long. If that matters, lower the threshold to 120-180s or provision 2+
+  cores. Videos longer than the threshold are forwarded as-is, unwatermarked.
+- **Strict sandboxing is not enabled** (`ProtectHome`, `ProtectSystem=strict`):
+  it breaks `__pycache__` writes under `/root/telemirror`, and the payoff for
+  a solo bot is small. `PrivateTmp`, `NoNewPrivileges`, `ProtectSystem=full`
+  are kept.
+- **The `/tmp` cleanup cron** mainly matters for manual `past_mode.py` runs
+  outside systemd — the units themselves clean up their temp files via
+  `PrivateTmp=true`.

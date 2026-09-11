@@ -1,12 +1,17 @@
 [Unit]
-Description=telemirror — прогон истории курсов Цитадель
+Description=telemirror — Citadel course history replay
 Documentation=https://github.com/MainMask/telemirror
 After=network-online.target postgresql.service
 Wants=network-online.target
-# Делит SESSION_STRING с живым зеркалом — старт бэкофилла останавливает live…
+# Shares SESSION_STRING with the live mirror — starting the backfill stops the live one…
 Conflicts=telemirror.service
-# …а по успешному завершению live поднимается обратно автоматически.
+# …and on a successful finish, the live one comes back up automatically.
 OnSuccess=telemirror.service
+# Without this, a backfill failure (after exhausting the Restart= below)
+# leaves the live mirror silently stopped by the Conflicts= above forever —
+# OnSuccess= won't fire, and telemirror-health.timer doesn't treat inactive
+# as stuck (that's the normal state during a backfill).
+OnFailure=telemirror-alert@%n.service
 StartLimitIntervalSec=600
 StartLimitBurst=3
 
@@ -14,8 +19,8 @@ StartLimitBurst=3
 Type=simple
 WorkingDirectory=/root/telemirror
 ExecStart=/bin/sh -c 'YAML_CONFIG_ENV="$(cat .configs/citadel_courses.config.yml)" exec .venv/bin/python -u past_mode.py'
-# Переживает обрыв сети (past_mode резюмится с чекпоинта); при устойчивом
-# падении burst-лимит выше останавливает юнит на разбор.
+# Survives a network drop (past_mode resumes from its checkpoint); on a
+# persistent failure, the burst limit above stops the unit for a closer look.
 Restart=on-failure
 RestartSec=60
 
@@ -27,4 +32,4 @@ NoNewPrivileges=true
 ProtectSystem=full
 Nice=10
 
-# Нет [Install] — юнит запускается вручную (systemctl start), не при загрузке.
+# No [Install] — the unit is started manually (systemctl start), not at boot.

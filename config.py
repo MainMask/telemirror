@@ -89,6 +89,18 @@ def _channel_id(value, name: str) -> Optional[int]:
         ) from None
 
 
+def _parse_chat_topic(value) -> tuple:
+    """Split a ``chat_id`` or ``chat_id#topic_id`` value into ``(chat_id, topic_id)``.
+
+    YAML may already hand back a plain ``int`` for a bare id; the env-mode
+    format is always a string.
+    """
+    if isinstance(value, str) and "#" in value:
+        chat_id, topic_id = value.split("#")
+        return int(chat_id), int(topic_id)
+    return int(value), None
+
+
 # telegram app id
 API_ID: str = config("API_ID")
 # telegram app hash
@@ -192,7 +204,7 @@ class PastModeConfig:
         n = sum([self.since_date is not None, self.last_n is not None, self.full_history])
         if n != 1:
             raise ValueError(
-                f"PastModeConfig: ожидается ровно одна стратегия (since_date/last_n/full_history), задано {n}"
+                f"PastModeConfig: expected exactly one strategy (since_date/last_n/full_history), got {n}"
             )
 
 
@@ -287,20 +299,10 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
         targets: list = direction["to"]
 
         for source in sources:
-            source_topic_id = None
-            if isinstance(source, str):
-                if "#" in source:
-                    source, source_topic_id = map(int, source.split("#"))
-                else:
-                    source = int(source)
+            source, source_topic_id = _parse_chat_topic(source)
 
             for target in targets:
-                target_topic_id = None
-                if isinstance(target, str):
-                    if "#" in target:
-                        target, target_topic_id = map(int, target.split("#"))
-                    else:
-                        target = int(target)
+                target, target_topic_id = _parse_chat_topic(target)
 
                 CHAT_MAPPING.setdefault(source, {}).setdefault(target, []).append(
                     DirectionConfig(
@@ -350,18 +352,10 @@ else:
 
         for sources, targets in matches:
             for source in filter(None, (s.strip() for s in sources.split(","))):
-                source_topic_id = None
-                if "#" in source:
-                    source, source_topic_id = map(int, source.split("#"))
-                else:
-                    source = int(source)
+                source, source_topic_id = _parse_chat_topic(source)
 
                 for target in filter(None, (s.strip() for s in targets.split(","))):
-                    target_topic_id = None
-                    if "#" in target:
-                        target, target_topic_id = map(int, target.split("#"))
-                    else:
-                        target = int(target)
+                    target, target_topic_id = _parse_chat_topic(target)
 
                     mapping.setdefault(source, {}).setdefault(target, []).append(
                         DirectionConfig(
@@ -410,7 +404,7 @@ else:
             return PastModeConfig(since_date=datetime.fromisoformat(v[len("since_date="):]))
         if v.startswith("last_n="):
             return PastModeConfig(last_n=int(v[len("last_n="):]))
-        raise ValueError(f"PAST_MODE: неверный формат: {v!r}")
+        raise ValueError(f"PAST_MODE: invalid format: {v!r}")
 
     _GLOBAL_PAST_MODE: Optional[PastModeConfig] = _parse_past_mode_env(_PAST_MODE_STR)
 

@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Одноразовая установка systemd-обвязки telemirror на VPS. Идемпотентно.
-# Юниты ставятся симлинками на файлы в репозитории — `git pull` + daemon-reload
-# их обновляет.
+# One-time systemd setup for telemirror on a VPS. Idempotent.
+# Units are installed as symlinks to files in the repo — `git pull` +
+# daemon-reload updates them.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Нужен root: sudo $0" >&2
+    echo "Root required: sudo $0" >&2
     exit 1
 fi
 
-echo "== 1/4 swap =="
+echo "== 1/5 swap =="
 "$REPO_DIR/deploy/setup-swap.sh"
 
 echo
-echo "== 2/5 systemd-юниты =="
+echo "== 2/5 systemd units =="
 for unit in \
     telemirror.service \
     telemirror-past-courses.service \
@@ -29,40 +29,40 @@ for unit in \
 done
 
 echo
-echo "== 3/5 лимит журнала =="
+echo "== 3/5 journal limit =="
 install -d /etc/systemd/journald.conf.d
 install -m 644 -o root -g root \
     "$REPO_DIR/deploy/systemd/journald.conf.d/telemirror.conf" \
     /etc/systemd/journald.conf.d/telemirror.conf
 echo "  /etc/systemd/journald.conf.d/telemirror.conf"
-# persistent-журнал: без /var/log/journal journald пишет в tmpfs и SystemMaxUse
-# игнорируется.
+# Persistent journal: without /var/log/journal, journald writes to tmpfs and
+# SystemMaxUse is ignored.
 install -d -g systemd-journal -m 2755 /var/log/journal
 systemctl restart systemd-journald
 
 echo
-echo "== 4/5 cron-очистка /tmp =="
+echo "== 4/5 /tmp cleanup cron =="
 install -m 644 -o root -g root \
     "$REPO_DIR/deploy/cron.d/telemirror-tmp" /etc/cron.d/telemirror-tmp
 echo "  /etc/cron.d/telemirror-tmp"
 
 echo
-echo "== 5/5 daemon-reload + таймеры =="
+echo "== 5/5 daemon-reload + timers =="
 systemctl daemon-reload
 systemctl enable --now telemirror-restart.timer telemirror-health.timer
-echo "  telemirror-restart.timer, telemirror-health.timer включены и запущены"
+echo "  telemirror-restart.timer, telemirror-health.timer enabled and started"
 
 cat <<'EOF'
 
-Готово. Юниты установлены, но НЕ запущены. Дальше вручную:
+Done. Units are installed but NOT started. Next, by hand:
 
-  # живое зеркало 24/7 (если юнит был masked — сперва: systemctl unmask telemirror.service):
+  # live mirror, 24/7 (if the unit was masked — first: systemctl unmask telemirror.service):
   systemctl enable --now telemirror.service
   journalctl -u telemirror.service -f
 
-  # разовый прогон истории курсов (остановит live на время, вернёт по завершении):
+  # one-off course history replay (stops the live mirror, brings it back when done):
   systemctl start telemirror-past-courses.service
   journalctl -u telemirror-past-courses.service -f
 
-Подробности — deploy/README.md
+Details — deploy/README.md
 EOF

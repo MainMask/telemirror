@@ -131,3 +131,54 @@ def test_albums_are_grouped():
     calls = _sync(db, [_msg(1, grouped_id=99), _msg(2, grouped_id=99), _msg(3)])
     assert ("new_album", (1, 2)) in calls
     assert ("new", 3) in calls
+
+
+class _ConnectedClient:
+    """Just enough of a TelegramClient for `Mirroring.__connect_client`'s happy
+    path: already connected, authorized, no tech_channel/watchdog env set."""
+
+    def is_connected(self):
+        return True
+
+    async def get_me(self):
+        return type("Me", (), {"username": "tester"})()
+
+    def add_event_handler(self, *a, **kw):
+        pass
+
+    async def run_until_disconnected(self):
+        return
+
+    async def disconnect(self):
+        pass
+
+
+def test_handlers_registered_before_broadcast_sync(monkeypatch):
+    """A handler added only after `_sync_broadcast_channel` returns would miss
+    any live update on ANY mirrored source channel that arrives during the
+    (potentially long) sync — Telethon dispatches to whatever is registered at
+    the moment an update arrives, it does not replay missed ones."""
+    order = []
+
+    class _StubHandlers:
+        def __init__(self, **kw):
+            order.append("handlers")
+
+    async def _fake_sync(self, client):
+        order.append("broadcast_sync")
+
+    monkeypatch.setattr("telemirror.mirroring.EventHandlers", _StubHandlers)
+    monkeypatch.setattr(Mirroring, "_sync_broadcast_channel", _fake_sync)
+
+    db = run(InMemoryDatabase())
+    client = _ConnectedClient()
+    m = Mirroring(
+        chat_mapping={BC: {}},
+        database=db,
+        receiver=client,
+        sender=client,
+        logger=logging.getLogger("test"),
+        broadcast_channel=BC,
+    )
+    run(m._Mirroring__connect_client(client))
+    assert order == ["handlers", "broadcast_sync"]
