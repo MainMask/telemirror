@@ -199,3 +199,52 @@ def test_replay_resumes_from_checkpoint(monkeypatch):
         monkeypatch, msgs, PastModeConfig(full_history=True, send_delay=0), db=db
     )
     assert calls == [("new", 3), ("new", 4), ("new", 5)]  # min_id=2 is exclusive
+
+
+# --- _edit_links_pass ----------------------------------------------------
+
+class _EditFakeClient:
+    def __init__(self, src_messages):
+        self._src = {m.id: m for m in src_messages}
+        self.edits = []
+
+    async def get_messages(self, entity, ids=None, limit=None, **kw):
+        if ids is not None:
+            return [self._src.get(i) for i in ids]
+        return _Total(len(self._src))
+
+    async def edit_message(self, entity, message, text, formatting_entities=None, **kw):
+        self.edits.append((entity, message, text, formatting_entities))
+
+
+def test_edit_links_pass_rewrites_cross_message_link(monkeypatch):
+    from telemirror.misc.links import private_message_link
+
+    db = run(InMemoryDatabase())
+    # message 10 (mirrored to 910) links to message 7 of the same channel
+    # (mirrored to 907) — the edit pass must repoint the link at 907.
+    run(db.insert_batch([
+        MirrorMessage(10, SRC, 910, TGT),
+        MirrorMessage(7, SRC, 907, TGT),
+    ]))
+
+    src_peer = -SRC - 1000000000000  # PeerChannel raw id for a t.me/c/ link
+    linked = types.Message(
+        id=10,
+        peer_id=types.PeerChannel(1),
+        message="link",
+        entities=[types.MessageEntityTextUrl(
+            offset=0, length=4, url=f"https://t.me/c/{src_peer}/7"
+        )],
+    )
+    client = _EditFakeClient([linked])
+
+    run(past_mode._edit_links_pass(
+        client, db, [(SRC, TGT, _cfg(PastModeConfig(full_history=True, send_delay=0)))],
+        _LOG,
+    ))
+
+    assert len(client.edits) == 1
+    entity, message_id, _text, ents = client.edits[0]
+    assert (entity, message_id) == (TGT, 910)
+    assert ents[0].url == private_message_link(TGT, 907)

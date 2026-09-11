@@ -3,6 +3,7 @@ import mimetypes
 import os
 from typing import Type
 
+from telethon import errors
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
@@ -68,6 +69,11 @@ class RestrictSavingContentBypassFilter(MessageFilter):
                 new_media = await self._process_document(message)
             else:
                 new_media = None
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+            # A >threshold flood must reach past_mode's retry wrapper instead of
+            # being turned into a silent DISCARD (checkpoint would advance past
+            # an un-mirrored message). Same contract as mirroring.py.
+            raise
         except Exception:
             logger.exception(
                 "RestrictSavingContentBypassFilter: bypass failed (chat_id=%s)",
