@@ -31,6 +31,7 @@ try:
         DirectionConfig,
         LOG_LEVEL,
         SESSION_STRING,
+        TECH_CHANNEL,
         USE_MEMORY_DB,
     )
 except Exception:
@@ -385,19 +386,26 @@ async def _run(logger: logging.Logger) -> None:
 
     try:
         for source_id, target_id, cfg in directions:
-            try:
-                await _replay_direction(client, database, source_id, target_id, cfg, logger)
-            except errors.FloodWaitError as e:
-                # Telethon auto-sleeps for FloodWait ≤300s (flood_sleep_threshold).
-                # This branch fires only for >300s waits during iter_messages.
-                # The current direction is skipped; checkpoint is saved, so re-running
-                # past_mode.py will resume from where it left off.
-                logger.warning(f"FloodWait {e.seconds}s при получении истории, ждём...")
-                await asyncio.sleep(e.seconds)
+            while True:
+                try:
+                    await _replay_direction(client, database, source_id, target_id, cfg, logger)
+                    break
+                except errors.FloodWaitError as e:
+                    # Telethon auto-sleeps for FloodWait ≤300s (flood_sleep_threshold).
+                    # This branch fires only for >300s waits during iter_messages.
+                    # Checkpoint is saved, so after sleeping we retry from where we left off.
+                    logger.warning(f"FloodWait {e.seconds}s при получении истории, ждём и повторяем...")
+                    await asyncio.sleep(e.seconds)
 
         # Second pass: fix cross-channel links that couldn't be resolved during mirroring
         logger.info("Второй проход: исправление перекрёстных ссылок...")
         await _edit_links_pass(client, database, directions, logger)
+
+        if TECH_CHANNEL:
+            pairs = "\n".join(f"• `{s}` → `{t}`" for s, t, _ in directions)
+            header = f"✅ Past mode завершён. Скопирована история {len(directions)} направлени(й)."
+            full = f"{header}\n\n{pairs}"
+            await client.send_message(TECH_CHANNEL, full if len(full) <= 4096 else header)
     finally:
         await client.disconnect()
         if hasattr(database, "connection_pool"):
