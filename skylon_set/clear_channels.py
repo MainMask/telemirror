@@ -77,6 +77,12 @@ def collect_targets(chat_mapping) -> Dict[int, Set[Optional[int]]]:
     return targets
 
 
+def channels_for_full_clear(targets: Dict[int, Set[Optional[int]]]) -> list:
+    """Каналы, у которых нет топик-scoping — только их можно чистить целиком
+    через DeleteHistory."""
+    return [channel_id for channel_id, topic_ids in targets.items() if None in topic_ids]
+
+
 async def purge(
     client: TelegramClient,
     channel_id: int,
@@ -237,10 +243,16 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
                 label = f"{channel_id}#{topic_id}" if topic_id is not None else str(channel_id)
                 logger.error(f"[{label}] Ошибка: {e}")
 
+        # DeleteHistory очищает канал целиком — вызываем только для каналов без
+        # топик-scoping в конфиге; для остальных историю уже почистил per-topic purge.
+        full_clear_channels = channels_for_full_clear(targets)
         if dry_run:
-            logger.info(f"(dry-run) Было бы вызвано DeleteHistory для {len(targets)} канала(ов)")
+            logger.info(
+                f"(dry-run) Было бы вызвано DeleteHistory для {len(full_clear_channels)} "
+                f"канала(ов) без топик-scoping"
+            )
         else:
-            for channel_id in targets:
+            for channel_id in full_clear_channels:
                 try:
                     await client(DeleteHistoryRequest(channel=channel_id, max_id=0, for_everyone=True))
                     logger.info(f"[{channel_id}] DeleteHistory выполнен")

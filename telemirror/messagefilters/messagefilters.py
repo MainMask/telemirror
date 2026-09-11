@@ -123,7 +123,7 @@ class UrlMessageFilter(UpdateEntitiesParams, MessageFilter):
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]
     ) -> FilterResult[EventMessage]:
-        filtered_text = utils.add_surrogate(message.message)
+        filtered_text = utils.add_surrogate(message.message or "")
         filtered_entities = list[types.TypeMessageEntity]()
 
         for entity in message.entities or []:
@@ -315,7 +315,7 @@ class ForwardFormatFilter(ChannelName, MessageLink, MessageFilter):
             # Update entities position after message placeholder
             message_placeholder_length_diff = len(
                 # Telegram offsets are calculated with surrogates
-                utils.add_surrogate(message.message)
+                utils.add_surrogate(message.message or "")
             ) - len(self.MESSAGE_PLACEHOLDER)
 
             for entity in pre_formatted_entities:
@@ -327,7 +327,7 @@ class ForwardFormatFilter(ChannelName, MessageLink, MessageFilter):
             else:
                 message.entities = pre_formatted_entities
 
-        message.message = pre_formatted_text.format(message_text=message.message)
+        message.message = pre_formatted_text.format(message_text=message.message or "")
 
         return FilterResult(FilterAction.CONTINUE, message)
 
@@ -378,15 +378,22 @@ class KeywordReplaceFilter(UpdateEntitiesParams, WordBoundaryRegex, MessageFilte
     """
 
     def __init__(self, keywords: dict[str, str]) -> None:
-        self._lookup_regex = {
-            re.compile(
+        # (compiled pattern, surrogate replacement, is_regex)
+        self._rules: list[tuple[re.Pattern[str], str, bool]] = []
+        for k, v in keywords.items():
+            is_regex = k.startswith("r'")
+            pattern = (
                 k.removeprefix("r'").removesuffix("'")
-                if k.startswith("r'")
-                else f"{self.BOUNDARY_REGEX}{re.escape(k)}{self.BOUNDARY_REGEX}",
-                flags=re.IGNORECASE,
-            ): utils.add_surrogate(v)
-            for k, v in keywords.items()
-        }
+                if is_regex
+                else f"{self.BOUNDARY_REGEX}{re.escape(k)}{self.BOUNDARY_REGEX}"
+            )
+            self._rules.append(
+                (
+                    re.compile(pattern, flags=re.IGNORECASE),
+                    utils.add_surrogate(v),
+                    is_regex,
+                )
+            )
 
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]
@@ -396,37 +403,43 @@ class KeywordReplaceFilter(UpdateEntitiesParams, WordBoundaryRegex, MessageFilte
 
         filtered_text = utils.add_surrogate(message.message)
         filtered_entities = message.entities or []
-        entities_offset_error = 0
 
-        current_replacement = None
+        for regex, replacement, is_regex in self._rules:
+            # `filtered_text` and `filtered_entities` share one coordinate space
+            # per keyword pass, so the running error must restart each pass.
+            offset_error = 0
 
-        def repl(match: re.Match[str]) -> str:
-            replacement = match.expand(current_replacement)
+            def repl(
+                match: "re.Match[str]",
+                replacement: str = replacement,
+                is_regex: bool = is_regex,
+            ) -> str:
+                nonlocal offset_error
+                expanded = match.expand(replacement)
+                match_start, match_end = match.span()
+                diff = len(expanded) - (match_end - match_start)
+                self.update_entities_params(
+                    filtered_entities,
+                    match_start + offset_error,
+                    match_end + offset_error,
+                    diff,
+                )
+                offset_error += diff
 
-            full_match = match.group()
+                # Case-transfer only for plain word keywords; an explicit
+                # `r'...'` replacement keeps its configured casing.
+                if is_regex:
+                    return expanded
+                full_match = match.group()
+                if full_match.islower():
+                    return expanded.lower()
+                if full_match.istitle():
+                    return expanded.title()
+                if full_match.isupper():
+                    return expanded.upper()
+                return expanded
 
-            nonlocal entities_offset_error
-            match_start, match_end = match.span()
-            diff = len(replacement) - (match_end - match_start)
-            self.update_entities_params(
-                filtered_entities,
-                match_start + entities_offset_error,
-                match_end + entities_offset_error,
-                diff,
-            )
-            entities_offset_error += diff
-
-            if full_match.islower():
-                return replacement.lower()
-            if full_match.istitle():
-                return replacement.title()
-            if full_match.isupper():
-                return replacement.upper()
-            return replacement
-
-        for k, v in self._lookup_regex.items():
-            current_replacement = v
-            filtered_text = k.sub(repl, filtered_text)
+            filtered_text = regex.sub(repl, filtered_text)
 
         message.entities = filtered_entities
         message.message = utils.del_surrogate(filtered_text)

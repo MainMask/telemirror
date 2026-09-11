@@ -640,6 +640,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         )
 
         deleting_per_channel: Dict[int, List[int]] = {}
+        deleted_original_ids: set[int] = set()
 
         for deleting_message in deleting_messages:
             configs = self._chat_mapping.get(chat_id, {}).get(
@@ -662,12 +663,13 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 )
                 if deleting_message.mirror_id not in _ch_ids:
                     _ch_ids.append(deleting_message.mirror_id)
+                deleted_original_ids.add(deleting_message.original_id)
                 break  # add to deletion list once per mirror message
 
-        for channel_id, message_ids in deleting_per_channel.items():
+        for channel_id, mirror_ids in deleting_per_channel.items():
             try:
                 await self._client.delete_messages(
-                    entity=channel_id, message_ids=message_ids
+                    entity=channel_id, message_ids=mirror_ids
                 )
             except Exception as e:
                 self._logger.error(
@@ -675,7 +677,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     f"{type(e).__name__}: {e}"
                 )
 
-        await self._database.delete_messages_batch(message_ids, chat_id)
+        if deleted_original_ids:
+            await self._database.delete_messages_batch(
+                list(deleted_original_ids), chat_id
+            )
 
 
 class TelegramLogHandler(logging.Handler):
@@ -703,6 +708,7 @@ class TelegramLogHandler(logging.Handler):
         self._counts: dict = {}
         self._timers: dict = {}
         self._cooldown_until: dict = {}
+        self._tasks: set = set()  # keep strong refs to in-flight send tasks
 
     def _format_record(self, record: logging.LogRecord) -> str:
         prefix = self._PREFIXES.get(record.levelno, "⚠️ WARNING")
@@ -714,10 +720,20 @@ class TelegramLogHandler(logging.Handler):
         except Exception:
             self.handleError(record)
             return
-        self._loop.call_soon_threadsafe(self._enqueue, text)  # thread-safe dispatch
+        try:
+            self._loop.call_soon_threadsafe(self._enqueue, text)  # thread-safe dispatch
+        except RuntimeError:
+            pass  # loop already closed (shutdown) — nothing we can do
+
+    def _prune_cooldowns(self) -> None:
+        """Drop expired cooldown entries so one-off messages don't leak."""
+        now = self._loop.time()
+        for text in [t for t, until in self._cooldown_until.items() if until <= now]:
+            del self._cooldown_until[text]
 
     def _enqueue(self, text: str) -> None:
         """Runs in the event-loop thread — dict ops are safe here."""
+        self._prune_cooldowns()
         if self._cooldown_until.get(text, 0) > self._loop.time():
             return  # в окне подавления
         self._cooldown_until.pop(text, None)  # cooldown истёк — очищаем
@@ -733,7 +749,9 @@ class TelegramLogHandler(logging.Handler):
         self._cooldown_until[text] = self._loop.time() + self._COOLDOWN
         msg = f"{text} (×{count})" if count > 1 else text
         if not self._loop.is_closed():
-            self._loop.create_task(self._do_send(msg))
+            task = self._loop.create_task(self._do_send(msg))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     async def _do_send(self, msg: str) -> None:
         try:
@@ -867,6 +885,8 @@ class EventHandlers:
 
 
 class Mirroring:
+    CONNECT_TIMEOUT_SEC = 30
+
     def __init__(
         self: "Mirroring",
         chat_mapping: Dict[int, Dict[int, List[DirectionConfig]]],
@@ -961,7 +981,7 @@ class Mirroring:
             return f"https://t.me/c/{bc_peer_id}/{msg_id}"
 
         async def flush_album() -> None:
-            nonlocal pending_album, pending_gid
+            nonlocal pending_gid
             if not pending_album:
                 return
             first = pending_album[0]
@@ -999,22 +1019,34 @@ class Mirroring:
     async def __connect_client(self: "Mirroring", client: TelegramClient) -> None:
         try:
             if not client.is_connected():
-                try:
-                    # Avoid `client.connect` hang forever:
-                    # https://github.com/LonamiWebs/Telethon/issues/1536
-                    # https://github.com/LonamiWebs/Telethon/issues/4119
+                # Avoid `client.connect` hang forever:
+                # https://github.com/LonamiWebs/Telethon/issues/1536
+                # https://github.com/LonamiWebs/Telethon/issues/4119
+                # `connect()` may report success before the transport is ready,
+                # and may also never return — so the whole wait is bounded.
+                connection_task = asyncio.create_task(client.connect())
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + self.CONNECT_TIMEOUT_SEC
 
-                    connection_task = asyncio.create_task(client.connect())
+                while not connection_task.done() and not client.is_connected():
+                    if loop.time() >= deadline:
+                        break
+                    await asyncio.sleep(0.05)
 
-                    while not connection_task.done() and not client.is_connected():
-                        await asyncio.sleep(0)
-
-                    await asyncio.wait_for(connection_task, timeout=30)
-                except asyncio.TimeoutError as e:
-                    raise RuntimeError(
-                        "Timeout error while connecting to Telegram server, "
-                        "try restart or get a new session key (run login.py)"
-                    ) from e
+                if not client.is_connected():
+                    try:
+                        # Not connected: either surface connect() errors or fail
+                        # on the remaining budget instead of spinning forever.
+                        await asyncio.wait_for(
+                            connection_task,
+                            timeout=max(0.0, deadline - loop.time()),
+                        )
+                    except asyncio.TimeoutError as e:
+                        connection_task.cancel()
+                        raise RuntimeError(
+                            "Timeout error while connecting to Telegram server, "
+                            "try restart or get a new session key (run login.py)"
+                        ) from e
 
             me = await client.get_me()
             if me is None:
