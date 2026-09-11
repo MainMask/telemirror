@@ -181,7 +181,7 @@ async def _clear_bindings(
 
 async def _run(logger: logging.Logger, dry_run: bool) -> None:
     logger.warning(
-        "purge_targets.py использует тот же SESSION_STRING, что и живой сервис. "
+        "clear_channels.py использует тот же SESSION_STRING, что и живой сервис. "
         "Убедитесь, что main.py НЕ запущен."
     )
 
@@ -235,11 +235,11 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
             except Exception as e:
                 label = f"{channel_id}#{topic_id}" if topic_id is not None else str(channel_id)
                 logger.error(f"[{label}] Ошибка: {e}")
+
+        await _reset_checkpoints(targets, dry_run, logger)
+        await _clear_bindings(targets, dry_run, logger)
     finally:
         await client.disconnect()
-
-    await _reset_checkpoints(targets, dry_run, logger)
-    await _clear_bindings(targets, dry_run, logger)
 
     action = "Найдено (dry-run)" if dry_run else "Итого удалено"
     logger.info(f"{action}: {total} сообщений во всех каналах.")

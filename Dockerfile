@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 WORKDIR /app
 COPY ./requirements.txt /app/requirements.txt
 RUN pip install --target=/app/dependencies simple-lama-inpainting --no-deps && \
-    pip install --target=/app/dependencies torch && \
+    pip install --target=/app/dependencies torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --target=/app/dependencies -r requirements.txt
 
 FROM build AS release

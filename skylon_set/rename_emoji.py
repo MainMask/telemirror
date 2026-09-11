@@ -24,8 +24,8 @@ except Exception:
     print("Failed reading .env")
     raise
 
-OLD_EMOJI = "🏴‍☠️"
-NEW_EMOJI = "🗝"
+OLD_EMOJI = "🗝"
+NEW_EMOJI = "⚜️"
 
 
 def entity_type(entity) -> str:

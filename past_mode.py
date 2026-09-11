@@ -147,7 +147,7 @@ async def _replay_direction(
     logger.info(f"{prefix}: старт (стратегия={_strategy_label(pm)})")
 
     checkpoint, mirrors_done = await _integrity_check(database, source_id, target_id, logger)
-    if checkpoint:
+    if checkpoint is not None:
         logger.info(f"{prefix}: продолжение с message_id={checkpoint}")
 
     try:
@@ -206,7 +206,7 @@ async def _replay_direction(
         first = pending_album[0]
         link = f"https://t.me/c/{utils.resolve_id(source_id)[0]}/{first.id}"
         await processor.new_album(source_id, pending_album, link)
-        await database.set_past_mode_checkpoint(source_id, target_id, first.id)
+        await database.set_past_mode_checkpoint(source_id, target_id, pending_album[-1].id)
         processed += 1
         if processed == 1 or processed % _LOG_EVERY == 0:
             _log_progress(logger, prefix, processed, iter_total, start_time)
@@ -273,7 +273,13 @@ async def _edit_links_pass(
 
         mirror_map = {m.original_id: m for m in mirrors}
         try:
-            src_messages = await client.get_messages(source_id, ids=list(mirror_map.keys()))
+            _ids = list(mirror_map.keys())
+            _BATCH = 100
+            src_messages = []
+            for _i in range(0, len(_ids), _BATCH):
+                src_messages.extend(
+                    await client.get_messages(source_id, ids=_ids[_i : _i + _BATCH])
+                )
         except Exception as e:
             logger.warning(f"{prefix}: не удалось получить сообщения batch: {e}")
             continue
@@ -382,6 +388,10 @@ async def _run(logger: logging.Logger) -> None:
             try:
                 await _replay_direction(client, database, source_id, target_id, cfg, logger)
             except errors.FloodWaitError as e:
+                # Telethon auto-sleeps for FloodWait ≤300s (flood_sleep_threshold).
+                # This branch fires only for >300s waits during iter_messages.
+                # The current direction is skipped; checkpoint is saved, so re-running
+                # past_mode.py will resume from where it left off.
                 logger.warning(f"FloodWait {e.seconds}s при получении истории, ждём...")
                 await asyncio.sleep(e.seconds)
 
@@ -390,6 +400,8 @@ async def _run(logger: logging.Logger) -> None:
         await _edit_links_pass(client, database, directions, logger)
     finally:
         await client.disconnect()
+        if hasattr(database, "connection_pool"):
+            await database.connection_pool.close()
 
 
 def main() -> None:
