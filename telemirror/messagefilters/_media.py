@@ -1,6 +1,7 @@
 """Shared media helpers for filters that re-upload a message's media."""
 
 import asyncio
+import contextvars
 import logging
 import os
 import tempfile
@@ -20,7 +21,28 @@ logger = logging.getLogger(__name__)
 # Larger files can't be re-uploaded through this session.
 UPLOAD_LIMIT_BYTES = 2 * 1024**3
 
-_DOWNLOAD_RETRY_DELAYS = (15, 45, 90)  # seconds between attempts
+# ~20 min of retries across 7 attempts. past_mode adds its own outer retry loop;
+# the live mirror relies on this budget alone before it degrades to the original.
+_DOWNLOAD_RETRY_DELAYS = (15, 45, 90, 180, 300, 600)  # seconds between attempts
+
+# True while past_mode is replaying: a filter that still can't download re-raises
+# MediaDownloadError so the checkpoint stays put and the message is retried.
+# False (live mirror): the filter mirrors the original instead of dropping it.
+# Set per message by EventProcessor; asyncio copies it into each update's task.
+strict_media_mode: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "strict_media_mode", default=False
+)
+
+
+class MediaDownloadError(Exception):
+    """Raised by ``download_media_with_retry`` once its spaced retries are spent
+    on a *transient* Telegram file-serving failure.
+
+    A filter re-raises it only under ``strict_media_mode`` (past_mode) so its
+    retry wrapper re-runs from the checkpoint instead of committing a degraded
+    mirror; the live mirror mirrors the original (un-watermarked / unrenamed)
+    rather than lose the message.
+    """
 
 
 async def download_media_with_retry(message: EventMessage, **kwargs):
@@ -32,8 +54,8 @@ async def download_media_with_retry(message: EventMessage, **kwargs):
     off, collapses them into ``ValueError('Request was unsuccessful N time(s)')`` —
     so that string is the only ValueError worth a slow retry, a bare one is a real
     bug. FloodWaitError is a deliberate omission: it must reach past_mode's retry
-    wrapper. After the last attempt the exception propagates and the caller keeps
-    its existing fallback.
+    wrapper. When the retries are spent the failure is re-raised as
+    ``MediaDownloadError``; a non-transient error propagates unchanged.
     """
     attempts = len(_DOWNLOAD_RETRY_DELAYS) + 1
     for i in range(attempts):
@@ -41,14 +63,19 @@ async def download_media_with_retry(message: EventMessage, **kwargs):
             return await message._client.download_media(message=message, **kwargs)
         except (ConnectionError, asyncio.TimeoutError, ValueError) as e:
             transient = not isinstance(e, ValueError) or "unsuccessful" in str(e)
-            if not transient or i == attempts - 1:
+            if not transient:
                 raise
+            link = private_message_link(message.chat_id, message.id)
+            if i == attempts - 1:
+                raise MediaDownloadError(
+                    f"{link}: download failed after {attempts} attempts ({e})"
+                ) from e
             delay = _DOWNLOAD_RETRY_DELAYS[i]
             logger.warning(
                 "media download failed (%s: %s) %s — retry %d/%d in %ds",
                 type(e).__name__,
                 e,
-                private_message_link(message.chat_id, message.id),
+                link,
                 i + 1,
                 attempts - 1,
                 delay,

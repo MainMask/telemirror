@@ -6,11 +6,14 @@ from typing import Optional, Type
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
+from ..misc.links import private_message_link
 from ._media import (
     UPLOAD_LIMIT_BYTES,
+    MediaDownloadError,
     ReuploadCache,
     downloaded_tempfile,
     filename_of,
+    strict_media_mode,
 )
 from .base import FilterAction, FilterResult, MessageFilter
 
@@ -131,10 +134,17 @@ class DocumentFilenameFilter(MessageFilter):
             # An upload handle can be re-sent to several chats, so a broadcast
             # fan-out reuses it instead of re-uploading once per target.
             self._cache.put(doc.id, uploaded)
+        except MediaDownloadError:
+            if strict_media_mode.get():
+                raise  # past_mode: keep the checkpoint put and retry the message
+            logger.warning(
+                "DocumentFilenameFilter: download failed, mirroring original name (%s)",
+                private_message_link(message.chat_id, message.id),
+            )
         except Exception:
             logger.exception(
-                "DocumentFilenameFilter: rename failed (chat_id=%s), sending original",
-                message.chat_id,
+                "DocumentFilenameFilter: rename failed (%s), sending original",
+                private_message_link(message.chat_id, message.id),
             )
 
         return FilterResult(FilterAction.CONTINUE, message)

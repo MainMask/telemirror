@@ -9,7 +9,7 @@ from telethon.tl import types
 
 import past_mode
 from config import DirectionConfig, PastModeConfig
-from telemirror.messagefilters import EmptyMessageFilter
+from telemirror.messagefilters import EmptyMessageFilter, MediaDownloadError
 from telemirror.storage import InMemoryDatabase, MirrorMessage
 from tests.conftest import run
 
@@ -190,6 +190,61 @@ def test_replay_with_retry_waits_out_flood(monkeypatch, exc):
     )
     assert len(attempts) == 2
     assert len(slept) == 1
+
+
+def test_replay_with_retry_waits_out_media_download_error(monkeypatch):
+    """A MediaDownloadError (transient download outlived its retries) is waited
+    out and the direction re-run from the checkpoint, like a FloodWait."""
+    attempts = []
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
+
+    async def fake_replay(client, database, source_id, target_id, cfgs, logger, total=None):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise MediaDownloadError("t.me/c/1/2: exhausted")
+        return 0
+
+    monkeypatch.setattr(past_mode, "_replay_direction", fake_replay)
+
+    run(
+        past_mode._replay_with_retry(
+            object(), run(InMemoryDatabase()), SRC, TGT,
+            [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG,
+        )
+    )
+    assert len(attempts) == 2
+    assert slept == [past_mode._MEDIA_RETRY_WAIT]
+
+
+def test_replay_with_retry_gives_up_after_media_retry_limit(monkeypatch):
+    """Endless MediaDownloadError with no progress → give up after the limit so
+    the process exits (visible) instead of hanging on one message forever."""
+    attempts = []
+
+    async def fake_sleep(seconds):
+        pass
+
+    monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
+
+    async def always_failing(client, database, source_id, target_id, cfgs, logger, total=None):
+        attempts.append(1)
+        raise MediaDownloadError("t.me/c/1/2: exhausted")
+
+    monkeypatch.setattr(past_mode, "_replay_direction", always_failing)
+
+    with pytest.raises(MediaDownloadError):
+        run(
+            past_mode._replay_with_retry(
+                object(), run(InMemoryDatabase()), SRC, TGT,
+                [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG,
+            )
+        )
+    assert len(attempts) == past_mode._MEDIA_RETRY_LIMIT + 1
 
 
 def test_replay_resumes_from_checkpoint(monkeypatch):

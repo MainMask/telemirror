@@ -6,7 +6,21 @@ so coroutines are driven synchronously with ``run()``.
 
 import asyncio
 
+import pytest
 from telethon.tl import types
+
+from telemirror.messagefilters import strict_media_mode
+
+
+@pytest.fixture
+def strict_media():
+    """Run the test body with ``strict_media_mode`` on (past_mode semantics:
+    filters re-raise MediaDownloadError instead of mirroring the original)."""
+    token = strict_media_mode.set(True)
+    try:
+        yield
+    finally:
+        strict_media_mode.reset(token)
 
 
 def run(coro):

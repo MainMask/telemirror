@@ -8,6 +8,7 @@ import pytest
 from telethon import errors, events
 from telethon.tl import types
 
+from telemirror.messagefilters import MediaDownloadError
 from telemirror.messagefilters.base import FilterAction
 from telemirror.messagefilters.restrictsavingfilter import (
     RestrictSavingContentBypassFilter,
@@ -42,10 +43,38 @@ class _BrokenClient:
         raise RuntimeError("download failed")
 
 
+class _MediaDownloadErrorClient:
+    async def download_media(self, message, file):
+        raise MediaDownloadError("t.me/c/1/2: exhausted")
+
+
 def test_flood_during_reupload_propagates():
     f = RestrictSavingContentBypassFilter()
     with pytest.raises(errors.FloodWaitError):
         run(f._process_message(_photo_message(_FloodClient()), events.NewMessage.Event))
+
+
+def test_media_download_error_propagates_when_strict(strict_media):
+    """past_mode: re-raise so the replay wrapper retries from the checkpoint."""
+    f = RestrictSavingContentBypassFilter()
+    with pytest.raises(MediaDownloadError):
+        run(
+            f._process_message(
+                _photo_message(_MediaDownloadErrorClient()), events.NewMessage.Event
+            )
+        )
+
+
+def test_media_download_error_discards_when_not_strict():
+    """Live: protected media can't be re-uploaded without the failed download —
+    nothing to mirror, so discard (can't degrade to the original here)."""
+    f = RestrictSavingContentBypassFilter()
+    action, _ = run(
+        f._process_message(
+            _photo_message(_MediaDownloadErrorClient()), events.NewMessage.Event
+        )
+    )
+    assert action is FilterAction.DISCARD
 
 
 def test_other_failure_discards():

@@ -8,7 +8,7 @@ from telethon.tl import types
 
 import telemirror.mirroring as mirroring
 from config import DirectionConfig
-from telemirror.messagefilters import EmptyMessageFilter
+from telemirror.messagefilters import EmptyMessageFilter, MediaDownloadError
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase
 from tests.conftest import make_message, run
@@ -108,6 +108,94 @@ def test_flood_wait_propagates_out_of_handle_exceptions(monkeypatch, exc):
 
     with pytest.raises(exc):
         run(proc.new_message(SOURCE, make_message("hi", channel_id=1000), "link"))
+
+
+class _MDEFilter:
+    restricted_content_allowed = False
+
+    async def process(self, message, event_type):
+        raise MediaDownloadError("t.me/c/1/2: exhausted")
+
+
+def test_new_message_sets_strict_media_mode_from_flag():
+    """The per-message contextvar the media filters read mirrors the processor's
+    strict_media_errors flag."""
+    from telemirror.messagefilters import strict_media_mode
+
+    seen = []
+
+    class _Spy:
+        restricted_content_allowed = False
+
+        async def process(self, message, event_type):
+            seen.append(strict_media_mode.get())
+            raise MediaDownloadError("stop here")
+
+    cfg = DirectionConfig(disable_delete=False, disable_edit=False, filters=_Spy())
+    for flag in (True, False):
+        proc = EventProcessor(
+            chat_mapping={SOURCE: {TARGETS[0]: [cfg]}},
+            database=run(InMemoryDatabase()),
+            client=object(),
+            logger=logging.getLogger("test.ctx"),
+            strict_media_errors=flag,
+        )
+        try:
+            run(proc.new_message(SOURCE, make_message("hi", channel_id=1000), "link"))
+        except MediaDownloadError:
+            pass
+    assert seen == [True, False]
+
+
+def test_media_download_error_propagates_out_of_handle_exceptions():
+    """A filter that re-raises MediaDownloadError (strict_media_mode / past_mode)
+    reaches past_mode's retry wrapper — __handle_exceptions does not swallow it,
+    same as a >threshold FloodWait."""
+    cfg = DirectionConfig(
+        disable_delete=False, disable_edit=False, filters=_MDEFilter()
+    )
+    proc = EventProcessor(
+        chat_mapping={SOURCE: {TARGETS[0]: [cfg]}},
+        database=run(InMemoryDatabase()),
+        client=object(),
+        logger=logging.getLogger("test.mde"),
+        strict_media_errors=True,
+    )
+    with pytest.raises(MediaDownloadError):
+        run(proc.new_message(SOURCE, make_message("hi", channel_id=1000), "link"))
+
+
+def test_media_download_error_mid_fanout_persists_already_sent_targets(monkeypatch):
+    """A filter raising MediaDownloadError on a later target must still flush the
+    rows for targets already delivered (same contract as a mid-fan-out flood)."""
+    db = run(InMemoryDatabase())
+
+    async def fake_send_message(client, entity, message, **kw):
+        return types.Message(id=555, peer_id=types.PeerChannel(1), message="x")
+
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    proc = EventProcessor(
+        chat_mapping={
+            SOURCE: {
+                TARGETS[0]: [_cfg()],                       # EmptyMessageFilter — sends
+                TARGETS[1]: [DirectionConfig(               # raises before sending
+                    disable_delete=False, disable_edit=False, filters=_MDEFilter()
+                )],
+            }
+        },
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test.mde"),
+        strict_media_errors=True,
+    )
+
+    msg = make_message("hi", channel_id=1000)
+    with pytest.raises(MediaDownloadError):
+        run(proc.new_message(SOURCE, msg, "link"))
+
+    tracked = run(db.get_messages(msg.id, SOURCE))
+    assert {m.mirror_channel for m in tracked} == {TARGETS[0]}
 
 
 @pytest.mark.parametrize(

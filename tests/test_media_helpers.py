@@ -7,6 +7,7 @@ from telethon.tl import types
 
 from telemirror.messagefilters import _media
 from telemirror.messagefilters._media import (
+    MediaDownloadError,
     download_media_with_retry,
     downloaded_tempfile,
     filename_of,
@@ -108,18 +109,20 @@ def test_download_retry_succeeds_after_transient_failures(monkeypatch):
     assert calls["n"] == 3
 
 
-def test_download_retry_exhausts_and_reraises(monkeypatch):
+def test_download_retry_exhausts_and_raises_media_download_error(monkeypatch):
     _no_sleep(monkeypatch)
     calls = {"n": 0}
+    original = ConnectionError("dc down")
 
     class FakeClient:
         async def download_media(self, message, **kwargs):
             calls["n"] += 1
-            raise ConnectionError("dc down")
+            raise original
 
-    with pytest.raises(ConnectionError):
+    with pytest.raises(MediaDownloadError) as excinfo:
         run(download_media_with_retry(_retry_msg(FakeClient()), file=bytes))
     assert calls["n"] == len(_media._DOWNLOAD_RETRY_DELAYS) + 1
+    assert excinfo.value.__cause__ is original
 
 
 def test_download_retry_reraises_non_transient_valueerror(monkeypatch):
