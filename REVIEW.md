@@ -1282,3 +1282,282 @@ mirrored Telegram "GIFs". Tests: 280 green (279 + 1 new), `pyflakes`/`ruff` clea
   return value for videos (`test_video_stamp_only_skips_detection`,
   `test_cheap_hd_video_still_stamped`, `test_video_removal_only_skips_stamp`) were updated
   in lockstep to expect the wrapped `InputMediaUploadedDocument`.
+
+---
+
+# Pass 13 — live/past-mode production-safety re-audit (24/7 systemd operation, explicit request)
+
+Independent re-verification against the *current* code (not trusting this journal's
+prior "closed"/"no P1/P2" claims), run as three parallel focused investigations
+(live-mode runtime, past-mode replay, systemd/health/alert config) specifically
+hunting for memory leaks, OOM risk, unhandled crashes, and gaps in systemd's
+self-recovery/alerting. Tests: 279 → 286, `pyflakes`/`ruff` clean,
+`systemd-analyze verify --recursive-errors=no` clean on all 5 `.service` files.
+
+## Fixed
+
+- **P1** `mirroring.py::new_message`: the DB tracking row (`binding_id`) for
+  each successfully-sent fan-out target was batched into a single
+  `insert_batch` call after the *entire* fan-out loop returned, with any
+  per-target `send_delay` sleep happening before that write —
+  `new_album` already does the opposite, correct thing (write, then sleep).
+  A raw process kill (SIGKILL, OOM-kill, host crash) during that sleep left an
+  already-delivered message with no DB row at all. In past_mode this is a real,
+  reachable duplicate on resume: `process_single` only writes the checkpoint
+  after `new_message` returns, `_integrity_check` only rolls checkpoints
+  *forward*, so it can't detect "sent but untracked" — the message gets
+  resent from the old checkpoint. `send_delay` defaults to 0.5s for every
+  direction (`config.py:183,220,322`) and the deployed
+  `citadel_courses.config.yml` has ~85 `full_history` directions with no
+  override, so every message in every backfill run passed through this
+  window. In live mode the same gap orphans the message against any later
+  edit/delete (the same failure class as the pass-7/8
+  `MediaCaptionTooLongError` fixes). Fixed by flushing each successful send
+  immediately after appending it, before that target's `send_delay` sleep —
+  matching `new_album`'s write-then-sleep order — with `flush_inserted()` now
+  clearing `inserted` on a successful write so a later flush in the same
+  fan-out can't re-insert already-written rows. Test:
+  `tests/test_new_message_batch.py::test_db_write_happens_before_send_delay_sleep`;
+  the pre-existing `test_single_insert_batch_for_fanout` (which asserted the
+  old single-batch-at-the-end behavior by design) was renamed to
+  `test_insert_batch_per_successful_target` and updated to assert one
+  `insert_batch` call per target instead.
+- **P2** `watermarkfilter.py` / `watermark/processor.py`: Telethon dispatches
+  updates concurrently (`sequential_updates` defaults to `False`, never
+  overridden), so a burst of videos across channels can trigger several
+  concurrent `_process_video` calls, each spawning its own `ffmpeg` child
+  process. The host is documented as 1 vCPU
+  (`WatermarkConfig.stamp_video_encode_realtime_ratio`'s own docstring,
+  `deploy/README.md`'s 6-13 min stamp times) — concurrent encodes don't run
+  faster there, they only multiply peak RSS inside the same
+  `telemirror.service` cgroup, risking a self-inflicted `MemoryMax=1400M`
+  OOM-kill-and-resync on ordinary traffic volume. Added
+  `WatermarkConfig.max_concurrent_video_encodes: int = 1` (coerced in
+  `__post_init__` alongside the other numeric fields) and a process-wide
+  `asyncio.Semaphore` in `watermarkfilter.py`, created lazily (no `await`
+  between the check and the assignment, so no race under asyncio's
+  single-threaded scheduling — no lock needed), wrapping only the two
+  CPU-heavy calls (`async_remove_watermark_from_video`,
+  `async_stamp_watermark_on_video`) — not the download, which is I/O-bound.
+  Test: `tests/test_watermark_video_encode.py::test_concurrent_video_encodes_are_serialized`.
+- **P2** `past_mode.py::_replay_with_retry`: the `(FloodWaitError,
+  FloodPremiumWaitError)` branch retried forever (`while True`, sleep
+  `e.seconds`, loop) with no cap — unlike the `MediaDownloadError` branch two
+  cases below it, which is correctly bounded by `_MEDIA_RETRY_LIMIT`. If
+  Telegram keeps reissuing a >300s FloodWait against the same stuck point,
+  the process stays alive but makes no progress indefinitely: `Restart=`
+  never triggers (the process never exits) and `telemirror-health.py`
+  doesn't watch `telemirror-past-courses.service` at all, so this failure
+  mode paged nobody and never self-healed. Fixed by mirroring the exact
+  `MediaDownloadError` pattern: a `flood_failures` counter and
+  `flood_failure_checkpoint` sentinel, reset whenever the checkpoint has
+  actually advanced since the last flood wait (normal multi-direction churn
+  must not trip this), capped at a new `_FLOOD_RETRY_LIMIT = 20`; past the
+  cap, log an error and `raise` instead of retrying, so the process exits and
+  `Restart=on-failure` / `StartLimitBurst` / the already-wired
+  `OnFailure=telemirror-alert@%n.service` (Batch G) take over — a bounded
+  stall becomes a detectable, alertable crash instead of an invisible hang.
+  Tests: `tests/test_past_mode.py::test_replay_with_retry_gives_up_after_flood_retry_limit_at_same_checkpoint`,
+  `..._flood_retry_counter_resets_on_checkpoint_progress`.
+- **P3** `deploy/cron.d/telemirror-tmp`: the cleanup glob (`tmp*.mp4`) only
+  matched the watermark filter's video temp files.
+  `_media.py:downloaded_tempfile` (used by `documentfilenamefilter.py` and
+  `restrictsavingfilter.py` for arbitrary re-uploaded documents) creates temp
+  files with the real/mimetype-derived extension instead — `.pdf`, `.zip`,
+  none, etc. — all still `tmp`-prefixed (Python's default) but never
+  `.mp4`. The cron job's own stated purpose (manual `past_mode.py` runs
+  outside systemd, and OOM crashes — exactly where `PrivateTmp=true` doesn't
+  apply) had no cleanup path at all for these. Broadened the glob to `tmp*`
+  and added `-type f` (scoping it to regular files only, so it can never
+  touch an unrelated tool's `tempfile.mkdtemp` directory).
+- **P3** `deploy/systemd/telemirror-restart.service`: had no `OnFailure=`,
+  unlike `telemirror.service` and `telemirror-past-courses.service`. Added
+  `OnFailure=telemirror-alert@%n.service` for consistency — a failed daily
+  clean-restart now pages immediately instead of relying on
+  `telemirror-health.timer`'s ~10-20 min backstop.
+
+## Investigated, found to be a false positive — corrected here
+
+- One of the three parallel investigations flagged `mirroring.py`'s
+  2-hour-silence watchdog warning
+  (`self._logger.warning("watchdog: no update in %.0f min...")`,
+  ~line 1382) as a P1 on the grounds that it only logs, never reaching
+  TECH_CHANNEL, contradicting `deploy/README.md`'s documented behavior.
+  Traced by hand and found incorrect: `self._logger` *is*
+  `logging.getLogger("telemirror")` — the exact same logger object
+  `main.py:117` creates via `setup_stdout_logger("telemirror", LOG_LEVEL)`
+  and passes down through `Telemirror.__init__` → `Mirroring.__init__` — and
+  `mirroring.py:1270` attaches a `TelegramLogHandler` (forwards WARNING+ to
+  TECH_CHANNEL, debounced/cooled-down) to `logging.getLogger("telemirror")`
+  by that same name, before the watchdog task is even started. So the
+  watchdog's `.warning()` call already reaches TECH_CHANNEL through the
+  attached handler — no code change made; recorded here so this isn't
+  mistakenly "fixed" into a second, duplicate alert path later.
+
+## Reviewed, no change — raised with the project owner, explicitly declined
+
+- No non-Telegram fallback alert channel (dead-man's-switch heartbeat, SMTP):
+  `alert.py` and the in-process `TelegramLogHandler` path are both entirely
+  dependent on the same Telegram/network connectivity the bot itself needs,
+  so a VPS-wide network outage silences every alert path at once even though
+  the bot still self-heals via systemd. Owner confirmed this is acceptable —
+  human notification of an outage is secondary to the bot's own recovery,
+  which doesn't depend on alerting succeeding.
+- `OOMScoreAdjust`/`OOMPolicy` tuning on `telemirror.service`: the host also
+  runs `postgresql.service` (`telemirror.service`'s own
+  `After=network-online.target postgresql.service`), which isn't
+  self-healing the way `telemirror.service`'s `Restart=always` is — a
+  system-wide OOM kill (as opposed to telemirror's own cgroup `MemoryMax`,
+  which is already scoped to telemirror alone) could in theory pick postgres
+  over telemirror. Owner declined — a separate host-level tuning decision,
+  out of scope for this pass.
+
+---
+
+# Pass 14 — re-audit of pass 13 itself, plus the modules pass 13 hadn't covered (explicit repeat request)
+
+The owner repeated the pass-13 request verbatim before its diff was committed.
+Treated as a genuine second pass, not a rubber-stamp: one investigation
+specifically self-reviewed pass 13's own (still-uncommitted) diff for
+regressions/edge cases the fixes themselves might have introduced, a second
+swept `telemirror/storage.py`, `config.py`, the non-watermark messagefilters,
+`telemirror/mixins.py` + `telemirror/misc/*`, and a quick `skylon_set/*`
+interference check — areas pass 13's three agents hadn't gone deep on. Tests:
+286 → 288, `pyflakes`/`ruff` clean.
+
+**The sweep of untouched modules came back clean.** `InMemoryDatabase`'s LRU
+(capacity 100) and `ReuploadCache` (TTL 600s / LRU 16) are correctly bounded
+at construction; `PostgresDatabase.__pg_cursor` was traced against the
+actually-installed `psycopg_pool` source and leaks no connection/cursor under
+any exception path. More importantly: `InMemoryDatabase` turned out to be
+moot in production — the real `.env` has `USE_MEMORY_DB=false`, so
+`PostgresDatabase` is what actually runs both `telemirror.service` and
+`telemirror-past-courses.service`. `config.py`'s filter instances hold only
+immutable compiled regexes/sets, confirmed zero per-message accumulation.
+`telemirror/mixins.py` and `telemirror/misc/*` had nothing new. The one
+result from this half was a documentation fix (below), not a bug.
+
+**The self-review of pass 13's own diff found the core logic sound** (no
+double-inserts, no dropped rows, correct exception propagation out of
+`_replay_with_retry` through to process exit, the two retry counters —
+flood and media — don't interfere with each other) but surfaced three real
+gaps in the fixes themselves, closed in this pass:
+
+## Fixed
+
+- **P2** `telemirror/watermark/processor.py::WatermarkConfig.__post_init__`:
+  the new `max_concurrent_video_encodes` field (pass 13) had no lower-bound
+  check, unlike sibling fields that document "0 = disable." `asyncio.
+  Semaphore(0)` is legal Python and blocks every `acquire()` forever since
+  nothing ever holds a permit to release — a config author following the
+  sibling-field convention and setting `max_concurrent_video_encodes: 0`
+  expecting "no cap" would instead get a silent, permanent hang of the whole
+  watermark pipeline (a hang, not a crash, so `Restart=` never sees it).
+  Not triggered by either real deployed config, but a footgun in the exact
+  mechanism pass 13 added to prevent an OOM. Now validated `>= 1` at
+  construction, raising `ValueError` (matches the existing `stamp_video_preset`
+  fail-fast pattern right below it). Test:
+  `tests/test_watermark_video_encode.py::test_zero_max_concurrent_video_encodes_rejected_at_config_time`.
+- **P2** `telemirror/messagefilters/watermarkfilter.py`: the pass-13
+  semaphore is sized once, from whichever `WatermarkConfig` is seen *first
+  at runtime* (nondeterministic — depends on message arrival order, not
+  config-declaration order); every other direction's
+  `max_concurrent_video_encodes` was then silently ignored process-wide for
+  the rest of the process's lifetime. Not reachable today — both real
+  configs (`.configs/mirror.config.yml`, `.configs/citadel_courses.config.yml`)
+  declare `WatermarkRemovalFilter` once, shared via `default_filters`,
+  confirmed by reading `config.py::build_filters` — but a future
+  per-direction override would silently not apply, with zero signal,
+  quietly re-opening the OOM risk pass 13 exists to close. Not fixed by
+  resizing the live semaphore (real complexity/risk of getting the permit
+  accounting wrong for no evidenced need); instead the mismatch is now
+  logged (`logger.warning`, reaching TECH_CHANNEL through the existing
+  `TelegramLogHandler` wiring) so it's visible instead of silent. Test:
+  `tests/test_watermark_video_encode.py::test_mismatched_limit_logs_a_warning_instead_of_silently_ignoring_it`.
+- **P2** `deploy/cron.d/telemirror-tmp` + `_media.py::downloaded_tempfile` +
+  `watermarkfilter.py::_process_video`: pass 13 broadened the cleanup glob
+  from `tmp*.mp4` to `tmp*` to also catch non-video orphaned temp files —
+  but `tmp` is Python's (and many other tools') *default* `tempfile` prefix,
+  so the broadened glob, run hourly as `root` against anything sitting
+  directly in shared `/tmp` for >180 minutes, was no longer
+  telemirror-specific. This host also runs `postgresql.service`
+  (`telemirror.service`'s own `After=`); any other process relying on
+  `tempfile`'s default naming could have had its own legitimate scratch
+  files deleted — `-type f` protects directories but does nothing about
+  this. Fixed by giving telemirror's own temp files a distinctive
+  `telemirror-tmp-` prefix (`tempfile.NamedTemporaryFile(prefix=...)`,
+  which replaces Python's default rather than appending to it) at both call
+  sites, and narrowing the cron glob to match only that prefix — keeps
+  pass 13's actual goal (every extension, not just `.mp4`) without the
+  blast-radius regression. No test needed (no code path depended on the old
+  naming; verified by grep before the change).
+
+## Fixed — documentation only
+
+- **P3** `telemirror/messagefilters/_media.py::ReuploadCache` docstring
+  claimed "Instances are created once per direction in
+  `config.build_filters`" — false for both real deployed configs, which
+  share one instance process-wide via `default_filters` (confirmed by
+  reading `config.py` and both `.configs/*.yml` files). Not a bug (the
+  cache is still hard-capped at 16 entries regardless of sharing scope), but
+  misleading about actual cross-direction isolation. Docstring corrected to
+  describe the real per-filter-*instantiation* scope and its practical
+  consequence (a burst of >16 distinct media items across unrelated source
+  channels within the 600s TTL can evict each other's entries).
+
+## Reviewed, no change — accepted trade-offs
+
+- `new_message`'s per-target flush (pass 13) is now O(N) DB round-trips per
+  fan-out instead of O(1) — quantified against the real ~199-target
+  broadcast direction in `.configs/mirror.config.yml`: a small, proportionate
+  overhead next to the per-target Telegram `send_message` call that already
+  dominates fan-out latency. The correct trade-off for the crash-safety it
+  buys.
+- A flush that fails to receive `insert_batch`'s server-side ack (but which
+  Postgres actually committed) can produce a duplicate `binding_id` row on
+  retry — a pre-existing risk (not introduced by pass 13, `binding_id` has
+  no UNIQUE constraint, documented since pass 7), now exercised up to N times
+  per message instead of once; harmless (a duplicate row just makes a later
+  edit/delete touch the mirror twice, already caught/logged).
+- `past_mode.py`'s bounded FloodWait retry (pass 13) caps *count* (20), not
+  cumulative *wall-clock time* — `FloodWaitError.seconds` has no documented
+  upper bound from Telegram, so a pathological stretch could still take a
+  long time to give up, and `_replay_with_retry` runs strictly sequentially
+  per direction so a stuck one blocks the rest of that run. Strictly better
+  than the pre-pass-13 infinite retry either way; not tightened further
+  without evidence this is a real-world problem.
+
+## Pass 14 self-review — one test-isolation bug found and fixed
+
+A dedicated cleanliness/correctness pass over the pass-13 + pass-14 diff
+itself (two independent reviewers: one for the six source/config files, one
+for the three test files). The source-code review came back clean — no bugs,
+one NIT (the watermark mismatch-warning logs on every mismatched call rather
+than once, harmless given `TelegramLogHandler`'s existing debounce, not
+worth changing). The test review found one real bug:
+
+- **BUG** `tests/test_watermark_video_encode.py`:
+  `test_concurrent_video_encodes_are_serialized` and
+  `test_max_concurrent_video_encodes_raises_the_cap` each reset the module
+  global `_video_encode_semaphore` via `monkeypatch.setattr(wf, "_video_encode_semaphore",
+  None)` before running, but neither reset the companion global
+  `_video_encode_semaphore_limit` pass 14 added. `monkeypatch.setattr` only
+  restores a patched attribute to its pre-patch value on teardown — since
+  `_video_encode_semaphore_limit` was never patched, the `global`-statement
+  assignment `_get_video_encode_semaphore` makes to it during the test body
+  persisted unreverted, leaving the two globals out of sync with each other
+  after the file runs (confirmed empirically: after
+  `test_max_concurrent_video_encodes_raises_the_cap`, teardown restored
+  `_video_encode_semaphore` to a stale leftover object with real capacity 1
+  while `_video_encode_semaphore_limit` stayed at 2). Didn't fail anything
+  today only by alphabetical test-file-ordering luck; a future test
+  requesting limit 2 without resetting first would have silently received
+  the stale capacity-1 semaphore with no warning logged — reproducing,
+  inside the test suite's own state, the exact silent-mismatch failure mode
+  pass 14 exists to surface. Fixed by also resetting
+  `_video_encode_semaphore_limit` to `None` in both tests, matching the
+  third new test in the same file
+  (`test_mismatched_limit_logs_a_warning_instead_of_silently_ignoring_it`),
+  which already reset both globals correctly. Verified by re-running the
+  full watermark test-file group and inspecting both globals afterward —
+  consistent (`value:1` / `limit: 1`), no leaked stale state.

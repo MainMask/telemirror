@@ -1,6 +1,11 @@
-# Cleans up telemirror's orphaned video temp files from the shared /tmp.
-# In normal operation the watermark filter's `finally` deletes them, and
-# systemd units also get PrivateTmp=true (the namespace dies with the
-# process). This cron job is a safety net for manual past_mode.py runs
-# outside systemd, and for OOM crashes.
-19 * * * * root find /tmp -maxdepth 1 -name 'tmp*.mp4' -mmin +180 -delete 2>/dev/null
+# Cleans up telemirror's orphaned temp files (videos and re-uploaded
+# documents) from the shared /tmp. In normal operation the watermark/media
+# filters' `finally` deletes them, and systemd units also get PrivateTmp=true
+# (the namespace dies with the process). This cron job is a safety net for
+# manual past_mode.py runs outside systemd, and for OOM crashes. The
+# telemirror-tmp- prefix (set via tempfile.NamedTemporaryFile(prefix=...) in
+# _media.py / watermarkfilter.py) keeps this scoped to telemirror's own
+# files — plain 'tmp*' would also match any other tool's default-named temp
+# files sitting in the same shared /tmp on this host (e.g. postgresql).
+# -type f keeps it scoped to regular files only.
+19 * * * * root find /tmp -maxdepth 1 -type f -name 'telemirror-tmp-*' -mmin +180 -delete 2>/dev/null

@@ -2,6 +2,7 @@
 Description=telemirror — scheduled clean restart of the live mirror
 # Don't touch it if a history backfill is currently holding the mirror stopped.
 After=telemirror.service
+OnFailure=telemirror-alert@%n.service
 
 [Service]
 Type=oneshot

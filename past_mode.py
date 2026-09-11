@@ -59,6 +59,15 @@ _LOG_EVERY = 25  # log progress every N messages/albums
 _MEDIA_RETRY_WAIT = 120  # seconds between retries
 _MEDIA_RETRY_LIMIT = 5
 
+# A FloodWait that keeps recurring at the very same checkpoint (Telegram never
+# clears the throttle) would otherwise retry forever: the process stays alive
+# but makes no progress, so systemd's Restart= never sees it as a crash and
+# nothing alerts. Give up after this many consecutive same-checkpoint waits so
+# it becomes a real, detectable, alertable process exit instead of a silent
+# hang. Progress at a *different* checkpoint resets the count — normal
+# flood-limiting churn across many directions must not trip this.
+_FLOOD_RETRY_LIMIT = 20
+
 
 def _configure_logging(log_level: str) -> logging.Logger:
     logger = setup_stdout_logger("past_mode", log_level)
@@ -320,13 +329,30 @@ async def _replay_with_retry(
     """
     media_failures = 0
     media_failure_checkpoint = object()  # sentinel: no stall seen yet
+    flood_failures = 0
+    flood_failure_checkpoint = object()  # sentinel: no stall seen yet
     while True:
         try:
             return await _replay_direction(
                 client, database, source_id, target_id, cfgs, logger, total
             )
         except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
-            logger.warning(f"FloodWait {e.seconds}s, waiting and retrying...")
+            checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)
+            if checkpoint != flood_failure_checkpoint:
+                flood_failures = 0  # progressed since the last stall — fresh budget
+                flood_failure_checkpoint = checkpoint
+            flood_failures += 1
+            if flood_failures > _FLOOD_RETRY_LIMIT:
+                logger.error(
+                    f"FloodWait recurring at the same checkpoint after "
+                    f"{_FLOOD_RETRY_LIMIT} retries — giving up so systemd can "
+                    f"restart and alert"
+                )
+                raise
+            logger.warning(
+                f"FloodWait {e.seconds}s, waiting and retrying "
+                f"({flood_failures}/{_FLOOD_RETRY_LIMIT})..."
+            )
             await asyncio.sleep(e.seconds)
         except MediaDownloadError as e:
             checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)

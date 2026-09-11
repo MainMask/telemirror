@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import tempfile
@@ -25,6 +26,32 @@ from ._media import (
 from .base import FilterAction, FilterResult, MessageFilter
 
 logger = logging.getLogger(__name__)
+
+# Process-wide cap on concurrent ffmpeg video encodes (shared across every
+# WatermarkRemovalFilter instance — settings are global, see the class
+# docstring). Created lazily from the first config seen; no lock needed since
+# there's no `await` between the check and the assignment, so no other
+# coroutine can interleave under asyncio's single-threaded scheduling.
+_video_encode_semaphore: Optional[asyncio.Semaphore] = None
+_video_encode_semaphore_limit: Optional[int] = None
+
+
+def _get_video_encode_semaphore(limit: int) -> asyncio.Semaphore:
+    global _video_encode_semaphore, _video_encode_semaphore_limit
+    if _video_encode_semaphore is None:
+        _video_encode_semaphore = asyncio.Semaphore(limit)
+        _video_encode_semaphore_limit = limit
+    elif limit != _video_encode_semaphore_limit:
+        # The cap is process-wide, not per-direction: whichever config was
+        # seen first (nondeterministic — depends on message arrival order,
+        # not config order) silently wins for the rest of the process unless
+        # we say so here.
+        logger.warning(
+            "WatermarkRemovalFilter: max_concurrent_video_encodes=%s ignored — "
+            "already fixed process-wide at %s by an earlier direction",
+            limit, _video_encode_semaphore_limit,
+        )
+    return _video_encode_semaphore
 
 
 class WatermarkRemovalFilter(MessageFilter):
@@ -198,25 +225,33 @@ class WatermarkRemovalFilter(MessageFilter):
         """Return the re-uploaded media, or None if nothing was produced."""
         tmp_in = tmp_out = tmp_stamp = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            with tempfile.NamedTemporaryFile(
+                prefix="telemirror-tmp-", suffix=".mp4", delete=False
+            ) as f:
                 tmp_in = f.name
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            with tempfile.NamedTemporaryFile(
+                prefix="telemirror-tmp-", suffix=".mp4", delete=False
+            ) as f:
                 tmp_out = f.name
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            with tempfile.NamedTemporaryFile(
+                prefix="telemirror-tmp-", suffix=".mp4", delete=False
+            ) as f:
                 tmp_stamp = f.name
 
             await download_media_with_retry(message, file=tmp_in)
-            removed = (
-                await async_remove_watermark_from_video(tmp_in, config, tmp_out)
-                if config.remove_watermark
-                else False
-            )
-            source_for_stamp = tmp_out if removed else tmp_in
-            stamped = (
-                await async_stamp_watermark_on_video(source_for_stamp, config, tmp_stamp)
-                if config.stamp_watermark
-                else False
-            )
+            semaphore = _get_video_encode_semaphore(config.max_concurrent_video_encodes)
+            async with semaphore:
+                removed = (
+                    await async_remove_watermark_from_video(tmp_in, config, tmp_out)
+                    if config.remove_watermark
+                    else False
+                )
+                source_for_stamp = tmp_out if removed else tmp_in
+                stamped = (
+                    await async_stamp_watermark_on_video(source_for_stamp, config, tmp_stamp)
+                    if config.stamp_watermark
+                    else False
+                )
 
             upload_path = tmp_stamp if stamped else (tmp_out if removed else None)
             if upload_path is not None:

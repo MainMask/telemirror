@@ -63,6 +63,11 @@ class WatermarkConfig:
     # x264 encode throughput (preset above) relative to realtime at 1080p on the
     # target host. Measured on a 1 vCPU EPYC box, veryfast/crf18 → ~0.73.
     stamp_video_encode_realtime_ratio: float = 0.73
+    # How many videos may be re-encoded (ffmpeg) at once, process-wide. On a
+    # 1 vCPU host concurrent encodes don't run faster, they only multiply
+    # peak RSS — a burst of videos could otherwise push the whole process
+    # over the systemd MemoryMax cgroup limit.
+    max_concurrent_video_encodes: int = 1
 
     def __post_init__(self) -> None:
         # YAML values arrive as strings; coerce so they never reach an ffmpeg
@@ -71,7 +76,8 @@ class WatermarkConfig:
                       "stamp_opacity", "stamp_scale", "stamp_video_max_duration_s",
                       "stamp_video_max_encode_s", "stamp_video_encode_realtime_ratio"):
             object.__setattr__(self, field, float(getattr(self, field)))
-        for field in ("scale_steps", "inpaint_dilate_px", "stamp_video_crf"):
+        for field in ("scale_steps", "inpaint_dilate_px", "stamp_video_crf",
+                      "max_concurrent_video_encodes"):
             object.__setattr__(self, field, int(getattr(self, field)))
         for field in ("remove_watermark", "stamp_watermark"):
             value = getattr(self, field)
@@ -80,6 +86,14 @@ class WatermarkConfig:
                     self, field,
                     value.strip().lower() not in ("", "0", "false", "no"),
                 )
+        # 0 would make every `async with semaphore:` block forever (nothing
+        # would ever hold a permit to release) — a silent, permanent hang of
+        # the whole watermark pipeline instead of a crash systemd could see.
+        if self.max_concurrent_video_encodes < 1:
+            raise ValueError(
+                f"max_concurrent_video_encodes={self.max_concurrent_video_encodes} "
+                f"must be >= 1"
+            )
         # A typo'd preset would otherwise fail every single video at ffmpeg time.
         if self.stamp_video_preset not in _X264_PRESETS:
             raise ValueError(

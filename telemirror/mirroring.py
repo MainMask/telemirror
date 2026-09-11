@@ -306,6 +306,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     f"{len(inserted)} message(s) sent but NOT tracked in DB "
                     f"({message_link}): {type(e).__name__}: {e}"
                 )
+            else:
+                # Written — drop them so a later flush in this same fan-out
+                # doesn't re-insert them (duplicate binding_id rows).
+                inserted.clear()
 
         for outgoing_chat, configs in outgoing_chats.items():
             matching = [c for c in configs if self._matches_from_topic(c, message)]
@@ -471,6 +475,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             mirror_channel=outgoing_chat,
                         )
                     )
+                    # Persist before the delay: a kill during the sleep must
+                    # not leave an already-delivered message untracked (same
+                    # write-then-sleep order as new_album).
+                    await flush_inserted()
 
                 if config.send_delay:
                     await asyncio.sleep(config.send_delay)

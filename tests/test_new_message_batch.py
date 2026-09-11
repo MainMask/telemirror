@@ -1,5 +1,11 @@
-"""P8: new_message must persist all fan-out mappings in a single insert_batch."""
+"""new_message must persist each fan-out mapping as soon as it's sent — before
+any per-target send_delay sleep — so a kill during that sleep can't leave an
+already-delivered message untracked (pass 13). Before pass 13, all fan-out
+mappings were batched into a single insert_batch call after the whole
+fan-out loop returned, which this file's history called out explicitly; that
+batching is what created the crash-duplication window."""
 
+import asyncio
 import logging
 
 import pytest
@@ -23,7 +29,10 @@ def _cfg():
     )
 
 
-def test_single_insert_batch_for_fanout(monkeypatch):
+def test_insert_batch_per_successful_target(monkeypatch):
+    """Each successful send is flushed on its own (one insert_batch call per
+    target, immediately after that target's send) rather than accumulated
+    into one call at the end of the fan-out."""
     db = run(InMemoryDatabase())
 
     batches = []
@@ -54,9 +63,54 @@ def test_single_insert_batch_for_fanout(monkeypatch):
     msg = make_message("hello", channel_id=1000)
     run(proc.new_message(SOURCE, msg, "https://t.me/c/1000/1"))
 
-    assert len(batches) == 1
-    assert {m.mirror_channel for m in batches[0]} == set(TARGETS)
+    assert len(batches) == 3
+    assert all(len(b) == 1 for b in batches)
+    assert {b[0].mirror_channel for b in batches} == set(TARGETS)
     assert len(run(db.get_messages(msg.id, SOURCE))) == 3
+
+
+def test_db_write_happens_before_send_delay_sleep(monkeypatch):
+    """A kill during the send_delay sleep must not lose an already-sent
+    target's tracking row: the DB write has to happen first."""
+    db = run(InMemoryDatabase())
+
+    events = []
+    real_insert_batch = db.insert_batch
+
+    async def spy_batch(entities):
+        events.append("insert_batch")
+        await real_insert_batch(entities)
+
+    monkeypatch.setattr(db, "insert_batch", spy_batch)
+
+    async def fake_send_message(client, entity, message, **kw):
+        return types.Message(id=555, peer_id=types.PeerChannel(1), message="x")
+
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    real_sleep = asyncio.sleep
+
+    async def spy_sleep(delay, *a, **kw):
+        events.append("sleep")
+        await real_sleep(0)  # don't actually wait in the test
+
+    monkeypatch.setattr(mirroring.asyncio, "sleep", spy_sleep)
+
+    cfg = DirectionConfig(
+        disable_delete=False, disable_edit=False, filters=EmptyMessageFilter(),
+        send_delay=0.5,
+    )
+    proc = EventProcessor(
+        chat_mapping={SOURCE: {t: [cfg] for t in TARGETS}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test"),
+    )
+
+    msg = make_message("hello", channel_id=1000)
+    run(proc.new_message(SOURCE, msg, "https://t.me/c/1000/1"))
+
+    assert events == ["insert_batch", "sleep"] * len(TARGETS)
 
 
 def test_insert_batch_failure_is_logged_not_raised(monkeypatch, caplog):

@@ -96,8 +96,14 @@ class ReuploadCache:
     A filter that downloads+re-uploads media runs once per fan-out target
     (`mirroring.py` copies the message and re-runs the whole chain for each
     target). Caching the produced handle lets the same upload be re-sent to all
-    targets instead of re-downloading N times. Instances are created once per
-    direction in `config.build_filters` and live for the process.
+    targets instead of re-downloading N times. One instance is created per
+    filter *instantiation* in `config.build_filters`, which in practice is
+    process-wide whenever directions share the top-level `default_filters`
+    (true for every currently deployed config) — only a direction with its
+    own YAML `filters:` override gets an isolated instance. A shared instance
+    means a burst of more than `size` distinct media items across unrelated
+    source channels within the TTL window can evict each other's entries.
+    Instances live for the process either way.
     """
 
     def __init__(self, size: int = 16, ttl: float = 600.0) -> None:
@@ -153,7 +159,9 @@ async def downloaded_tempfile(message: EventMessage, suffix: str = ""):
     """Download ``message``'s media to a temp file, yield its path, always clean up."""
     tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            prefix="telemirror-tmp-", suffix=suffix, delete=False
+        ) as f:
             tmp_path = f.name
         await download_media_with_retry(message, file=tmp_path)
         yield tmp_path

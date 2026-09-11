@@ -192,6 +192,71 @@ def test_replay_with_retry_waits_out_flood(monkeypatch, exc):
     assert len(slept) == 1
 
 
+@pytest.mark.parametrize(
+    "exc", [errors.FloodWaitError, errors.FloodPremiumWaitError]
+)
+def test_replay_with_retry_gives_up_after_flood_retry_limit_at_same_checkpoint(
+    monkeypatch, exc
+):
+    """A FloodWait that keeps recurring at the same checkpoint (Telegram never
+    clears the throttle) must eventually raise instead of retrying forever —
+    an unbounded retry would leave the process alive but stuck, invisible to
+    systemd's Restart= (pass 13)."""
+    attempts = []
+
+    async def fake_sleep(seconds):
+        pass
+
+    monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
+
+    async def always_flooding(client, database, source_id, target_id, cfgs, logger, total=None):
+        attempts.append(1)
+        raise exc(request=None)
+
+    monkeypatch.setattr(past_mode, "_replay_direction", always_flooding)
+
+    with pytest.raises(exc):
+        run(
+            past_mode._replay_with_retry(
+                object(), run(InMemoryDatabase()), SRC, TGT,
+                [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG,
+            )
+        )
+    assert len(attempts) == past_mode._FLOOD_RETRY_LIMIT + 1
+
+
+def test_replay_with_retry_flood_retry_counter_resets_on_checkpoint_progress(monkeypatch):
+    """Real progress between flood waits (the checkpoint keeps moving) resets
+    the give-up counter — normal flood-limiting churn across many directions
+    in a long backfill must not trip the limit early."""
+    attempts = []
+    db = run(InMemoryDatabase())
+
+    async def fake_sleep(seconds):
+        pass
+
+    monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
+
+    async def flooding_with_progress(client, database, source_id, target_id, cfgs, logger, total=None):
+        attempts.append(1)
+        if len(attempts) > past_mode._FLOOD_RETRY_LIMIT + 5:
+            return 0  # eventually succeeds
+        await database.set_past_mode_checkpoint(source_id, target_id, len(attempts))
+        raise errors.FloodWaitError(request=None)
+
+    monkeypatch.setattr(past_mode, "_replay_direction", flooding_with_progress)
+
+    run(
+        past_mode._replay_with_retry(
+            object(), db, SRC, TGT,
+            [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG,
+        )
+    )
+    # Exceeds _FLOOD_RETRY_LIMIT total retries but never at a stuck checkpoint,
+    # so it keeps going instead of giving up early.
+    assert len(attempts) == past_mode._FLOOD_RETRY_LIMIT + 6
+
+
 def test_replay_with_retry_waits_out_media_download_error(monkeypatch):
     """A MediaDownloadError (transient download outlived its retries) is waited
     out and the direction re-run from the checkpoint, like a FloodWait."""
