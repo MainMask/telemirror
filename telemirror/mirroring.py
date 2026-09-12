@@ -692,7 +692,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 )
                 reply_to_topic_id = config.to_topic_id if outgoing_topic_reply else None
 
-                async def track_media(sent: types.Message) -> None:
+                async def track_media(
+                    sent: types.Message,
+                    filtered_message: EventMessage = filtered_message,
+                    outgoing_chat: int = outgoing_chat,
+                ) -> None:
                     inserted.append(
                         MirrorMessage(
                             original_id=filtered_message.id,
@@ -937,7 +941,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 )
                 reply_to_topic_id = config.to_topic_id if outgoing_topic_reply else None
 
-                async def track_media(sent: List[types.Message]) -> None:
+                async def track_media(
+                    sent: List[types.Message],
+                    idxs: List[int] = idxs,
+                    outgoing_chat: int = outgoing_chat,
+                ) -> None:
                     if len(sent) != len(idxs):
                         # The positional zip below maps each sent message back to
                         # a source id; a count mismatch means we can't trust that
