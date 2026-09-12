@@ -208,6 +208,9 @@ async def _replay_direction(
 
     # last_n without a checkpoint: buffer into memory (newest first), reverse
     use_buffer = pm.last_n is not None and checkpoint is None
+    # last_n *with* a checkpoint: resume with a raw-message budget instead of
+    # a hard iter_messages(limit=...) cutoff — see the consumption loop below.
+    bounded_resume = pm.last_n is not None and checkpoint is not None
     if use_buffer:
         buffer: List = []
         async for msg in client.iter_messages(source_id, limit=pm.last_n):
@@ -221,11 +224,15 @@ async def _replay_direction(
         elif pm.since_date is not None:
             iter_kwargs["offset_date"] = pm.since_date
         # full_history: reverse=True only
-        iter_total = (
-            max(0, pm.last_n - mirrors_done)
-            if pm.last_n is not None and checkpoint is not None
-            else total
-        )
+        if bounded_resume:
+            iter_total = max(0, pm.last_n - mirrors_done)
+            # Not bounded here via iter_messages(limit=...): a hard cutoff
+            # could land mid-album (an album is only known complete once
+            # iter_message_groups sees the next non-matching message),
+            # splitting it across two replay passes. Bounded by `processed`
+            # in the consumption loop below instead.
+        else:
+            iter_total = total
 
     if iter_total > 0:
         eta_str = (
@@ -247,6 +254,11 @@ async def _replay_direction(
     )
 
     processed = 0
+    # Raw source-message count, as opposed to `processed` (one per group
+    # regardless of album size): `iter_total` for a bounded resume is a
+    # last_n budget in raw messages, so the stop check below must compare
+    # against the same unit or it can overshoot by a whole album per group.
+    messages_done = 0
     start_time = monotonic()
 
     def _log_step() -> None:
@@ -254,20 +266,22 @@ async def _replay_direction(
             _log_progress(logger, prefix, processed, iter_total, start_time)
 
     async def process_single(msg) -> None:
-        nonlocal processed
+        nonlocal processed, messages_done
         link = private_message_link(source_id, msg.id)
         await processor.new_message(source_id, msg, link)
         await database.set_past_mode_checkpoint(source_id, target_id, msg.id)
         processed += 1
+        messages_done += 1
         _log_step()
         await asyncio.sleep(pm.send_delay)
 
     async def process_album(album: List) -> None:
-        nonlocal processed
+        nonlocal processed, messages_done
         link = private_message_link(source_id, album[0].id)
         await processor.new_album(source_id, album, link)
         await database.set_past_mode_checkpoint(source_id, target_id, album[-1].id)
         processed += 1
+        messages_done += len(album)
         _log_step()
         await asyncio.sleep(pm.send_delay)
 
@@ -280,9 +294,17 @@ async def _replay_direction(
         if use_buffer
         else client.iter_messages(source_id, **iter_kwargs)
     )
+    # Bounded resume: stop once iter_total raw messages have been processed,
+    # checked before each group so a 0 total doesn't process anything. Checked
+    # in raw-message units (messages_done), not groups, since a hard
+    # iter_messages(limit=...) cutoff could otherwise land mid-album — the
+    # budget can still overshoot by up to one album's size, but never
+    # compounds across multiple albums.
     # iter_message_groups drops non-Message items (service messages): they produce
     # no mirror, so they no longer advance the checkpoint (same as _sync_broadcast_channel).
     async for group in iter_message_groups(source):
+        if bounded_resume and messages_done >= iter_total:
+            break
         if isinstance(group, list):
             await process_album(group)
         else:

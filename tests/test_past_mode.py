@@ -130,6 +130,44 @@ def test_replay_last_n_buffer_oldest_first(monkeypatch):
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 10
 
 
+def test_replay_last_n_resume_does_not_split_album(monkeypatch):
+    """A bounded last_n resume must stop after `iter_total` complete
+    messages/albums, never mid-album: a hard iter_messages(limit=...) cutoff
+    could otherwise land between an album's members, since an album is only
+    known complete once iter_message_groups sees the next non-matching
+    message."""
+    db = run(InMemoryDatabase())
+    run(db.set_past_mode_checkpoint(SRC, TGT, 10))
+    run(db.insert_batch([MirrorMessage(oid, SRC, oid + 900, TGT) for oid in (8, 9)]))
+    # last_n=3, mirrors_done=2 -> iter_total=1: exactly one more group to process.
+    msgs = [_msg(11, grouped_id=5), _msg(12, grouped_id=5), _msg(13)]
+    calls, db = _run_replay(
+        monkeypatch, msgs, PastModeConfig(last_n=3, send_delay=0), db=db
+    )
+    assert calls == [("album", (11, 12))]
+    assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 12
+
+
+def test_replay_last_n_resume_does_not_compound_across_albums(monkeypatch):
+    """A bounded last_n resume must stop as soon as the raw-message budget is
+    met, not after the same number of *groups* — otherwise several
+    consecutive albums after the checkpoint each count as "one group" and the
+    budget is overshot by every album's size instead of just the last one's."""
+    db = run(InMemoryDatabase())
+    run(db.set_past_mode_checkpoint(SRC, TGT, 10))
+    run(db.insert_batch([MirrorMessage(oid, SRC, oid + 900, TGT) for oid in (8, 9)]))
+    # last_n=4, mirrors_done=2 -> iter_total=2: budget for 2 more raw messages.
+    msgs = [
+        _msg(11, grouped_id=5), _msg(12, grouped_id=5), _msg(13, grouped_id=5),
+        _msg(14, grouped_id=6), _msg(15, grouped_id=6), _msg(16, grouped_id=6),
+    ]
+    calls, db = _run_replay(
+        monkeypatch, msgs, PastModeConfig(last_n=4, send_delay=0), db=db
+    )
+    assert calls == [("album", (11, 12, 13))]
+    assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 13
+
+
 @pytest.mark.parametrize(
     "exc", [errors.FloodWaitError, errors.FloodPremiumWaitError]
 )

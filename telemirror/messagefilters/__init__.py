@@ -1,4 +1,4 @@
-from ._media import MediaDownloadError, strict_media_mode
+from ._media import MediaDownloadError, fetch_fresh_media, strict_media_mode
 from .base import (
     CompositeMessageFilter,
     FilterAction,
@@ -40,5 +40,6 @@ __all__ = [
     "SkipWithUrlFilter",
     "UrlMessageFilter",
     "WatermarkRemovalFilter",
+    "fetch_fresh_media",
     "strict_media_mode",
 ]

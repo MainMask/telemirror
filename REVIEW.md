@@ -1561,3 +1561,247 @@ worth changing). The test review found one real bug:
   which already reset both globals correctly. Verified by re-running the
   full watermark test-file group and inspecting both globals afterward —
   consistent (`value:1` / `limit: 1`), no leaked stale state.
+
+---
+
+# Pass 15 — review of the uncommitted `FileReferenceExpiredError` diff, plus a gap check for commits after pass 14
+
+Triggered by a general "review the whole project and fix bugs" request. Two
+uncommitted files (`telemirror/messagefilters/_media.py`,
+`telemirror/mirroring.py`) had just added `FileReferenceExpiredError` handling
+(Telegram's stale-file-reference error: refetch the source message(s) for a
+fresh reference and retry the send/download once) with no test coverage and no
+journal entry yet — reviewed from scratch by direct code trace rather than
+assumption. Also checked whether the three commits after this journal's
+previous entry (`7b7976f`, `912dcc3`, `a056c32`) needed logging here. Tests:
+288 → 298 (10 new across this pass and its self-review below),
+`pyflakes`/`ruff` clean.
+
+## Fixed
+
+- **P2** `mirroring.py::new_album`'s `FileReferenceExpiredError` handler
+  refetches all of an album's source messages
+  (`self._client.get_messages(chat_id, ids=idxs)`) and rebuilds `files` from
+  the result, but kept reusing the original `captions`/`album_entities` lists
+  built from `idxs`-order — so correctness depends on the refetch preserving
+  both order *and* count. The existing per-item guard
+  (`any(fresh is None or not fresh.media ...)`) only catches an individually
+  missing message; it does not catch `get_messages` returning a different
+  *length* outright. The non-refresh success path two dozen lines below
+  already treats exactly this risk class as untrustworthy
+  (`len(outgoing_messages) != len(idxs)`, log + skip tracking rather than
+  write a wrong mapping) — the new refresh branch violated that same
+  established convention. Fixed by adding `len(fresh_list) != len(idxs)` to
+  the guard, same treatment (log + `continue`). Test:
+  `tests/test_file_reference_refresh.py::test_new_album_refresh_length_mismatch_skips_tracking`
+  (constructs a two-item album with a `get_messages` stub that returns only
+  one refreshed message; confirmed it fails — via an unguarded misalignment,
+  not a clean skip — against the pre-fix code before confirming the fix
+  makes it pass).
+- **P3** Both `new_message`'s and `new_album`'s `FileReferenceExpiredError`
+  handlers retried with `... if config.mode == "copy" else await
+  forward_messages(...)`, but the `forward_messages` arm is dead code: traced
+  `telemirror/_patch/sending.py::forward_messages` (lines 446-498) — it
+  forwards by id via `ForwardMessagesRequest` server-side and never touches a
+  message's `file_reference`, so `FileReferenceExpiredError` cannot originate
+  from a `forward_messages` call in the primary attempt above. By the time
+  either except-handler runs, `config.mode == "copy"` is already guaranteed,
+  so the `else` branch could never execute. Simplified both handlers to call
+  `send_message`/`send_file` directly, with a comment recording why forward
+  mode is unaffected. Not a live bug (the branch was simply unreachable), but
+  worth trimming since it obscured the handler's actual precondition. Tests:
+  `tests/test_file_reference_refresh.py::test_new_message_refresh_success_tracks_message`
+  and `::test_new_album_refresh_success_tracks_with_correct_mapping` lock in
+  the intended copy-mode refresh-and-resend behavior now that the dead branch
+  is gone.
+
+## Reviewed, no change
+
+- `_media.py::download_media_with_retry`'s own `FileReferenceExpiredError`
+  branch (scalar refetch via `get_messages(message.chat_id, ids=message.id)`)
+  has no ordering/alignment exposure — a single-item refetch can't be
+  misaligned. (A separate, real bug in this same branch — unrelated to
+  alignment — was found by a follow-up self-review; see below.)
+- Checked whether the three commits after this journal's previous entry
+  needed a catch-up log here. `7b7976f` (merge of upstream `khoben/telemirror`
+  at `19cf3ac`) is confirmed content-neutral for `telemirror/`
+  (`git diff 0e2020b..a056c32 --stat -- telemirror/` shows only the changes
+  `912dcc3`/`a056c32` themselves introduce; the merge commit's own `--stat` is
+  empty). `912dcc3` and `a056c32` already carry their own full journal entries
+  (Pass 12, Pass 13, Pass 14, and the pass-14 self-review above) committed in
+  the same diffs — there was no actual gap, just this pass's own initial
+  assumption that needed checking against the real commit contents rather
+  than commit order alone.
+
+## Pass 15 self-review — three more bugs found and fixed
+
+A dedicated re-check of this pass's own diff (still uncommitted), prompted by
+an explicit request to verify the just-written code once more. Traced each
+`FileReferenceExpiredError` branch's control flow line by line instead of
+trusting the "Reviewed, no change" note above. A follow-up request to also
+act on two efficiency/cleanliness observations from the first pass (not bugs)
+led to one more fix below. Tests: 291 → 298 (7 new).
+
+## Fixed
+
+- **P2** `_media.py::download_media_with_retry`: the `FileReferenceExpiredError`
+  branch set `message = fresh` and `refreshed = True` but then relied on the
+  enclosing `for i in range(attempts)` loop's *next* iteration to actually
+  retry the download. When the error's first (and only, since a second
+  occurrence re-raises) occurrence happens on the *last* attempt, there is no
+  next iteration — the loop simply ends and the function falls off the end,
+  implicitly returning `None` instead of the downloaded bytes or a raised
+  error. Confirmed by direct simulation before touching the code: 6 transient
+  `ValueError`s to exhaust `_DOWNLOAD_RETRY_DELAYS`, then a
+  `FileReferenceExpiredError` on the 7th call reproducibly returned `None`
+  after 7 total calls with the pre-fix code. A caller silently receiving
+  `None` where it expects bytes (e.g. `downloaded_tempfile` writing an empty
+  file, or `RestrictSavingContentBypassFilter` re-uploading `photo_bytes=None`)
+  is a worse failure mode than a raised exception, since nothing in the call
+  chain treats `None` as an error signal. Fixed by retrying the download
+  inline within the `except` block itself right after the refresh, instead of
+  depending on loop iteration — matches the docstring's own description
+  ("retried immediately") and needs no attempt-budget bookkeeping. Tests:
+  `tests/test_media_helpers.py::test_download_retry_refreshes_on_last_attempt`
+  (reproduces the exact exhausted-budget-then-expired-reference sequence;
+  confirmed it fails with `None != b"payload"` against the pre-fix code),
+  plus `test_download_retry_refreshes_file_reference_and_succeeds` and
+  `test_download_retry_second_file_reference_expired_raises` for the ordinary
+  and second-occurrence cases, which had no direct test before either.
+- **P1** `mirroring.py::new_message` and `mirroring.py::new_album`: the
+  `FileReferenceExpiredError` handler's retried `send_message`/`send_file`
+  call was wrapped only in a generic `except Exception as e: ... continue` —
+  unlike every other send attempt in this same function (the primary attempt,
+  and the `MediaCaptionTooLongError` split-caption retry), which all
+  special-case `(errors.FloodWaitError, errors.FloodPremiumWaitError)` to
+  re-raise instead of swallowing. A `FloodWaitError` raised by the refreshed
+  retry was therefore logged and skipped like an ordinary failure, and
+  `new_message`/`new_album` returned normally — `past_mode.py`'s
+  `process_single`/`process_album` unconditionally advance the checkpoint
+  right after these return, so a flood wait hit during exactly this retry
+  permanently skipped the message/album instead of reaching past_mode's
+  retry wrapper, the same checkpoint-safety invariant pass 13 (`## Fixed`,
+  first entry above) already spent significant effort establishing elsewhere
+  in this file. Fixed by adding the same
+  `except (errors.FloodWaitError, errors.FloodPremiumWaitError): raise`
+  (with `flush_inserted()` first in `new_message`, matching its sibling
+  split-caption handler) before the generic `except Exception` in both
+  handlers. Tests:
+  `tests/test_file_reference_refresh.py::test_new_message_refresh_retry_does_not_swallow_floodwait`
+  and `::test_new_album_refresh_retry_does_not_swallow_floodwait` (both
+  confirmed to fail with "DID NOT RAISE FloodWaitError" against the pre-fix
+  code before confirming the fix makes them pass).
+- **P3** `mirroring.py::new_message` and `mirroring.py::new_album`: a refreshed
+  file_reference was only written onto the current fan-out target's local
+  copy (`filtered_message.media` / the rebuilt `files` list), never back onto
+  the shared `message`/`album` object every remaining target in the same
+  fan-out loop builds its own copy from (`copy_message`/`copy_album`, both
+  `deepcopy`-based). A source message mapped to N outgoing chats therefore
+  redid the identical `get_messages` refetch against the identical stale
+  reference for each of the N targets instead of once — real waste on the
+  project's own broadcast direction (`.configs/mirror.config.yml`, ~199
+  targets, referenced elsewhere in this journal). Fixed by also assigning
+  `message.media = fresh.media` in `new_message`, and writing each refreshed
+  media back onto the matching-by-id message in `album` in `new_album` (matched
+  by id rather than position, since `idxs`/`fresh_list` come from the
+  *filtered* album, not necessarily identical objects to the ones in `album`).
+  Tests: `tests/test_file_reference_refresh.py::test_new_message_refresh_is_reused_across_fanout_targets`
+  and `::test_new_album_refresh_is_reused_across_fanout_targets` (two-target
+  chat_mapping, distinguishable stale/fresh media marker types so a copy
+  survives the `deepcopy` in `copy_message`/`copy_album`; both confirmed to
+  fail — one extra `send` call and a second `get_messages` call — against the
+  pre-fix code before confirming the fix makes them pass).
+
+## Considered, not changed
+
+- The refetch-check-retry pattern is duplicated across three sites
+  (`_media.py::download_media_with_retry`, `mirroring.py::new_message`,
+  `mirroring.py::new_album`). Considered extracting a shared helper; declined
+  — the three sites differ in enough real ways (scalar vs. list refetch,
+  download vs. send, and different post-refresh error handling) that a
+  unifying abstraction would mostly hide branching rather than remove
+  duplication, for three call sites total. Revisit if a fourth site appears.
+
+## Follow-up — the refreshed retry send had no caption-split fallback
+
+A dedicated whole-project review (independent of pass 15 above) traced the two
+independent retry paths this same pair of functions now has —
+`FileReferenceExpiredError` (refetch + resend once) and `MediaCaptionTooLongError`
+(split into media + text) — and found they were only composed one way.
+
+## Fixed
+
+- **P2** `mirroring.py::new_message` and `mirroring.py::new_album`: the retry
+  `send_message`/`send_file` call inside each `FileReferenceExpiredError`
+  handler had no `MediaCaptionTooLongError` clause, only the generic
+  `except Exception: ... continue` also covered by pass 15's P1 fix above (for
+  `FloodWaitError`) but never extended to this error. A message/album with
+  *both* a stale file_reference and a caption over 1024 chars — plausible
+  together during a past_mode replay of old history — would refresh
+  correctly, then have its resend rejected as too-long, and be logged and
+  dropped instead of delivered split, unlike the identical situation on the
+  primary (non-refreshed) attempt a few lines above, which already handles it.
+  Fixed by adding the same split-media-then-text-tail fallback (duplicated
+  from the primary attempt's existing handler rather than extracted into a
+  shared helper, matching this file's established convention of parallel,
+  independently-maintained retry blocks) to both refresh-retry paths. Tests:
+  `tests/test_file_reference_refresh.py::test_new_message_refresh_retry_caption_too_long_splits`
+  and `::test_new_album_refresh_retry_caption_too_long_splits` (both confirmed
+  to fail — the split media/text calls never happened, the message was
+  silently dropped — against the pre-fix code before confirming the fix makes
+  them pass). Full suite: 298 → 300, `ruff` clean.
+
+## Follow-up 2 — refetch error handling and a dead-code guard in the same retry paths
+
+A review of the still-uncommitted diff from the two follow-ups above found
+three more issues in the same `FileReferenceExpiredError` machinery.
+
+## Fixed
+
+- **P1** `mirroring.py::new_message`'s and `mirroring.py::new_album`'s
+  `FileReferenceExpiredError` handlers refetch the source message(s)
+  (`self._client.get_messages(...)`) to get a fresh reference. `new_message`
+  only caught `FloodWaitError`/`FloodPremiumWaitError` from that call;
+  `new_album` caught nothing at all. Any other exception (a dropped
+  connection, a generic RPCError) therefore escaped the function entirely
+  instead of being logged and skipped for just the current `outgoing_chat` —
+  `@__handle_exceptions` swallows it silently, and past_mode advances the
+  checkpoint right after, permanently dropping the message/album for every
+  target not yet reached in that fan-out. Fixed by wrapping both refetch
+  calls the same way every other send/refetch attempt in this file already
+  is: `(FloodWaitError, FloodPremiumWaitError)` still propagates (with
+  `flush_inserted()` first in `new_message`, matching its siblings), a
+  generic `Exception` is now logged and `continue`s to the next config/chat.
+  Tests:
+  `tests/test_file_reference_refresh.py::test_new_message_refresh_refetch_generic_error_skips_target_only`
+  and `::test_new_album_refresh_refetch_generic_error_skips_target_only`
+  (two-target fan-out, refetch always raises `ConnectionError`; confirmed
+  both targets' refetch attempts happened and neither call raised out of
+  `new_message`/`new_album`, against a pre-fix run where the second target
+  was never reached at all).
+- **P3** `_media.py::download_media_with_retry`: the `if refreshed: raise`
+  guard at the top of the `FileReferenceExpiredError` handler was dead code —
+  the post-refresh retry was a one-off inline call outside the `for i in
+  range(attempts)` loop's accounting, so control could never re-enter this
+  except block a second time with `refreshed` already `True`. As a side
+  effect, a transient error (`ConnectionError`/timeout/retryable `ValueError`)
+  on that same inline retry converted straight to `MediaDownloadError`
+  instead of falling back to whatever was left of `_DOWNLOAD_RETRY_DELAYS` —
+  a short-lived DC hiccup right after a refresh was treated as permanent even
+  with most of the ~20-minute budget unspent. Both share one root cause:
+  fixed by turning the loop into `while i < attempts` with `i` incremented
+  manually, and replacing the inline retry with a plain `continue` back into
+  the loop at the same `i` (the refresh itself still doesn't spend a
+  budgeted attempt). A second `FileReferenceExpiredError` now naturally
+  re-enters the except block with `refreshed == True` and the guard raises it
+  (no longer dead); a transient error on the retry now falls into the
+  existing `ConnectionError`/`TimeoutError`/`ValueError` handler and reuses
+  the remaining schedule instead of giving up immediately. Traced against all
+  5 pre-existing tests for this function call-by-call before changing
+  anything — all pass unchanged, including the last-attempt edge case the
+  inline retry existed to handle. Test:
+  `tests/test_media_helpers.py::test_download_retry_transient_error_after_refresh_uses_remaining_schedule`
+  (refresh succeeds, the immediate retry hits a transient `ConnectionError`,
+  the next attempt succeeds; confirmed it fails as `MediaDownloadError`
+  against the pre-fix code before confirming the fix makes it pass). Full
+  suite: 300 → 303, `ruff` clean.

@@ -438,11 +438,12 @@ async def step_verify(client):
     # Look for duplicate "Цитадель"-named dialogs
     print("\n--- Dupes ---\n")
     known_ids: set[int] = set()
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        for d in cfg.get("directions", []):
-            known_ids.add(int(str(d["to"][0]).split("#")[0]))
+    for path in (CONFIG_PATH, COURSES_CONFIG_PATH):
+        if path.exists():
+            with open(path, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            for d in cfg.get("directions", []):
+                known_ids.add(int(str(d["to"][0]).split("#")[0]))
 
     groups: dict[str, list] = defaultdict(list)
     for dlg in dialogs:
