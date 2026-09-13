@@ -44,6 +44,18 @@ _TG_MSG_LINK_RE = re.compile(
 # cause the media to be resent, so waiting out a long FloodWait here just risks
 # losing time, not correctness.
 _TAIL_SEND_FLOOD_RETRY_LIMIT = 20
+# flood_sleep_threshold=300 is fixed project-wide, so any FloodWaitError caught
+# here already represents a wait >300s — and Telegram can return waits of
+# hours. Cap each attempt's sleep so the worst case is bounded (retry_limit *
+# this cap) instead of unbounded; a capped-short sleep still lets the retry
+# loop recover from a flood that clears quickly.
+_TAIL_SEND_MAX_SINGLE_WAIT_SEC = 60
+
+# Returned by an `on_caption_too_long` hook passed to
+# `_send_with_reference_refresh` to say "already fully handled (including
+# config.send_delay) — the caller should just move on to the next target,
+# without tracking a message or sleeping again."
+_CAPTION_SPLIT_HANDLED = object()
 
 
 def _consume_task_result(task: asyncio.Task) -> None:
@@ -299,6 +311,88 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             return None
         return fresh_media
 
+    async def _send_with_reference_refresh(
+        self: "EventProcessor",
+        *,
+        send: Callable[[], Awaitable],
+        apply_fresh_media: Callable[[List[types.TypeMessageMedia]], None],
+        kind: str,
+        outgoing_chat: int,
+        chat_id: int,
+        ids: List[int],
+        source_link: str,
+        flush_inserted: Optional[Callable[[], Awaitable[None]]] = None,
+        on_caption_too_long: Optional[Callable[[], Awaitable]] = None,
+        log_kind: Optional[str] = None,
+        context_suffix: str = "",
+    ):
+        """Call `send()`; on ``FileReferenceExpiredError`` refresh the stale
+        file_reference via `_refresh_file_reference` and call `send()` again,
+        once, after `apply_fresh_media` has applied the fresh media. Because
+        `apply_fresh_media` mutates whatever `send`'s closure reads (the
+        outgoing message/album *and* the shared source message/album), the
+        same `send` closure serves both attempts unchanged.
+
+        `FloodWaitError`/`FloodPremiumWaitError` are flushed (if `flush_inserted`
+        is given) and re-raised at either attempt, same contract as every send
+        in this module. A ``MediaCaptionTooLongError`` from the *first* attempt
+        is left uncaught for the caller's own handler to dispatch to its
+        caption-split fallback; `on_caption_too_long` covers it recurring on
+        the retried send (only relevant for `new_message`/`new_album`'s
+        primary send — the caption-split fallbacks' own retry can't hit it,
+        since their caption is already empty/safe by construction).
+
+        Shared by `new_message`'s and `new_album`'s primary sends, and by
+        `_send_with_caption_split`'s/`_send_album_with_caption_split`'s own
+        retry-after-refresh. Returns `send()`'s result, or `None` if the
+        caller should skip (as if via `continue`) this target.
+        """
+        log_kind = log_kind or kind
+
+        async def _retry_after_refresh():
+            try:
+                return await send()
+            except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+                if flush_inserted is not None:
+                    await flush_inserted()
+                raise
+            except Exception as e:
+                if isinstance(e, errors.MediaCaptionTooLongError) and on_caption_too_long is not None:
+                    return await on_caption_too_long()
+                self._logger.error(
+                    f"Error while sending {log_kind} to chat#{outgoing_chat}{context_suffix} "
+                    f"after file_reference refresh. {type(e).__name__}: {e}"
+                )
+                return None
+
+        try:
+            return await send()
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+            if flush_inserted is not None:
+                await flush_inserted()
+            raise
+        except errors.FileReferenceExpiredError:
+            fresh_media = await self._refresh_file_reference(
+                kind=kind,
+                outgoing_chat=outgoing_chat,
+                chat_id=chat_id,
+                ids=ids,
+                source_link=source_link,
+                flush_inserted=flush_inserted,
+            )
+            if fresh_media is None:
+                return None
+            apply_fresh_media(fresh_media)
+            return await _retry_after_refresh()
+        except errors.MediaCaptionTooLongError:
+            raise
+        except Exception as e:
+            self._logger.error(
+                f"Error while sending {log_kind} to chat#{outgoing_chat}{context_suffix}. "
+                f"{type(e).__name__}: {e}"
+            )
+            return None
+
     async def _send_tail_text(
         self: "EventProcessor",
         *,
@@ -344,7 +438,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         f"text lost ({what} already delivered and tracked)"
                     )
                     return
-                await asyncio.sleep(e.seconds)
+                await asyncio.sleep(min(e.seconds, _TAIL_SEND_MAX_SINGLE_WAIT_SEC))
             except Exception as split_err:
                 self._logger.error(
                     f"Error while sending split {what} tail to chat#{outgoing_chat}{context_suffix}. "
@@ -387,58 +481,41 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         text, entities = filtered_message.message, filtered_message.entities
         filtered_message.message = ""
         filtered_message.entities = None
-        try:
-            outgoing_message = await send_message(
-                self._client,
-                entity=outgoing_chat,
-                message=filtered_message,
-                formatting_entities=None,
-                reply_to=reply_to,
-                reply_to_topic_id=reply_to_topic_id,
-            )
-        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-            # Media not delivered: let past_mode's retry wrapper wait it out
-            # without advancing the checkpoint past this message (same
-            # contract as the outer handler in new_message).
-            await flush_inserted()
-            raise
-        except errors.FileReferenceExpiredError:
-            fresh_media = await self._refresh_file_reference(
-                kind="message",
-                outgoing_chat=outgoing_chat,
-                chat_id=chat_id,
-                ids=[message.id],
-                source_link=source_link,
-                flush_inserted=flush_inserted,
-            )
-            if fresh_media is None:
-                return
-            filtered_message.media = fresh_media[0]
+
+        def _apply_fresh_message_media(fresh: List[types.TypeMessageMedia]) -> None:
+            filtered_message.media = fresh[0]
             # Also refresh the shared source message: see new_message.
-            message.media = fresh_media[0]
-            try:
-                outgoing_message = await send_message(
+            message.media = fresh[0]
+
+        try:
+            outgoing_message = await self._send_with_reference_refresh(
+                send=lambda: send_message(
                     self._client,
                     entity=outgoing_chat,
                     message=filtered_message,
                     formatting_entities=None,
                     reply_to=reply_to,
                     reply_to_topic_id=reply_to_topic_id,
-                )
-            except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-                await flush_inserted()
-                raise
-            except Exception as split_err:
-                self._logger.error(
-                    f"Error while sending split message to chat#{outgoing_chat}{context_suffix} "
-                    f"after file_reference refresh. {type(split_err).__name__}: {split_err}"
-                )
-                return
-        except Exception as split_err:
+                ),
+                apply_fresh_media=_apply_fresh_message_media,
+                kind="message",
+                outgoing_chat=outgoing_chat,
+                chat_id=chat_id,
+                ids=[message.id],
+                source_link=source_link,
+                flush_inserted=flush_inserted,
+                log_kind="split message",
+                context_suffix=context_suffix,
+            )
+        except errors.MediaCaptionTooLongError as split_err:
+            # Can't actually happen (caption is already empty), but keep the
+            # same catch-all contract as every other branch here.
             self._logger.error(
                 f"Error while sending split message to chat#{outgoing_chat}{context_suffix}. "
                 f"{type(split_err).__name__}: {split_err}"
             )
+            return
+        if outgoing_message is None:
             return
         # Track the media now, before the tail-text send below: that send may
         # need to wait out a long FloodWait, and the media above is already
@@ -494,38 +571,19 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             else:
                 safe_captions.append(caption)
                 safe_entities.append(album_entities[i])
-        try:
-            outgoing_messages = await send_file(
-                self._client,
-                entity=outgoing_chat,
-                caption=safe_captions,
-                file=files,
-                formatting_entities=safe_entities,
-                reply_to=reply_to,
-                reply_to_topic_id=reply_to_topic_id,
-            )
-        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-            # Album not delivered: propagate to past_mode's retry wrapper
-            # (same contract as the outer handler in new_album).
-            raise
-        except errors.FileReferenceExpiredError:
-            fresh_files = await self._refresh_file_reference(
-                kind="album",
-                outgoing_chat=outgoing_chat,
-                chat_id=chat_id,
-                ids=idxs,
-                source_link=album_link,
-            )
-            if fresh_files is None:
-                return
-            files = fresh_files
+
+        def _apply_fresh_album_media(fresh: List[types.TypeMessageMedia]) -> None:
+            nonlocal files
+            files = fresh
             # Also refresh the shared source album: see new_album.
             fresh_media_by_id = dict(zip(idxs, files, strict=True))
             for original_message in album:
                 if original_message.id in fresh_media_by_id:
                     original_message.media = fresh_media_by_id[original_message.id]
-            try:
-                outgoing_messages = await send_file(
+
+        try:
+            outgoing_messages = await self._send_with_reference_refresh(
+                send=lambda: send_file(
                     self._client,
                     entity=outgoing_chat,
                     caption=safe_captions,
@@ -533,20 +591,25 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     formatting_entities=safe_entities,
                     reply_to=reply_to,
                     reply_to_topic_id=reply_to_topic_id,
-                )
-            except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-                raise
-            except Exception as split_err:
-                self._logger.error(
-                    f"Error while sending split album to chat#{outgoing_chat}{context_suffix} "
-                    f"after file_reference refresh. {type(split_err).__name__}: {split_err}"
-                )
-                return
-        except Exception as split_err:
+                ),
+                apply_fresh_media=_apply_fresh_album_media,
+                kind="album",
+                outgoing_chat=outgoing_chat,
+                chat_id=chat_id,
+                ids=idxs,
+                source_link=album_link,
+                log_kind="split album",
+                context_suffix=context_suffix,
+            )
+        except errors.MediaCaptionTooLongError as split_err:
+            # Can't actually happen (captions are already split short), but
+            # keep the same catch-all contract as every other branch here.
             self._logger.error(
                 f"Error while sending split album to chat#{outgoing_chat}{context_suffix}. "
                 f"{type(split_err).__name__}: {split_err}"
             )
+            return
+        if outgoing_messages is None:
             return
         # Track the album now, before the tail-caption sends below: those may
         # need to wait out a long FloodWait, and the album above is already
@@ -710,9 +773,25 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     # write-then-sleep order as new_album).
                     await flush_inserted()
 
-                outgoing_message: types.Message = None
-                try:
-                    outgoing_message = (
+                def _apply_fresh_message_media(
+                    fresh: List[types.TypeMessageMedia],
+                    filtered_message: EventMessage = filtered_message,
+                ) -> None:
+                    filtered_message.media = fresh[0]
+                    # Also refresh the shared source message: every remaining
+                    # fan-out target for it copies from `message`, and would
+                    # otherwise redo this same refetch against the same stale
+                    # reference once per target.
+                    message.media = fresh[0]
+
+                async def _do_send(
+                    outgoing_chat: int = outgoing_chat,
+                    filtered_message: EventMessage = filtered_message,
+                    reply_to: Optional[int] = reply_to,
+                    reply_to_topic_id: Optional[int] = reply_to_topic_id,
+                    config: DirectionConfig = config,
+                ):
+                    return (
                         await send_message(
                             self._client,
                             entity=outgoing_chat,
@@ -728,6 +807,53 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             messages=message,
                             reply_to_topic_id=config.to_topic_id,
                         )
+                    )
+
+                async def _on_caption_too_long(
+                    outgoing_chat: int = outgoing_chat,
+                    filtered_message: EventMessage = filtered_message,
+                    reply_to: Optional[int] = reply_to,
+                    reply_to_topic_id: Optional[int] = reply_to_topic_id,
+                    config: DirectionConfig = config,
+                ):
+                    # Same caption-too-long fallback as the primary attempt
+                    # above. Media presence was already confirmed by the
+                    # refresh above.
+                    await self._send_with_caption_split(
+                        outgoing_chat=outgoing_chat,
+                        chat_id=chat_id,
+                        message=message,
+                        source_link=message_link,
+                        filtered_message=filtered_message,
+                        reply_to=reply_to,
+                        reply_to_topic_id=reply_to_topic_id,
+                        config=config,
+                        flush_inserted=flush_inserted,
+                        track_media=track_media,
+                        context_suffix=" after file_reference refresh",
+                    )
+                    # Tracking (if the media was actually delivered), and
+                    # config.send_delay, already happened inside
+                    # _send_with_caption_split / here.
+                    if config.send_delay:
+                        await asyncio.sleep(config.send_delay)
+                    return _CAPTION_SPLIT_HANDLED
+
+                try:
+                    # The media's file_reference (grabbed when the message was
+                    # iterated) can go stale before we get to send it —
+                    # refetch the source message for a fresh one and retry
+                    # once (FileReferenceExpiredError, copy mode only).
+                    outgoing_message = await self._send_with_reference_refresh(
+                        send=_do_send,
+                        apply_fresh_media=_apply_fresh_message_media,
+                        kind="message",
+                        outgoing_chat=outgoing_chat,
+                        chat_id=chat_id,
+                        ids=[message.id],
+                        source_link=message_link,
+                        flush_inserted=flush_inserted,
+                        on_caption_too_long=_on_caption_too_long,
                     )
                 except errors.MediaCaptionTooLongError:
                     # MediaCaptionTooLongError can only originate from the
@@ -749,87 +875,13 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     if config.send_delay:
                         await asyncio.sleep(config.send_delay)
                     continue
-                except errors.FileReferenceExpiredError:
-                    # The media's file_reference (grabbed when the message was
-                    # iterated) went stale before we got to send it — refetch the
-                    # source message for a fresh one and retry once. Can only
-                    # originate from the send_message() call above (copy mode).
-                    fresh_media = await self._refresh_file_reference(
-                        kind="message",
-                        outgoing_chat=outgoing_chat,
-                        chat_id=chat_id,
-                        ids=[message.id],
-                        source_link=message_link,
-                        flush_inserted=flush_inserted,
-                    )
-                    if fresh_media is None:
-                        continue
-                    filtered_message.media = fresh_media[0]
-                    # Also refresh the shared source message: every remaining
-                    # fan-out target for it copies from `message`, and would
-                    # otherwise redo this same refetch against the same stale
-                    # reference once per target.
-                    message.media = fresh_media[0]
-                    try:
-                        outgoing_message = await send_message(
-                            self._client,
-                            entity=outgoing_chat,
-                            message=filtered_message,
-                            formatting_entities=filtered_message.entities,
-                            reply_to=reply_to,
-                            reply_to_topic_id=reply_to_topic_id,
-                        )
-                    except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-                        # Same contract as every other send attempt above: let
-                        # past_mode's retry wrapper wait it out rather than
-                        # silently skipping the message.
-                        await flush_inserted()
-                        raise
-                    except errors.MediaCaptionTooLongError:
-                        # Same caption-too-long fallback as the primary attempt
-                        # above. Media presence was already confirmed by the
-                        # refresh above.
-                        await self._send_with_caption_split(
-                            outgoing_chat=outgoing_chat,
-                            chat_id=chat_id,
-                            message=message,
-                            source_link=message_link,
-                            filtered_message=filtered_message,
-                            reply_to=reply_to,
-                            reply_to_topic_id=reply_to_topic_id,
-                            config=config,
-                            flush_inserted=flush_inserted,
-                            track_media=track_media,
-                            context_suffix=" after file_reference refresh",
-                        )
-                        if config.send_delay:
-                            await asyncio.sleep(config.send_delay)
-                        continue
-                    except Exception as e:
-                        self._logger.error(
-                            f"Error while sending message to chat#{outgoing_chat} "
-                            f"after file_reference refresh. {type(e).__name__}: {e}"
-                        )
-                        continue
-                except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-                    # Let a >threshold FloodWait propagate: past_mode's retry
-                    # wrapper handles it without advancing the checkpoint past
-                    # this un-sent message. In live mode there is no retry, so
-                    # this aborts the rest of the fan-out for this message — an
-                    # accepted trade-off (a >300s wait means the account is
-                    # already heavily limited). Persist what was already sent
-                    # to earlier targets before unwinding.
-                    await flush_inserted()
-                    raise
-                except Exception as e:
-                    self._logger.error(
-                        f"Error while sending message to chat#{outgoing_chat}. "
-                        f"{type(e).__name__}: {e}"
-                    )
+
+                if outgoing_message is _CAPTION_SPLIT_HANDLED:
+                    continue
+                if outgoing_message is None:
                     continue
 
-                if outgoing_message:
-                    await track_media(outgoing_message)
+                await track_media(outgoing_message)
 
                 if config.send_delay:
                     await asyncio.sleep(config.send_delay)
@@ -971,14 +1023,45 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         ]
                     )
 
-                outgoing_messages: List[types.Message] = None
-                try:
-                    outgoing_messages = (
+                # `files` is intentionally read by name (not bound as a
+                # default arg like the other loop locals below) in `_do_send`
+                # and `_on_caption_too_long`: it must see the *rebind* this
+                # function does below when the retry needs the refreshed
+                # media — a default arg would instead freeze the stale
+                # pre-refresh value. Safe because `_do_send` and
+                # `_on_caption_too_long` are only ever called synchronously
+                # within this same loop iteration, never after it.
+                def _apply_fresh_album_media(
+                    fresh: List[types.TypeMessageMedia],
+                    idxs: List[int] = idxs,
+                ) -> None:
+                    nonlocal files
+                    files = fresh
+                    # Also refresh the shared source album: every remaining
+                    # fan-out target for it copies from `album`, and would
+                    # otherwise redo this same refetch against the same stale
+                    # references once per target.
+                    fresh_media_by_id = dict(zip(idxs, files, strict=True))
+                    for original_message in album:
+                        if original_message.id in fresh_media_by_id:
+                            original_message.media = fresh_media_by_id[
+                                original_message.id
+                            ]
+
+                async def _do_send(
+                    outgoing_chat: int = outgoing_chat,
+                    captions: List[str] = captions,
+                    album_entities: List[List[types.TypeMessageEntity]] = album_entities,
+                    reply_to: Optional[int] = reply_to,
+                    reply_to_topic_id: Optional[int] = reply_to_topic_id,
+                    config: DirectionConfig = config,
+                ):
+                    return (
                         await send_file(
                             self._client,
                             entity=outgoing_chat,
                             caption=captions,
-                            file=files,
+                            file=files,  # noqa: B023 — see comment above _apply_fresh_album_media
                             formatting_entities=album_entities,
                             reply_to=reply_to,
                             reply_to_topic_id=reply_to_topic_id,
@@ -990,6 +1073,51 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             messages=album,
                             reply_to_topic_id=config.to_topic_id,
                         )
+                    )
+
+                async def _on_caption_too_long(
+                    outgoing_chat: int = outgoing_chat,
+                    idxs: List[int] = idxs,
+                    captions: List[str] = captions,
+                    album_entities: List[List[types.TypeMessageEntity]] = album_entities,
+                    reply_to: Optional[int] = reply_to,
+                    reply_to_topic_id: Optional[int] = reply_to_topic_id,
+                    config: DirectionConfig = config,
+                ):
+                    # Same caption-too-long fallback as the primary attempt
+                    # above.
+                    await self._send_album_with_caption_split(
+                        outgoing_chat=outgoing_chat,
+                        chat_id=chat_id,
+                        idxs=idxs,
+                        album=album,
+                        album_link=album_link,
+                        files=files,  # noqa: B023 — see comment above _apply_fresh_album_media
+                        captions=captions,
+                        album_entities=album_entities,
+                        reply_to=reply_to,
+                        reply_to_topic_id=reply_to_topic_id,
+                        config=config,
+                        track_media=track_media,
+                        context_suffix=" after file_reference refresh",
+                    )
+                    if config.send_delay:
+                        await asyncio.sleep(config.send_delay)
+                    return _CAPTION_SPLIT_HANDLED
+
+                try:
+                    # See new_message: one of the album's file_references can
+                    # go stale before send — refetch the source messages and
+                    # retry once (FileReferenceExpiredError, copy mode only).
+                    outgoing_messages = await self._send_with_reference_refresh(
+                        send=_do_send,
+                        apply_fresh_media=_apply_fresh_album_media,
+                        kind="album",
+                        outgoing_chat=outgoing_chat,
+                        chat_id=chat_id,
+                        ids=idxs,
+                        source_link=album_link,
+                        on_caption_too_long=_on_caption_too_long,
                     )
                 except errors.MediaCaptionTooLongError:
                     # MediaCaptionTooLongError can only originate from the
@@ -1013,80 +1141,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     if config.send_delay:
                         await asyncio.sleep(config.send_delay)
                     continue
-                except errors.FileReferenceExpiredError:
-                    # See new_message: one of the album's file_references went
-                    # stale before send — refetch the source messages and retry
-                    # once. Can only originate from the send_file() call above
-                    # (copy mode).
-                    files = await self._refresh_file_reference(
-                        kind="album",
-                        outgoing_chat=outgoing_chat,
-                        chat_id=chat_id,
-                        ids=idxs,
-                        source_link=album_link,
-                    )
-                    if files is None:
-                        continue
-                    # Also refresh the shared source album: every remaining
-                    # fan-out target for it copies from `album`, and would
-                    # otherwise redo this same refetch against the same stale
-                    # references once per target.
-                    fresh_media_by_id = dict(zip(idxs, files, strict=True))
-                    for original_message in album:
-                        if original_message.id in fresh_media_by_id:
-                            original_message.media = fresh_media_by_id[
-                                original_message.id
-                            ]
-                    try:
-                        outgoing_messages = await send_file(
-                            self._client,
-                            entity=outgoing_chat,
-                            caption=captions,
-                            file=files,
-                            formatting_entities=album_entities,
-                            reply_to=reply_to,
-                            reply_to_topic_id=reply_to_topic_id,
-                        )
-                    except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-                        # Same contract as new_message: propagate to past_mode's
-                        # retry wrapper instead of silently skipping the album.
-                        raise
-                    except errors.MediaCaptionTooLongError:
-                        # Same caption-too-long fallback as the primary attempt
-                        # above.
-                        await self._send_album_with_caption_split(
-                            outgoing_chat=outgoing_chat,
-                            chat_id=chat_id,
-                            idxs=idxs,
-                            album=album,
-                            album_link=album_link,
-                            files=files,
-                            captions=captions,
-                            album_entities=album_entities,
-                            reply_to=reply_to,
-                            reply_to_topic_id=reply_to_topic_id,
-                            config=config,
-                            track_media=track_media,
-                            context_suffix=" after file_reference refresh",
-                        )
-                        if config.send_delay:
-                            await asyncio.sleep(config.send_delay)
-                        continue
-                    except Exception as e:
-                        self._logger.error(
-                            f"Error while sending album to chat#{outgoing_chat} "
-                            f"after file_reference refresh. {type(e).__name__}: {e}"
-                        )
-                        continue
-                except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-                    # See new_message: propagate to past_mode's retry wrapper
-                    # (in live mode this aborts the rest of the fan-out).
-                    raise
-                except Exception as e:
-                    self._logger.error(
-                        f"Error while sending album to chat#{outgoing_chat}. "
-                        f"{type(e).__name__}: {e}"
-                    )
+
+                if outgoing_messages is _CAPTION_SPLIT_HANDLED:
+                    continue
+                if outgoing_messages is None:
                     continue
 
                 # Expect non-empty list of messages
