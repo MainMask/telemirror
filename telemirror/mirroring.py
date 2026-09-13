@@ -270,47 +270,6 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             return True
         return config.from_topic_id == topic_id_of(message)
 
-    async def _refresh_file_reference(
-        self: "EventProcessor",
-        *,
-        kind: str,
-        outgoing_chat: int,
-        chat_id: int,
-        ids: List[int],
-        source_link: str,
-        flush_inserted: Optional[Callable[[], Awaitable[None]]] = None,
-    ) -> Optional[List[types.TypeMessageMedia]]:
-        """Refetch source message(s) by id for a fresh file_reference (the one
-        grabbed when the message was iterated went stale before send), shared
-        by `new_message`'s and `new_album`'s ``FileReferenceExpiredError``
-        handlers. Returns each id's fresh `.media`, in the same order as
-        `ids`, or `None` if the caller should skip (`continue`) this target:
-        any source message is gone or has lost its media. FloodWaitError
-        propagates (after `flush_inserted`, if given) to past_mode's retry
-        wrapper, same contract as every send attempt here.
-        """
-        try:
-            fresh_media = await fetch_fresh_media(self._client, chat_id, ids)
-        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-            if flush_inserted is not None:
-                await flush_inserted()
-            raise
-        except Exception as e:
-            self._logger.error(
-                f"Error while sending {kind} to chat#{outgoing_chat}. "
-                f"FileReferenceExpiredError: refetch failed. "
-                f"{type(e).__name__}: {e}"
-            )
-            return None
-        if fresh_media is None:
-            self._logger.error(
-                f"Error while sending {kind} to chat#{outgoing_chat}. "
-                f"FileReferenceExpiredError: source {kind} {source_link} "
-                f"is gone, can't refresh file_reference"
-            )
-            return None
-        return fresh_media
-
     async def _send_with_reference_refresh(
         self: "EventProcessor",
         *,
@@ -327,8 +286,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         context_suffix: str = "",
     ):
         """Call `send()`; on ``FileReferenceExpiredError`` refresh the stale
-        file_reference via `_refresh_file_reference` and call `send()` again,
-        once, after `apply_fresh_media` has applied the fresh media. Because
+        file_reference by refetching the source message(s) and call `send()`
+        again, once, after `apply_fresh_media` has applied the fresh media. Because
         `apply_fresh_media` mutates whatever `send`'s closure reads (the
         outgoing message/album *and* the shared source message/album), the
         same `send` closure serves both attempts unchanged.
@@ -372,15 +331,30 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 await flush_inserted()
             raise
         except errors.FileReferenceExpiredError:
-            fresh_media = await self._refresh_file_reference(
-                kind=kind,
-                outgoing_chat=outgoing_chat,
-                chat_id=chat_id,
-                ids=ids,
-                source_link=source_link,
-                flush_inserted=flush_inserted,
-            )
+            # Refetch the source message(s) by id for a fresh file_reference
+            # (the one grabbed when the message was iterated went stale
+            # before send). `None` here means the caller should skip
+            # (`continue`) this target: any source message is gone or has
+            # lost its media.
+            try:
+                fresh_media = await fetch_fresh_media(self._client, chat_id, ids)
+            except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+                if flush_inserted is not None:
+                    await flush_inserted()
+                raise
+            except Exception as e:
+                self._logger.error(
+                    f"Error while sending {kind} to chat#{outgoing_chat}. "
+                    f"FileReferenceExpiredError: refetch failed. "
+                    f"{type(e).__name__}: {e}"
+                )
+                return None
             if fresh_media is None:
+                self._logger.error(
+                    f"Error while sending {kind} to chat#{outgoing_chat}. "
+                    f"FileReferenceExpiredError: source {kind} {source_link} "
+                    f"is gone, can't refresh file_reference"
+                )
                 return None
             apply_fresh_media(fresh_media)
             return await _retry_after_refresh()
@@ -468,8 +442,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         A ``FileReferenceExpiredError`` from this fallback's own send (the
         reference was already stale on the primary, not-yet-refreshed attempt)
         gets the same one-refresh-then-retry treatment as `new_message`'s outer
-        handler, via the shared `_refresh_file_reference`, rather than being
-        dropped by the generic exception handler below.
+        handler, via `_send_with_reference_refresh`, rather than being dropped
+        by the generic exception handler below.
         """
         if not filtered_message.media or not filtered_message.message:
             self._logger.error(
@@ -557,8 +531,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         A ``FileReferenceExpiredError`` from this fallback's own send (the
         reference was already stale on the primary, not-yet-refreshed attempt)
         gets the same one-refresh-then-retry treatment as `new_album`'s outer
-        handler, via the shared `_refresh_file_reference`, rather than being
-        dropped by the generic exception handler below.
+        handler, via `_send_with_reference_refresh`, rather than being dropped
+        by the generic exception handler below.
         """
         texts_to_send = []
         safe_captions = []
