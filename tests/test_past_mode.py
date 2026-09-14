@@ -560,3 +560,39 @@ def test_edit_links_pass_streams_source_messages_in_batches(monkeypatch):
 
     assert client.batch_sizes == [100, 50]
     assert sorted(m for _e, m, _t, _ents in client.edits) == [910, 1040]
+
+
+def test_edit_links_pass_fixes_every_mirror_of_a_multi_topic_source_message():
+    """A source message mirrored into TGT via more than one topic-scoped
+    config shares one `original_id` across several `MirrorMessage` rows
+    (`binding_id` has no topic column — multi-topic-per-pair replay is a
+    supported feature, see REVIEW.md Batch C). Keying the lookup dict by
+    `original_id` alone (pre-fix) collapsed those rows to one, so only one
+    topic's mirror ever got its broken link fixed; the other kept it stale
+    forever (this pass is best-effort, run-once)."""
+    db = run(InMemoryDatabase())
+    # message 10 mirrored into TGT twice (two topics): 910 and 920. Both must
+    # get their link fixed.
+    run(db.insert_batch([
+        MirrorMessage(10, SRC, 910, TGT),
+        MirrorMessage(10, SRC, 920, TGT),
+        MirrorMessage(7, SRC, 907, TGT),
+    ]))
+
+    src_peer = -SRC - 1000000000000
+    linked = types.Message(
+        id=10,
+        peer_id=types.PeerChannel(1),
+        message="link",
+        entities=[types.MessageEntityTextUrl(
+            offset=0, length=4, url=f"https://t.me/c/{src_peer}/7"
+        )],
+    )
+    client = _EditFakeClient([linked])
+
+    run(past_mode._edit_links_pass(
+        client, db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]},
+        _LOG,
+    ))
+
+    assert sorted(message_id for _e, message_id, _t, _ents in client.edits) == [910, 920]

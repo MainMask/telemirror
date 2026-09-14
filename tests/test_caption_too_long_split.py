@@ -236,3 +236,54 @@ def test_new_album_flood_on_caption_tail_recovers(monkeypatch):
     assert send_message_calls[-1] == long_caption  # the caption tail was delivered
     tracked = run(db.get_messages(1, SOURCE)) + run(db.get_messages(2, SOURCE))
     assert sorted(m.mirror_id for m in tracked) == [911, 912]
+
+
+def test_new_album_split_measures_caption_in_utf16_not_codepoints(monkeypatch):
+    """`_send_album_with_caption_split`'s per-item 1024 check must use
+    Telegram's UTF-16 code-unit length, not Python's codepoint `len()`. An
+    emoji-heavy caption can be <=1024 Python chars while its real (UTF-16)
+    length exceeds 1024 — surrogate pairs count as 2 units each. Emulates
+    Telegram's own send_file by raising MediaCaptionTooLongError whenever any
+    caption's *UTF-16* length is over the limit, exactly like the real
+    server would (regardless of what our own split logic decided)."""
+    from telethon import utils as tg_utils
+
+    db = run(InMemoryDatabase())
+    send_file_calls = []
+    send_message_calls = []
+
+    # 600 non-BMP emoji: 600 Python chars, but 1200 UTF-16 code units.
+    emoji_caption = "\U0001F600" * 600
+
+    async def fake_send_file(client, entity, caption, file, **kw):
+        send_file_calls.append(list(caption))
+        if any(len(tg_utils.add_surrogate(c)) > 1024 for c in caption):
+            raise mirroring.errors.MediaCaptionTooLongError(request=None)
+        return [
+            types.Message(id=921, peer_id=types.PeerChannel(1), message=""),
+            types.Message(id=922, peer_id=types.PeerChannel(1), message=""),
+        ]
+
+    async def fake_send_message(client, entity, message, **kw):
+        send_message_calls.append(message)
+        return types.Message(id=923, peer_id=types.PeerChannel(1), message="")
+
+    monkeypatch.setattr(mirroring, "send_file", fake_send_file)
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    album = [
+        make_message(emoji_caption, media=types.MessageMediaUnsupported(), channel_id=1000),
+        make_message("y", media=types.MessageMediaUnsupported(), channel_id=1000),
+    ]
+    album[1].id = 2
+    run(_proc(db).new_album(SOURCE, album, "link"))
+
+    # Split path ran twice: primary attempt (rejected), retry with the
+    # over-limit caption correctly stripped to "" (not left as-is).
+    assert len(send_file_calls) == 2
+    assert send_file_calls[1][0] == ""
+    # The stripped caption was still delivered, as a separate tail text.
+    assert emoji_caption in send_message_calls
+    # And the album itself was tracked instead of being silently dropped.
+    tracked = run(db.get_messages(1, SOURCE)) + run(db.get_messages(2, SOURCE))
+    assert sorted(m.mirror_id for m in tracked) == [921, 922]

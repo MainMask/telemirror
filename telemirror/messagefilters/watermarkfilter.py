@@ -66,8 +66,10 @@ class WatermarkRemovalFilter(MessageFilter):
             ``template_path``). Default true.
         stamp_watermark: overlay ``stamp_watermark_path`` (my_watermark.png).
             Default true.
-        channels: optional list of source channel ids to limit processing to;
-            omit to process every mirrored photo/video.
+        channels: optional list of numeric source channel ids (int, or a
+            numeric string) to limit processing to; omit to process every
+            mirrored photo/video. Not a ``@username`` — every value is
+            coerced with ``int(...)``.
         Other keys (``template_path``, ``match_threshold``, ``stamp_scale``,
         ``stamp_opacity`` …) are forwarded to WatermarkConfig.
 
@@ -80,7 +82,7 @@ class WatermarkRemovalFilter(MessageFilter):
 
     def __init__(
         self,
-        channels: Optional[list[int | str]] = None,
+        channels: Optional[list[int]] = None,
         **config: object,
     ) -> None:
         self._config = WatermarkConfig(**config)

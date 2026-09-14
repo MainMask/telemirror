@@ -95,6 +95,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         # Only successful resolutions are stored; a miss may become resolvable later.
         self._username_id_cache: LRUCache[str, int] = LRUCache(capacity=256)
 
+    @property
+    def logger(self: "EventProcessor") -> logging.Logger:
+        """Read-only access for callers that hold an `EventProcessor` but
+        aren't one themselves (e.g. `EventHandlers.on_private_message`)."""
+        return self._logger
+
     @staticmethod
     def __handle_exceptions(fn):
         from functools import wraps
@@ -269,6 +275,26 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         if config.from_topic_id is None:
             return True
         return config.from_topic_id == topic_id_of(message)
+
+    async def _reply_target_mirrors(
+        self: "EventProcessor", chat_id: int, reply_to_msg_id: int
+    ) -> Dict[int, int]:
+        """Mirror id of ``reply_to_msg_id`` (from ``chat_id``) per mirror
+        channel — used to reply-chain a mirrored message to its mirrored
+        parent.
+
+        A mirror channel can hold more than one mirror of the same source
+        message when it's reached by more than one topic-scoped
+        ``DirectionConfig`` (see ``new_message``'s ``already_mirrored``
+        comment: ``binding_id`` has no topic column). When that happens we
+        can't tell which mirror_id belongs to which topic, so that channel
+        is left out entirely rather than reply-chaining to a mirror_id that
+        may live in the wrong topic.
+        """
+        by_channel: Dict[int, List[int]] = {}
+        for m in await self._database.get_messages(reply_to_msg_id, chat_id):
+            by_channel.setdefault(m.mirror_channel, []).append(m.mirror_id)
+        return {ch: ids[0] for ch, ids in by_channel.items() if len(ids) == 1}
 
     async def _send_with_reference_refresh(
         self: "EventProcessor",
@@ -538,7 +564,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         safe_captions = []
         safe_entities = []
         for i, caption in enumerate(captions):
-            if len(caption) > 1024:
+            # Telegram counts caption length in UTF-16 code units, not Python
+            # codepoints — an emoji-heavy caption can be <=1024 Python chars
+            # while still exceeding the real limit (surrogate pairs).
+            if len(utils.add_surrogate(caption)) > 1024:
                 texts_to_send.append((caption, album_entities[i]))
                 safe_captions.append("")
                 safe_entities.append([])
@@ -624,12 +653,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         self._logger.info(f"[New message]: {message_link}")
 
         reply_to_messages: dict[int, int] = (
-            {
-                m.mirror_channel: m.mirror_id
-                for m in await self._database.get_messages(
-                    message.reply_to_msg_id, chat_id
-                )
-            }
+            await self._reply_target_mirrors(chat_id, message.reply_to_msg_id)
             if message.is_reply
             else {}
         )
@@ -880,12 +904,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         self._logger.info(f"[New album]: {album_link}")
 
         reply_to_messages: dict[int, int] = (
-            {
-                m.mirror_channel: m.mirror_id
-                for m in await self._database.get_messages(
-                    incoming_first_message.reply_to_msg_id, chat_id
-                )
-            }
+            await self._reply_target_mirrors(
+                chat_id, incoming_first_message.reply_to_msg_id
+            )
             if incoming_first_message.is_reply
             else {}
         )
@@ -1381,13 +1402,24 @@ class EventHandlers:
         self: "EventHandlers", event: events.NewMessage.Event
     ) -> None:
         """Notify tech_channel about incoming private messages."""
-        sender_obj = await event.get_sender()
-        # sender-controlled — collapse whitespace and cap length so it can't
-        # break or spam the tech-channel message.
-        name = " ".join((utils.get_display_name(sender_obj) or "").split())[:100]
-        username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "none"
-        msg = f"📩 Private message from {name} ({username})"
-        await self._sender.send_message(self._tech_channel, msg)
+        try:
+            sender_obj = await event.get_sender()
+            # sender-controlled — collapse whitespace and cap length so it
+            # can't break or spam the tech-channel message.
+            name = " ".join((utils.get_display_name(sender_obj) or "").split())[:100]
+            username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "none"
+            msg = f"📩 Private message from {name} ({username})"
+            await self._sender.send_message(self._tech_channel, msg)
+        except Exception as e:
+            # Unlike every other handler here, this one doesn't go through
+            # EventProcessor.__handle_exceptions — log through the same
+            # logger it uses so a failure still reaches TECH_CHANNEL via
+            # TelegramLogHandler, instead of only Telethon's own default
+            # per-handler logging (a different logger, never attached to it).
+            self._processor.logger.error(
+                f"Error while notifying TECH_CHANNEL about a private message. "
+                f"{type(e).__name__}: {e}"
+            )
 
     def event_message_link(self: "EventHandlers", event: EventLike) -> str:
         """Get link to event message"""

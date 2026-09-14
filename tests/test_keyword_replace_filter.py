@@ -63,6 +63,16 @@ def test_broken_regex_keyword_raises_value_error():
         SkipWithKeywordsFilter({"r'[z-a]'"})
 
 
+def test_replacement_referencing_nonexistent_group_raises_value_error_at_construction():
+    """A raw-regex rule whose replacement references a capture group the
+    pattern doesn't have (e.g. `\\2` against a one-group pattern) must fail
+    fast at construction — like a broken pattern already does — instead of
+    raising a bare `re.error` out of `_apply_rule` the first time a real
+    message happens to match."""
+    with pytest.raises(ValueError):
+        KeywordReplaceFilter({r"r'(foo)'": r"\2"})
+
+
 @pytest.mark.parametrize("cls", [SkipWithKeywordsFilter, AllowWithKeywordsFilter])
 def test_empty_keywords_rejected(cls):
     """An empty set would compile to a match-everything regex — fail fast instead."""

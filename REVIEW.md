@@ -1805,3 +1805,275 @@ three more issues in the same `FileReferenceExpiredError` machinery.
   the next attempt succeeds; confirmed it fails as `MediaDownloadError`
   against the pre-fix code before confirming the fix makes it pass). Full
   suite: 300 → 303, `ruff` clean.
+
+---
+
+# Pass 16 — token-limited-pass findings, verified and fixed (`skylon_set/telemirror-bugfix-review-prompt.md`)
+
+Picked up 10 candidate findings left by an earlier, deliberately cheap review
+pass (3 parallel agents scoped to disjoint file groups, one manual
+read-and-verify pass per finding, no whole-project sweep). Re-verified every
+one against the current code (several months of fixes had landed since they
+were written) rather than transcribing them, then ran the cross-cutting
+sweeps the prompt calls for (UTF-16 vs codepoint length, dict/set key
+collapsing, `zip()` strictness, event-handler exception-wrapping
+consistency, `except Exception` near checkpoint state, union type-hint
+handling, blocking calls inside `async def`, and an ad hoc `mypy` run — no
+type checker was previously configured for this project). Tests: 310 → 315,
+`pyflakes`/`ruff` clean after each fix.
+
+## Verified from the 2026-09-13 pass
+
+- **#1 — real, fixed below.** `mirroring.py` `new_message`/`new_album`:
+  `reply_to_messages` built as `{m.mirror_channel: m.mirror_id for m in ...}`
+  collapses two `MirrorMessage` rows that share a `mirror_channel` (possible
+  whenever one outgoing chat is reached by more than one topic-scoped
+  `DirectionConfig` matching the same source topic — e.g. a
+  `from_topic_id=None` catch-all plus a specific one — `binding_id` has no
+  topic column, confirmed in `storage.py`).
+- **#2 — real, still open, see plan.** `mirroring.py::_send_album_with_caption_split`
+  (line ~541): `len(caption) > 1024` is a Python codepoint count, not
+  Telegram's UTF-16 code-unit count; an emoji-heavy caption can pass this
+  check unsplit and still exceed Telegram's real limit, hitting the "Can't
+  actually happen" catch-all a few lines below and dropping the whole album.
+  Independently re-found by this pass's own UTF-16 sweep.
+- **#3 — false positive, re-affirmed.** `watermarkfilter.py`
+  `_process_video`/`_process_photo`: an exhausted `MediaDownloadError` in
+  live mode does return `None` → the original media is forwarded
+  unwatermarked, but this is the module's own documented invariant
+  ("best-effort … no message loss", closed 2026-08-30) — there is no
+  "branding guarantee" elsewhere in the codebase this contradicts. Not a bug.
+- **#4 — false positive.** `past_mode.py::_edit_links_pass`'s
+  `zip(msg_copy.entities, entities_before, strict=False)`: traced
+  `_rewrite_links`/`update_entities_params` — they only mutate existing
+  entities' `.url`/`.offset`/`.length` in place, never append/remove list
+  elements, so the two zipped lists are always equal length by construction.
+  The hypothesized entity-count-changing scenario doesn't occur.
+- **#5 — real but not reachable via any documented config; fixed below as a
+  type-hint correction.** `watermarkfilter.py::WatermarkRemovalFilter.__init__`
+  types `channels` as `Optional[list[int | str]]` but does `int(c)`
+  unconditionally — a literal `@username` string would crash bot startup.
+  No real config (the docstring, `.configs/mirror.config.yml`, or any other
+  filter in the project) ever passes a string here; owner chose to correct
+  the type hint rather than add real username support.
+- **#6 — real, fixed below.** `messagefilters.py::KeywordReplaceFilter._apply_rule`:
+  `match.expand(replacement)` for a raw-regex rule has no error handling. A
+  rule referencing a non-existent capture group (a realistic operator typo —
+  raw-regex rules are a documented feature) raises `re.error` at
+  message-processing time; caught by `__handle_exceptions` (contained, one
+  message lost, not fatal) but with no load-time signal, so a config typo
+  silently breaks every future message matching that pattern.
+- **#7 — real, confirmed cosmetic-only, not fixed.** `past_mode.py`: on a
+  resumed `full_history`/`since_date` run, `iter_total` stays the whole
+  channel total while `processed` restarts at 0, skewing the progress/ETA
+  log. Confirmed it feeds only that log line — no retry/stop condition
+  depends on it. Left as a documented P3 (see "Deferred" below); a fix would
+  need to thread "already-mirrored count at resume" through
+  `_replay_direction`, more machinery than a cosmetic log line warrants.
+- **#8 — real, fixed below.** `mirroring.py::EventHandlers.on_private_message`
+  is the only event handler with no exception handling. Because it never
+  calls into `EventProcessor`, an exception here (e.g. `FloodWaitError`
+  sending the tech-channel notification) is caught by Telethon's own default
+  per-handler logging under the `"telethon"` logger — not `"telemirror"` —
+  so it never reaches `TelegramLogHandler`/`TECH_CHANNEL`, unlike every other
+  failure path in this module.
+- **#9 — architectural gap, not a bug; raised with the project owner per the
+  prompt's own instructions, not fixed.** No periodic reconciliation job
+  exists for live-mode fan-out gaps left by a mid-broadcast `FloodWaitError`;
+  the only recovery mechanism (`past_mode.py::_integrity_check`) is
+  manually triggered. Owner declined to add one for now — see "Reviewed, no
+  change" below.
+- **#10 — false positive, re-affirmed against the actual pinned toolchain.**
+  `watermark/processor.py`'s watermark-PNG overlay (no `-loop 1`) relies on
+  ffmpeg `overlay`'s `eof_action=repeat` default. Confirmed the `Dockerfile`
+  installs ffmpeg via plain `apt-get install ffmpeg` on `python:3.13-slim-bookworm`
+  (Debian bookworm's repo package, `7:5.1.8-0+deb12u1`) — no static build, no
+  pin overriding the default, and `eof_action=repeat` has been ffmpeg's
+  default since the filter's introduction (≥2.8, 2015), well before 5.1.x.
+  Nothing in `processor.py`'s constructed filter graph sets `eof_action`.
+
+## New findings from this pass's cross-cutting sweeps
+
+- **#11 — real, fixed below.** `past_mode.py::_edit_links_pass`:
+  `mirror_map = {m.original_id: m for m in mirrors}` has the identical
+  collapsing bug as #1, one layer over — `get_messages_for_channel_pair` is
+  intentionally topic-blind (confirmed multi-topic-per-pair replay is an
+  actively supported, tested feature per Batch C), so the same source
+  message mirrored into two topics of one target channel collapses to one
+  `MirrorMessage` in this dict, and the link-fix pass only ever corrects one
+  topic's copy — the other keeps a stale/un-rewritten `t.me` link
+  permanently (this pass runs once, best-effort, no retry).
+- **#12 — real, minor, not fixed.** `past_mode.py` (~line 586): the
+  `len(full) <= 4096` check for the TECH_CHANNEL run-summary message is a
+  Python codepoint count, not UTF-16. Same class of bug as #2 but on an
+  internal-only admin message built mostly from channel IDs plus one BMP
+  emoji header — practically never reachable, and splitting an
+  occasionally-oversized internal summary into two Telegram messages has no
+  correctness impact. Left as documented, not worth the code for the risk.
+
+## Fixed
+
+- **P2** `mirroring.py::new_message`/`new_album` — finding #1 above.
+  Extracted `EventProcessor._reply_target_mirrors(chat_id, reply_to_msg_id)`,
+  used by both functions: it groups `get_messages(...)` results by
+  `mirror_channel` and returns only channels with exactly one mirror,
+  dropping ambiguous ones instead of picking one arbitrarily (last-write-wins
+  in the old dict comprehension). An ambiguous target now falls back to the
+  pre-existing "no known mirror to reply to" path (`reply_to` = the
+  destination topic anchor, no reply chain) instead of risking a reply
+  pointed at a mirror living in the wrong topic. Test:
+  `tests/test_reply_to_topic_ambiguity.py::test_ambiguous_reply_target_across_topics_is_not_guessed`
+  (two topic-scoped configs on one target both matching the same source
+  topic, two pre-seeded `MirrorMessage` rows sharing `mirror_channel`;
+  confirmed it fails — both configs got the same wrong `mirror_id`, `222`,
+  as their reply target — against the pre-fix code before confirming the fix
+  makes it pass).
+- **P2** `mirroring.py::_send_album_with_caption_split` — finding #2 above.
+  `len(caption) > 1024` → `len(utils.add_surrogate(caption)) > 1024`,
+  matching the UTF-16-aware pattern already used elsewhere in this file
+  (`_rewrite_links`). Test:
+  `tests/test_caption_too_long_split.py::test_new_album_split_measures_caption_in_utf16_not_codepoints`
+  (a 600-non-BMP-emoji caption — 600 Python chars, 1200 UTF-16 units — with a
+  `send_file` stub that emulates Telegram's real UTF-16-based rejection;
+  confirmed it fails — the retried send got the same untouched over-limit
+  caption and the album was silently dropped, never tracked — against the
+  pre-fix code before confirming the fix correctly strips the caption to a
+  separate tail text and tracks the album).
+- **P2** `messagefilters.py::KeywordReplaceFilter.__init__` — finding #6
+  above. Validates each rule's replacement at construction time by running
+  the compiled pattern's own `.sub(replacement, "")` against an empty
+  string — `re.Pattern.sub` compiles/validates the replacement template
+  (including group references) up front, even with no match, so an invalid
+  reference now raises `ValueError` at config load, the same fail-fast
+  contract `_compile_keyword` already gives the pattern half of each rule.
+  Test:
+  `tests/test_keyword_replace_filter.py::test_replacement_referencing_nonexistent_group_raises_value_error_at_construction`
+  (confirmed it fails — `KeywordReplaceFilter({r"r'(foo)'": r"\2"})`
+  constructed without error — against the pre-fix code before confirming the
+  fix raises `ValueError` at that same call).
+- **P3** `mirroring.py::EventHandlers.on_private_message` — finding #8 above.
+  Wrapped in `try`/`except Exception`, logging through
+  `self._processor._logger` (the same "telemirror"-named logger every other
+  path in this module uses, with `TelegramLogHandler` attached to it) rather
+  than letting the exception fall through to Telethon's own default
+  per-handler logging under a different logger name. Test:
+  `tests/test_on_private_message.py::test_notification_failure_is_logged_not_left_unhandled`
+  (confirmed it fails — `RuntimeError` propagated straight out of
+  `on_private_message` — against the pre-fix code before confirming the fix
+  logs it and returns normally).
+- **P2** `past_mode.py::_edit_links_pass` — finding #11 above. `mirror_map`
+  is now `Dict[int, List[MirrorMessage]]` (was `Dict[int, MirrorMessage]`),
+  built with `setdefault(...).append(...)` instead of a plain dict
+  comprehension, and the `client.edit_message` call is now a loop over
+  `mirror_map[src_msg.id]` instead of a single lookup — every mirror of a
+  multi-topic source message gets its link fixed, not just the
+  last-inserted one. Test:
+  `tests/test_past_mode.py::test_edit_links_pass_fixes_every_mirror_of_a_multi_topic_source_message`
+  (two `MirrorMessage` rows sharing `original_id=10` but different
+  `mirror_id`s in the same target pair; confirmed it fails — only `920`
+  (the later-inserted row) got edited, `910` silently kept its stale link —
+  against the pre-fix code before confirming the fix edits both).
+
+## Fixed — documentation/type-hint only
+
+- **P3** `watermarkfilter.py::WatermarkRemovalFilter.__init__` — finding #5
+  above. `channels: Optional[list[int | str]]` → `Optional[list[int]]`, and
+  the docstring now spells out "numeric … int, or a numeric string … not a
+  `@username`". No runtime behavior changes — `int(c)` already only ever
+  worked for numeric values, and no shipped config passes anything else
+  (`.configs/mirror.config.yml` confirmed) — this only corrects the type/doc
+  to stop inviting a value that would crash bot startup. No dedicated test:
+  nothing observable changed to regress. Owner chose this over adding real
+  `@username` support.
+
+## Cross-cutting sweeps — clean beyond #2/#11/#12 above
+
+UTF-16-vs-codepoint length, dict/set key collapsing, `zip()` strictness,
+event-handler exception-wrapping consistency, `except Exception` near
+checkpoint state, union type-hint handling, and blocking calls inside
+`async def` were each swept project-wide (grep-driven, every hit judged
+individually, cross-checked against this journal's existing invariants).
+Nothing beyond #1/#2/#6/#8/#11/#12 survived — every other hit was either
+already-safe by construction (e.g. `zip(idxs, files, strict=True)` in
+`mirroring.py`, `_patch/sending.py`'s vendored `zip_longest`) or an
+already-documented accepted trade-off (`edit_message`/`delete_message`'s
+broad `except Exception`, both from pass 8).
+
+An ad hoc `mypy` run (no type checker was previously configured for this
+project — installed once into the venv just for this sweep, per the review
+prompt's own instruction) surfaced ~90 diagnostics, almost all downstream of
+one root cause: `telemirror/hints.py`'s `EventMessage = tl.patched.Message`
+is a runtime alias Telethon doesn't expose as a proper static type, so mypy
+treats every `EventMessage`-typed value as effectively `Any` and then
+complains about attribute access on it throughout `mirroring.py`/
+`messagefilters.py` — none of these are real bugs (traced several by hand:
+`watermarkfilter.py:201`'s `bytes | None` assignment is immediately
+`None`-checked before use; `config.py:393`'s `EmptyMessageFilter`/
+`UrlMessageFilter` variable is a legitimate either-or, both implement the
+same `MessageFilter` protocol; `storage.py`'s two "`__init__` must return
+None" hits are a harmless `-> "ClassName"` return-annotation typo mypy
+flags but Python never enforces). No genuine new finding from this run
+beyond what the manual sweeps above already caught; setting up `mypy` for
+real (fixing `hints.py`'s type alias, adding `no_implicit_optional`
+suppressions for the vendored `_patch/sending.py`) would be a substantial,
+unrequested effort out of this pass's scope.
+
+## Deferred (P3, non-blocking)
+
+- **#7** `past_mode.py`: on a resumed `full_history`/`since_date` run,
+  `iter_total` stays the whole channel total instead of the remaining count
+  while `processed` restarts at 0 — the progress/ETA log after a resume or
+  flood-wait retry is misleading. Confirmed to feed only that log line, no
+  retry/stop condition. Not fixed: correctly threading "already-mirrored
+  count at resume" through `_replay_direction` is more machinery than a
+  cosmetic log line warrants.
+- **#12** `past_mode.py` (~line 586): the TECH_CHANNEL run-summary's
+  `len(full) <= 4096` check is a Python codepoint count, not UTF-16 — same
+  class of bug as #2, but on an internal admin-only message built mostly
+  from channel IDs, practically unreachable. Not fixed.
+
+## Reviewed, no change — raised with the project owner, explicitly declined
+
+- **#9** No periodic reconciliation job exists for live-mode fan-out gaps
+  left by a mid-broadcast `FloodWaitError` (documented trade-off, see
+  `mirroring.py`'s Invariants above); the only recovery mechanism
+  (`past_mode.py::_integrity_check`) is manually triggered
+  (`telemirror-past-courses.service` has no `[Install]`/timer). Raised with
+  the project owner per this pass's own instructions — not a bug, an
+  architectural gap needing a product decision (added Telegram API load from
+  a periodic full-history reconciliation vs. the current manual-recovery
+  trade-off). Owner declined a periodic job — manual `past_mode.py` runs on
+  request remain the sole recovery path. Not built.
+
+## Pass 16 self-review — one encapsulation nit found and fixed
+
+A dedicated re-read of this pass's own (still-uncommitted) diff, requested
+explicitly by the project owner after the `/code-review ultra` cross-check
+above. The production-code logic itself held up (re-traced `_reply_target_mirrors`,
+the UTF-16 caption check, the `KeywordReplaceFilter` construction-time
+validation, and `_edit_links_pass`'s per-mirror loop against their tests and
+callers — no new correctness issue). One style nit surfaced:
+
+- **NIT → fixed** `mirroring.py::EventHandlers.on_private_message`'s new
+  `except` block reached across an object boundary into
+  `self._processor._logger` — every other cross-reference to `_processor` in
+  `EventHandlers` calls one of its public methods
+  (`new_message`/`new_album`/`edit_message`/`delete_message`); this was the
+  only place in the file reading another instance's single-underscore
+  attribute directly. Added a `logger` read-only `@property` on
+  `EventProcessor` and switched the callsite to `self._processor.logger`.
+  `tests/test_on_private_message.py`'s `ProcessorStub` updated to expose
+  `logger` instead of `_logger` to match. Not a behavior change — same
+  logger object, same log line — full suite (315) and `ruff`/`pyflakes`
+  re-confirmed green after the change.
+
+## Independent cross-check — `/code-review ultra`
+
+Run by the project owner per this pass's own instructions, over the whole
+`master` branch (9 files changed, 469 insertions/47 deletions — this pass's
+own not-yet-committed diff), review-only (no `--fix`). **Zero findings.**
+Nothing to add to the findings list or push through the verify → fix
+pipeline. One clean independent pass; per this journal's stop rule (two
+consecutive full reads with no P1/P2 finding → module closed) this counts as
+one of the two needed before the modules touched in this pass could be
+considered re-closed — not a claim that the project is bug-free.

@@ -47,7 +47,7 @@ from telemirror.misc.links import private_message_link
 from telemirror.misc.log_setup import setup_stdout_logger
 from telemirror.misc.message_groups import iter_message_groups
 from telemirror.misc.telegram_client import build_telegram_client
-from telemirror.storage import Database, InMemoryDatabase, PostgresDatabase
+from telemirror.storage import Database, InMemoryDatabase, MirrorMessage, PostgresDatabase
 
 _LOG_EVERY = 25  # log progress every N messages/albums
 
@@ -428,7 +428,14 @@ async def _edit_links_pass(
             logger=logger,
         )
 
-        mirror_map = {m.original_id: m for m in mirrors}
+        # A source message can hold more than one mirror in this pair when
+        # it's reached by more than one topic-scoped config (`binding_id`
+        # has no topic column — same gap as `mirroring.py`'s
+        # `_reply_target_mirrors`) — keep every one of them, not just the
+        # last seen, or only one topic's copy would ever get its link fixed.
+        mirror_map: Dict[int, List[MirrorMessage]] = {}
+        for m in mirrors:
+            mirror_map.setdefault(m.original_id, []).append(m)
         _ids = list(mirror_map.keys())
         _BATCH = 100
         edited = 0
@@ -453,7 +460,6 @@ async def _edit_links_pass(
                 ):
                     continue
 
-                mirror = mirror_map[src_msg.id]
                 msg_copy = processor.copy_message(src_msg)
                 entities_before = deepcopy(msg_copy.entities)
                 text_before = msg_copy.message
@@ -471,22 +477,23 @@ async def _edit_links_pass(
                 if not text_changed and not url_changed:
                     continue
 
-                try:
-                    await client.edit_message(
-                        entity=target_id,
-                        message=mirror.mirror_id,
-                        text=msg_copy.message,
-                        formatting_entities=msg_copy.entities,
-                    )
-                    edited += 1
-                    logger.info(f"{prefix}: fixed link in {mirror.original_id}→{mirror.mirror_id}")
-                    if cfg.past_mode.send_delay:
-                        await asyncio.sleep(cfg.past_mode.send_delay)
-                except Exception as e:
-                    logger.warning(
-                        f"{prefix}: error editing {mirror.mirror_id}: "
-                        f"{type(e).__name__}: {e}"
-                    )
+                for mirror in mirror_map[src_msg.id]:
+                    try:
+                        await client.edit_message(
+                            entity=target_id,
+                            message=mirror.mirror_id,
+                            text=msg_copy.message,
+                            formatting_entities=msg_copy.entities,
+                        )
+                        edited += 1
+                        logger.info(f"{prefix}: fixed link in {mirror.original_id}→{mirror.mirror_id}")
+                        if cfg.past_mode.send_delay:
+                            await asyncio.sleep(cfg.past_mode.send_delay)
+                    except Exception as e:
+                        logger.warning(
+                            f"{prefix}: error editing {mirror.mirror_id}: "
+                            f"{type(e).__name__}: {e}"
+                        )
 
         if edited:
             logger.info(f"{prefix}: fixed {edited} message(s)")

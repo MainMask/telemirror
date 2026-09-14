@@ -417,12 +417,22 @@ class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
         # (compiled pattern, surrogate replacement, is_regex)
         self._rules: list[tuple[re.Pattern[str], str, bool]] = []
         for k, v in keywords.items():
+            pattern = _compile_keyword(k)
+            replacement = utils.add_surrogate(v)
+            try:
+                # `Pattern.sub` validates the replacement template (group
+                # references included) up front, even against an empty
+                # string with no match — same fail-fast-at-load-time
+                # contract as `_compile_keyword` for the pattern itself,
+                # instead of a bare `re.error` the first time a real message
+                # happens to match.
+                pattern.sub(replacement, "")
+            except re.error as e:
+                raise ValueError(
+                    f"invalid replacement {v!r} for keyword pattern {k!r}: {e}"
+                ) from e
             self._rules.append(
-                (
-                    _compile_keyword(k),
-                    utils.add_surrogate(v),
-                    k.startswith("r'"),  # is_regex: keeps configured casing
-                )
+                (pattern, replacement, k.startswith("r'"))  # is_regex: keeps configured casing
             )
 
     async def _process_message(
