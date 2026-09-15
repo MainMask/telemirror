@@ -3,6 +3,7 @@ import os
 import re
 from typing import Optional, Type
 
+from telethon import errors
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
@@ -141,6 +142,11 @@ class DocumentFilenameFilter(MessageFilter):
                 "DocumentFilenameFilter: download failed, mirroring original name (%s)",
                 private_message_link(message.chat_id, message.id),
             )
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+            # A >threshold flood must reach past_mode's retry wrapper instead of
+            # silently falling back to the un-renamed original. Same contract
+            # as mirroring.py.
+            raise
         except Exception:
             logger.exception(
                 "DocumentFilenameFilter: rename failed (%s), sending original",

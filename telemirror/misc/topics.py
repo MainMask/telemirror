@@ -9,6 +9,6 @@ def topic_id_of(message) -> int:
     A non-forum ``reply_to`` (or no ``reply_to``) means the General topic.
     """
     reply_to = message.reply_to
-    if reply_to is not None and reply_to.forum_topic:
+    if reply_to is not None and getattr(reply_to, "forum_topic", False):
         return reply_to.reply_to_top_id or reply_to.reply_to_msg_id
     return GENERAL_TOPIC_ID

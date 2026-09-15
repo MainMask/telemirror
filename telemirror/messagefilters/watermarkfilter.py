@@ -4,6 +4,7 @@ import os
 import tempfile
 from typing import Optional, Type
 
+from telethon import errors
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
@@ -174,6 +175,18 @@ class WatermarkRemovalFilter(MessageFilter):
                 )
             elif video_attr is not None:
                 handle = await self._process_video(message, config, doc)
+        elif isinstance(
+            message.media,
+            (types.InputMediaUploadedPhoto, types.InputMediaUploadedDocument),
+        ):
+            # An earlier filter (e.g. RestrictSavingContentBypassFilter) already
+            # rewrote message.media into an upload handle — there are no raw
+            # bytes left here to watermark, so log rather than silently no-op.
+            logger.warning(
+                "WatermarkRemovalFilter: media already re-uploaded by an earlier "
+                "filter, skipping watermark (chat_id=%s)",
+                message.chat_id,
+            )
 
         if handle is not None:
             message.media = handle
@@ -212,6 +225,11 @@ class WatermarkRemovalFilter(MessageFilter):
                 message.chat_id,
             )
             return None
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+            # A >threshold flood must reach past_mode's retry wrapper instead of
+            # silently falling back to the unwatermarked original. Same contract
+            # as mirroring.py.
+            raise
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: photo processing failed (chat_id=%s)", message.chat_id
@@ -277,6 +295,11 @@ class WatermarkRemovalFilter(MessageFilter):
                 message.chat_id,
             )
             return None
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+            # A >threshold flood must reach past_mode's retry wrapper instead of
+            # silently falling back to the unwatermarked original. Same contract
+            # as mirroring.py.
+            raise
         except Exception:
             logger.exception(
                 "WatermarkRemovalFilter: video processing failed (chat_id=%s)", message.chat_id

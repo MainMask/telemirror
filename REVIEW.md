@@ -2077,3 +2077,235 @@ pipeline. One clean independent pass; per this journal's stop rule (two
 consecutive full reads with no P1/P2 finding → module closed) this counts as
 one of the two needed before the modules touched in this pass could be
 considered re-closed — not a claim that the project is bug-free.
+
+# Pass 17 — fan-out dedup + delete-purge scoping + flood-propagation contract sweep
+
+Continuation of the ongoing audit: extracted the ~250-line duplication
+between `new_message`/`new_album`'s per-target loop into three shared
+`EventProcessor` helpers, then, while tracing their shared code paths,
+found and fixed a premature-DB-purge bug in `delete_message` and a second
+occurrence of pass 16's #1 "ambiguous mirror" bug (this time in the
+`t.me` link-rewrite path rather than the reply-target path). A sweep of
+every `except Exception`/generic catch touching a re-uploading filter or a
+FloodWait-adjacent code path turned up two more instances of the
+`documentfilenamefilter.py`/`watermarkfilter.py` FloodWait-swallowing
+pattern pass 16 didn't cover, plus one `edit_message` fan-out abort bug.
+Tests: 315 → 337, `ruff` clean.
+
+## Fixed
+
+- **P2** `mirroring.py::delete_message` — `delete_messages_batch` purges an
+  `original_id`'s DB row by `(original_id, chat_id)` with no `mirror_channel`
+  scoping, so it used to fire as soon as *any* one channel's Telegram delete
+  in the current batch succeeded (`deleted_original_ids.add(...)` ran per
+  successfully-queued channel, not per-original_id-fully-done). A channel
+  that floods, that has no direction config (removed from `CHAT_MAPPING`),
+  or that has `disable_delete=True` never gets its Telegram message removed
+  but its DB tracking row silently vanished anyway — a still-live mirror
+  permanently loses the one thing (`binding_id`) that lets it ever be edited,
+  link-rewritten, pin-synced, or retried for deletion. Replaced the single
+  `deleted_original_ids` set with `needed_channels_by_original` (every
+  channel a DB row currently names for that `original_id`, gathered
+  unconditionally before any config/disable_delete filtering) and
+  `done_channels` (channels whose `delete_messages` call actually returned
+  without raising); an `original_id` is purged only when its full channel
+  set is a subset of `done_channels`. The purge call itself also got a
+  `try`/`except` — a DB failure after a successful Telegram delete is now
+  logged instead of raised (the message is already gone from Telegram
+  either way, so the purge failure has nothing left to protect by
+  propagating). Tests: `tests/test_delete_message_flood_flush.py` (partial
+  flood purges only the fully-done original_id, a message needing the
+  flooded channel is kept, a message needing an unconfigured channel is
+  kept, a message needing a `disable_delete` channel is kept, a DB purge
+  failure is logged and swallowed).
+- **P2** `mirroring.py::__resolve_tg_link_rewrite` — same class of bug as
+  pass 16's finding #1, in the sibling code path: a referenced message
+  mirrored more than once into the same channel (reached via two
+  topic-scoped `DirectionConfig`s matching the same source topic —
+  `binding_id` has no topic column) could have its `t.me` link rewritten to
+  an arbitrary one of those mirror ids instead of falling back to
+  `fallback_link_url`. Fixed by routing both this method and
+  `_reply_target_mirrors` through one extracted
+  `EventProcessor._unambiguous_mirror_per_channel(mirrors)` (groups by
+  `mirror_channel`, keeps only channels with exactly one mirror) instead of
+  `_reply_target_mirrors` alone having pass 16's fix. Test:
+  `tests/test_link_rewrite_cache.py::test_ambiguous_topic_mirrors_are_not_guessed`.
+- **P2** `mirroring.py::edit_message` — `config.filters.process(...)` had no
+  exception handling; a `FloodWaitError`/`FloodPremiumWaitError`/
+  `MediaDownloadError` from a re-uploading filter (e.g.
+  `DocumentFilenameFilter`, `WatermarkRemovalFilter`) propagated straight
+  out of `edit_message`, aborting the edit for every other, un-flooded
+  `outgoing_message`/config still left in the loop — with no compensating
+  benefit, since neither `on_edit_message` nor `_sync_broadcast_channel`'s
+  catch-up loop has a retry wrapper for it (unlike `new_message`/`new_album`,
+  which `past_mode.py` replays). Wrapped in `try`/`except`, log-and-continue,
+  matching the existing `except Exception` around `client.edit_message`
+  itself a few lines below. Test:
+  `tests/test_edit_delete_flood_propagates.py::test_edit_message_flood_from_filters_process_does_not_abort_the_others`.
+- **P2** `messagefilters/documentfilenamefilter.py::DocumentFilenameFilter._process_message`
+  and `messagefilters/watermarkfilter.py::WatermarkRemovalFilter._process_photo`/
+  `_process_video` — a `FloodWaitError`/`FloodPremiumWaitError` raised by
+  `download_media_with_retry` (deliberately left unretried there so it
+  reaches `past_mode`'s own retry wrapper, per that function's own
+  docstring) fell into each filter's generic `except Exception`, was logged,
+  and the message was silently mirrored un-renamed / unwatermarked instead
+  of being retried — the same class of contract violation
+  `RestrictSavingContentBypassFilter` was already fixed against (referenced
+  by this pass's own new tests). Added an explicit
+  `except (errors.FloodWaitError, errors.FloodPremiumWaitError): raise`
+  ahead of each generic handler, one per filter/media-kind. Tests:
+  `tests/test_document_filename_filter.py::test_flood_during_rename_reupload_propagates`,
+  `tests/test_watermark_flood_propagates.py::test_photo_flood_during_reupload_propagates`
+  (video path shares the same code shape, covered by inspection, not a
+  duplicate test).
+- **P2** `telemirror/misc/topics.py::topic_id_of` — `reply_to.forum_topic`
+  was accessed unconditionally; Telethon's `MessageReplyStoryHeader` (a
+  reply to a Telegram Story) has no `forum_topic` field, so a story reply
+  raised `AttributeError` out of `_matches_from_topic`, uncaught, wherever
+  it's called from `new_message`/`new_album`'s per-target loop — losing the
+  whole fan-out for that message, not just the story-reply handling. Changed
+  to `getattr(reply_to, "forum_topic", False)`, so an unrecognized
+  `reply_to` variant now resolves to the General topic like any other
+  non-forum reply, instead of crashing. Test:
+  `tests/test_matches_from_topic.py::test_reply_to_story_is_general_topic`.
+- **P2** `skylon_set/sync_pins.py::SyncPair.to_topics` — `sorted(set(...))`
+  over `topic_map.values()` raises `TypeError` (`'<' not supported between
+  instances of 'NoneType' and 'int'`) the moment one donor→recipient pair
+  combines a topic-scoped direction (`to_topic_id` = int) with a
+  from-topic-only direction whose `to_topic_id` is `None` (mirrors the whole
+  recipient chat) — a supported `CHAT_MAPPING` shape, not a hypothetical
+  one. Filtered `None` out before sorting. Test:
+  `tests/test_sync_pins_directions.py::test_mixed_topic_scoped_and_whole_chat_to_topics_does_not_raise`.
+- **P3** `skylon_set/setup_mirrors.py::step_verify`/`step_final_verify` —
+  both only ever looked at `direction["to"][0]`, silently ignoring every
+  other recipient of a multi-recipient fan-out direction: `step_verify`'s
+  dupe-detection missed known channel ids past the first, and
+  `step_final_verify`'s channel-title/topic-title checks never verified (or
+  offered to fix) recipient 2+ at all. Both now iterate every entry in
+  `direction["to"]`. No dedicated test — this is an operational script with
+  no existing test coverage (consistent with the rest of `skylon_set/*`'s
+  fixes in this journal); verified by tracing `entity_cache`/`topic_cache`
+  population (`get_topics` calls `get_entity` internally) to confirm the
+  added per-recipient lookups are still cached correctly.
+
+## Cleanup (no behavior change)
+
+- `mirroring.py::new_message`/`new_album` — extracted the near-identical
+  restricted-content-check, already-mirrored-skip, and reply-target-resolution
+  blocks each duplicated between the two functions into
+  `_restricted_content_blocks`, `_already_mirrored_skip`, and
+  `_resolve_reply_target`. Covered directly by
+  `tests/test_fanout_shared_helpers.py` in addition to the existing
+  `new_message`/`new_album` integration tests continuing to pass unchanged.
+- `mirroring.py::_send_message_with_caption_split`/
+  `_send_album_with_caption_split` — removed the `try`/`except
+  errors.MediaCaptionTooLongError` wrapper around
+  `_send_with_reference_refresh`; both call sites' captions are already
+  guaranteed short (the split already happened), and the `except` bodies'
+  own comments said as much ("Can't actually happen … but keep the same
+  catch-all contract"). Dead code, not a behavior change.
+- `messagefilters/watermarkfilter.py::WatermarkRemovalFilter._process_message` —
+  added a logged branch for `message.media` already being an
+  `InputMediaUploadedPhoto`/`InputMediaUploadedDocument` handle (an earlier
+  filter, e.g. `RestrictSavingContentBypassFilter`, already re-uploaded it,
+  so there are no raw bytes left to watermark). The outcome is identical to
+  before (the `if isinstance(...)`/`elif isinstance(...)` chain simply
+  didn't match, `handle` stayed `None`, media passed through unwatermarked)
+  — this only replaces a silent no-op with a visible one. Test:
+  `tests/test_watermark_flood_propagates.py::test_already_reuploaded_media_is_left_alone_and_logged`.
+
+## Pass 17 self-review — clean
+
+A dedicated re-read of this pass's own diff before commit, same discipline
+as passes 14–16: re-traced `delete_message`'s purge-scoping against all
+four of its new tests by hand, re-checked exception ordering in both
+message filters (`FloodWaitError` caught ahead of the generic handler in
+every modified branch), confirmed the `_unambiguous_mirror_per_channel`
+extraction preserves `_reply_target_mirrors`'s pass-16 behavior exactly
+(same grouping, same "leave out rather than guess" rule, now shared with
+the link-rewrite path), and confirmed `entity_cache`/`topic_cache` in
+`setup_mirrors.py` are populated for every `to_id` the new per-recipient
+loops visit. No new finding. Full suite (337) and `ruff` green.
+
+# Pass 18 — independent `/code-review` of pass 17's commit, one bug found and fixed
+
+Requested by the project owner immediately after pass 17's commit
+(`71dcf42`) landed, before pushing: run the `code-review` skill (not
+`ultra`) over `HEAD~1..HEAD` as a second, independent opinion on top of
+pass 17's own self-review. It confirmed every pass-17 fix as correct and
+surfaced one real bug — pre-existing, not introduced by pass 17, but living
+in a function pass 17's own ambiguity fix touched.
+
+## Found — real, pre-existing (confirmed present at `HEAD~1`, before pass 17)
+
+`mirroring.py::__resolve_tg_link_rewrite` (pass 17's name — see below) chose
+one arbitrary mirror for a referenced message's `t.me` link and returned a
+single rewritten URL string, which `_try_rewrite_tg_link` then cached in
+`link_cache` keyed by `(url, fallback_link_url)` — a key with no
+`outgoing_chat` in it, even though `link_cache` is created once per source
+event and shared across every fan-out target (`link_cache: dict = {}` at the
+top of `new_message`/`new_album`, read inside the per-`outgoing_chat` loop).
+So whenever a source channel fans out to two or more target channels
+(the normal topology for this project — see the two-recipient config split
+and "⚜️ Цитадель" batch mirroring) and a message links to another message
+that's *also* mirrored into more than one of those same targets, only the
+first-resolved target's mirror link ever got computed — every other
+target's copy of the message received the **same** link, pointing at the
+first target's mirror instead of its own. A reader on target B could end up
+with a link into target A's channel, which may be private or otherwise
+inaccessible to them. Pass 17's own ambiguity fix
+(`_unambiguous_mirror_per_channel`) only addressed a narrower, different
+ambiguity (the *same* channel reached via two topic-scoped configs); it
+didn't touch this pick-one-arbitrary-target-and-cache-it-globally shape,
+which predates pass 17 entirely (verified against `git show HEAD~1`).
+
+## Fixed
+
+- **P2** `mirroring.py` — split link resolution into two layers.
+  `__resolve_tg_link_rewrite` is renamed `__resolve_tg_link_mirrors` and now
+  returns `Optional[Dict[int, MirrorMessage]]` (one entry per *unambiguous*
+  target channel, via the existing `_unambiguous_mirror_per_channel`) instead
+  of picking a single mirror and building the final URL itself; `None` means
+  "not a recognized/configured t.me link, leave every target's copy
+  untouched" (the only case-independent-of-target outcome), otherwise a
+  target missing from the returned map falls back to that target's own
+  `fallback_link_url`. `_try_rewrite_tg_link` gained an `outgoing_chat`
+  parameter and now looks up its own entry in the resolved map, so each
+  fan-out target gets its *own* mirror link. `link_cache` is keyed by `url`
+  alone now (simpler than before, since the per-target/per-fallback work
+  moved out of the cached path) — still one DB round-trip per event
+  regardless of fan-out width, confirmed by
+  `tests/test_link_rewrite_cache.py::test_link_resolution_is_cached_across_fanout`
+  continuing to pass unchanged. `_rewrite_links` and both its
+  `new_message`/`new_album` call sites, plus the one call site in
+  `past_mode.py::_edit_links_pass` (passes `target_id`, the single mirror
+  target that pass's `EventProcessor` is scoped to), now thread
+  `outgoing_chat` through. Test:
+  `tests/test_link_rewrite_cache.py::test_each_fanout_target_gets_its_own_mirror_link`
+  (a source message mirrored into two different target channels, each
+  linking to the same referenced message which is itself mirrored into both
+  targets; confirmed each target's link now resolves to its own mirror,
+  not the other target's).
+
+## Pass 18 self-review — clean
+
+Re-read the fix's own diff before commit: traced the `None`-vs-`{}` sentinel
+split (`None` = "don't rewrite, ignore fallback"; `{}`/partial map = "rewrite
+per-target, falling back per-target") against every one of
+`__resolve_tg_link_mirrors`'s four return points, confirmed no other caller
+of the renamed method or of `_rewrite_links`/`_try_rewrite_tg_link` was
+missed (`past_mode.py`'s call site was caught this way — it broke 3 tests on
+the first run, since it hadn't been updated to pass `outgoing_chat`; fixed
+by passing `target_id`, the pair's single scoped target). Full suite
+(337 → 338) and `ruff` green.
+
+## Independent cross-check — `/code-review` (high, non-ultra)
+
+Run by the project owner over `HEAD~1..HEAD` (this pass's own commit,
+`c52d2c7`) after it landed, before pushing — a second opinion independent of
+this pass's own self-review above, same discipline as pass 16's `ultra`
+cross-check but at the smaller `code-review` scope. Manually traced every
+changed function and call site, the `None`-vs-empty-dict branch semantics,
+and the `past_mode.py` `chat_mapping` interaction, plus a separate
+fresh-context agent pass with no shared history. **Zero findings** — nothing
+to add to this pass's fix list.

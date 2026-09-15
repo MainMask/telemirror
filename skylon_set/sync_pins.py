@@ -64,7 +64,7 @@ class SyncPair:
 
     @property
     def to_topics(self) -> List[int]:
-        return sorted(set(self.topic_map.values()))
+        return sorted({t for t in self.topic_map.values() if t is not None})
 
 
 @dataclass(frozen=True)

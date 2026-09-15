@@ -439,7 +439,8 @@ async def step_verify(client):
     print("\n--- Dupes ---\n")
     known_ids: set[int] = set()
     for d in load_all_directions():
-        known_ids.add(int(str(d["to"][0]).split("#")[0]))
+        for to in d["to"]:
+            known_ids.add(int(str(to).split("#")[0]))
 
     groups: dict[str, list] = defaultdict(list)
     for dlg in dialogs:
@@ -742,56 +743,59 @@ async def step_final_verify(client):
     print("--- Channels ---\n")
     for direction in channel_dirs:
         from_id = int(str(direction["from"][0]))
-        to_id   = int(str(direction["to"][0]))
         from_e  = await get_entity(from_id)
         if classify_donor(from_e.title or "") == "unknown":
             continue  # a direction from another batch — not our concern
-        to_e    = await get_entity(to_id)
         expected = to_citadel(from_e.title)
-        if to_e.title == expected:
-            print(f"OK: '{from_e.title}' → '{to_e.title}'")
-            ok += 1
-        elif name_key(to_e.title) == name_key(expected):
-            print(f"OK (emoji): '{from_e.title}' → '{to_e.title}'")
-            ok += 1
-        else:
-            print(f"ERROR: '{from_e.title}' → '{to_e.title}' (expected '{expected}')")
-            fixes.append(("channel", to_e, expected))
+        for to_raw in direction["to"]:
+            to_id = int(str(to_raw))
+            to_e  = await get_entity(to_id)
+            if to_e.title == expected:
+                print(f"OK: '{from_e.title}' → '{to_e.title}'")
+                ok += 1
+            elif name_key(to_e.title) == name_key(expected):
+                print(f"OK (emoji): '{from_e.title}' → '{to_e.title}'")
+                ok += 1
+            else:
+                print(f"ERROR: '{from_e.title}' → '{to_e.title}' (expected '{expected}')")
+                fixes.append(("channel", to_e, expected))
 
     print("\n--- Topics ---\n")
     for direction in topic_dirs:
         fv = str(direction["from"][0])
-        tv = str(direction["to"][0])
         from_id, from_tid = int(fv.split("#")[0]), int(fv.split("#")[1])
-        to_id,   to_tid   = int(tv.split("#")[0]),   int(tv.split("#")[1])
 
         from_e = await get_entity(from_id)
         if classify_donor(from_e.title or "") == "unknown":
             continue  # a direction from another batch — not our concern
         from_topics = await get_topics(from_id)
-        to_topics   = await get_topics(to_id)
         f_topic = from_topics.get(from_tid)
-        t_topic = to_topics.get(to_tid)
 
-        if not f_topic or not t_topic:
-            label = f"#{from_tid} at {from_id}" if not f_topic else f"#{to_tid} at {to_id}"
-            print(f"ERROR: topic {label} not found")
-            fixes.append(None)
-            continue
+        for to_raw in direction["to"]:
+            tv = str(to_raw)
+            to_id, to_tid = int(tv.split("#")[0]), int(tv.split("#")[1])
+            to_topics = await get_topics(to_id)
+            t_topic = to_topics.get(to_tid)
 
-        if from_tid == 1 and to_tid == 1:
-            if f_topic.title == t_topic.title:
-                print(f"OK (General): '{f_topic.title}'")
+            if not f_topic or not t_topic:
+                label = f"#{from_tid} at {from_id}" if not f_topic else f"#{to_tid} at {to_id}"
+                print(f"ERROR: topic {label} not found")
+                fixes.append(None)
+                continue
+
+            if from_tid == 1 and to_tid == 1:
+                if f_topic.title == t_topic.title:
+                    print(f"OK (General): '{f_topic.title}'")
+                    ok += 1
+                else:
+                    print(f"ERROR (General): '{f_topic.title}' != '{t_topic.title}'")
+                    fixes.append(("topic", entity_cache[to_id], to_tid, f_topic.title))
+            elif f_topic.title == t_topic.title:
+                print(f"OK: '{f_topic.title}'")
                 ok += 1
             else:
-                print(f"ERROR (General): '{f_topic.title}' != '{t_topic.title}'")
+                print(f"ERROR: '{f_topic.title}' != '{t_topic.title}'")
                 fixes.append(("topic", entity_cache[to_id], to_tid, f_topic.title))
-        elif f_topic.title == t_topic.title:
-            print(f"OK: '{f_topic.title}'")
-            ok += 1
-        else:
-            print(f"ERROR: '{f_topic.title}' != '{t_topic.title}'")
-            fixes.append(("topic", entity_cache[to_id], to_tid, f_topic.title))
 
     real_fixes = [x for x in fixes if x is not None]
     print(f"\n{'All correct' if not fixes else 'Discrepancies found'}: {ok} OK, {len(fixes)} error(s).")

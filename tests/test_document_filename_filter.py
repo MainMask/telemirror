@@ -1,7 +1,7 @@
 """DocumentFilenameFilter._rename is a pure string transform — test it directly."""
 
 import pytest
-from telethon import events
+from telethon import errors, events
 from telethon.tl import types
 
 from telemirror.messagefilters import MediaDownloadError
@@ -71,3 +71,16 @@ def test_media_download_error_mirrors_original_when_not_strict():
     action, result = run(f._process_message(msg, events.NewMessage.Event))
     assert action is FilterAction.CONTINUE
     assert result.media is msg.media  # untouched original
+
+
+class _FloodClient:
+    async def download_media(self, message, file):
+        raise errors.FloodWaitError(request=None)
+
+
+def test_flood_during_rename_reupload_propagates():
+    """A >threshold FloodWait during the rename re-upload must reach past_mode's
+    retry wrapper instead of being swallowed and sent under the old name."""
+    f = DocumentFilenameFilter(suffix="@CitadelClan")
+    with pytest.raises(errors.FloodWaitError):
+        run(f._process_message(_doc_message(_FloodClient()), events.NewMessage.Event))

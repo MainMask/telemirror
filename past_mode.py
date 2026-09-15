@@ -464,7 +464,7 @@ async def _edit_links_pass(
                 entities_before = deepcopy(msg_copy.entities)
                 text_before = msg_copy.message
                 await processor._rewrite_links(
-                    msg_copy, source_id, cfg.fallback_link_url
+                    msg_copy, source_id, target_id, cfg.fallback_link_url
                 )
 
                 text_changed = msg_copy.message != text_before

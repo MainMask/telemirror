@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 import time
-from typing import Awaitable, Callable, Dict, List, Optional, Union
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 from telethon import TelegramClient, errors, events, utils
 from telethon.tl import functions, types
@@ -147,33 +147,55 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         url: str,
         source_chat_id: int,
         message: EventMessage,
+        outgoing_chat: int,
         fallback_link_url: Optional[str] = None,
         link_cache: Optional[dict] = None,
     ) -> Optional[str]:
-        """Rewrite a t.me message URL to its mirror equivalent, or return None.
+        """Rewrite a t.me message URL to `outgoing_chat`'s own mirror
+        equivalent, or return None.
 
-        The resolution (DB lookup + entity fetch) depends only on
-        ``(url, fallback_link_url)``, not on the fan-out target, so a per-event
-        ``link_cache`` dict lets one message's links be resolved once instead of
-        once per target/config.
+        The DB lookup + entity fetch behind this depends only on ``url``, not
+        on `outgoing_chat` or `fallback_link_url` — see
+        `__resolve_tg_link_mirrors` — so a per-event ``link_cache`` dict lets
+        one message's links be resolved once instead of once per target/config,
+        while still returning each target's own mirror rather than
+        whichever target happened to be resolved first.
         """
-        cache_key = (url, fallback_link_url)
-        if link_cache is not None and cache_key in link_cache:
-            return link_cache[cache_key]
-        result = await self.__resolve_tg_link_rewrite(
-            url, source_chat_id, message, fallback_link_url
-        )
-        if link_cache is not None:
-            link_cache[cache_key] = result
-        return result
+        if link_cache is not None and url in link_cache:
+            mirrors_by_channel = link_cache[url]
+        else:
+            mirrors_by_channel = await self.__resolve_tg_link_mirrors(
+                url, source_chat_id, message
+            )
+            if link_cache is not None:
+                link_cache[url] = mirrors_by_channel
+        if mirrors_by_channel is None:
+            return None
+        mirror = mirrors_by_channel.get(outgoing_chat)
+        if mirror is None:
+            return fallback_link_url
+        return private_message_link(mirror.mirror_channel, mirror.mirror_id)
 
-    async def __resolve_tg_link_rewrite(
+    async def __resolve_tg_link_mirrors(
         self: "EventProcessor",
         url: str,
         source_chat_id: int,
         message: EventMessage,
-        fallback_link_url: Optional[str] = None,
-    ) -> Optional[str]:
+    ) -> Optional[Dict[int, MirrorMessage]]:
+        """Resolve a t.me message URL to its known mirrors, one per target
+        channel that has an unambiguous one.
+
+        Returns ``None`` when the URL isn't a recognized t.me message link, or
+        the referenced channel has no configured mirror targets at all — in
+        both cases every fan-out target must leave the link untouched
+        regardless of ``fallback_link_url``. Otherwise returns a (possibly
+        empty) ``{mirror_channel: MirrorMessage}`` map: a target channel
+        missing from it (not mirrored there, a username that failed to
+        resolve, or reached via more than one ambiguous topic-scoped mirror —
+        see `_unambiguous_mirror_per_channel`) falls back to
+        ``fallback_link_url`` for that target instead of guessing another
+        target's mirror.
+        """
         m = _TG_MSG_LINK_RE.match(url)
         if not m:
             return None
@@ -191,7 +213,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 username, source_chat_id, message
             )
             if referenced_channel_id is None:
-                return fallback_link_url
+                return {}
 
         # Find configured targets for the referenced source channel
         target_map = self._chat_mapping.get(referenced_channel_id, {})
@@ -199,25 +221,24 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             return None
 
         mirrors = await self._database.get_messages(msg_id, referenced_channel_id)
-        mirror = next(
-            (mm for mm in mirrors if mm.mirror_channel in target_map), None
-        )
-        if mirror is None:
-            return fallback_link_url
-
-        return private_message_link(mirror.mirror_channel, mirror.mirror_id)
+        candidates = [mm for mm in mirrors if mm.mirror_channel in target_map]
+        return self._unambiguous_mirror_per_channel(candidates)
 
     async def _rewrite_links(
         self: "EventProcessor",
         message: EventMessage,
         source_chat_id: int,
+        outgoing_chat: int,
         fallback_link_url: Optional[str] = None,
         link_cache: Optional[dict] = None,
     ) -> None:
-        """Rewrite t.me message links in entities to point to their mirrors.
+        """Rewrite t.me message links in entities to point to `outgoing_chat`'s
+        own mirrors.
 
-        ``link_cache`` (optional): a per-event dict that memoizes link resolution
-        across the fan-out; see ``_try_rewrite_tg_link``.
+        ``link_cache`` (optional): a per-event dict that memoizes link
+        resolution across the fan-out; see `_try_rewrite_tg_link` — it's
+        target-independent, so it's safe to share across every `outgoing_chat`
+        this is called with for the same source event.
         """
         if not message.entities:
             return
@@ -230,7 +251,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         for entity in message.entities:
             if isinstance(entity, types.MessageEntityTextUrl):
                 new_url = await self._try_rewrite_tg_link(
-                    entity.url, source_chat_id, message, fallback_link_url, link_cache
+                    entity.url, source_chat_id, message, outgoing_chat,
+                    fallback_link_url, link_cache,
                 )
                 if new_url is not None:
                     entity.url = new_url
@@ -242,7 +264,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     surrogate_text[entity.offset : entity.offset + entity.length]
                 )
                 new_url = await self._try_rewrite_tg_link(
-                    old_url, source_chat_id, message, fallback_link_url, link_cache
+                    old_url, source_chat_id, message, outgoing_chat,
+                    fallback_link_url, link_cache,
                 )
                 if new_url is not None:
                     new_surrogate = utils.add_surrogate(new_url)
@@ -276,6 +299,87 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             return True
         return config.from_topic_id == topic_id_of(message)
 
+    def _restricted_content_blocks(
+        self: "EventProcessor",
+        config: DirectionConfig,
+        restricted_saving_content: bool,
+        chat_id: int,
+        outgoing_chat: int,
+    ) -> bool:
+        """True (after logging) if `config` can't carry a `noforwards` source:
+        forward mode can't bypass the restriction, and a filter chain that
+        doesn't re-upload the media can't either. Shared by new_message and
+        new_album.
+        """
+        blocked = restricted_saving_content and (
+            not config.filters.restricted_content_allowed or config.mode == "forward"
+        )
+        if not blocked:
+            return False
+        self._logger.warning(
+            f"Forwards from channel#{chat_id} "
+            f"with `restricted saving content` "
+            f"enabled to channel#{outgoing_chat} are not supported."
+        )
+        return True
+
+    def _already_mirrored_skip(
+        self: "EventProcessor",
+        kind_label: str,
+        link: str,
+        outgoing_chat: int,
+        matching: list,
+        already_mirrored: set,
+    ) -> bool:
+        """True (after logging) if `outgoing_chat` already holds this source's
+        mirror and it's safe to skip re-sending: `binding_id` has no topic
+        column, so a multi-topic-route target (len(matching) > 1) can't be
+        told apart by channel alone and must not be skipped this way. Shared
+        by new_message and new_album.
+        """
+        if not (outgoing_chat in already_mirrored and len(matching) <= 1):
+            return False
+        self._logger.debug(
+            "%s: %s already mirrored to chat#%s, skip", kind_label, link, outgoing_chat
+        )
+        return True
+
+    @staticmethod
+    def _resolve_reply_target(
+        config: DirectionConfig, reply_to_messages: Dict[int, int], outgoing_chat: int
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """(reply_to, reply_to_topic_id) for one fan-out target: reply-chain
+        to the mirrored parent when its mirror in this target is known,
+        otherwise anchor a new top-level send to the target's own topic.
+        Shared by new_message and new_album.
+        """
+        reply_to_msg = reply_to_messages.get(outgoing_chat)
+        outgoing_topic_reply = reply_to_msg is not None and config.to_topic_id is not None
+        reply_to = (
+            reply_to_msg
+            if outgoing_topic_reply or config.to_topic_id is None
+            else config.to_topic_id
+        )
+        reply_to_topic_id = config.to_topic_id if outgoing_topic_reply else None
+        return reply_to, reply_to_topic_id
+
+    @staticmethod
+    def _unambiguous_mirror_per_channel(
+        mirrors: List[MirrorMessage],
+    ) -> Dict[int, MirrorMessage]:
+        """Group `mirrors` by `mirror_channel`, keeping only channels reached
+        by a single mirror. A channel reached via more than one topic-scoped
+        DirectionConfig can hold several mirrors of the same source message
+        (`binding_id` has no topic column, so which one matches the current
+        topic can't be told apart) — such a channel is left out entirely
+        rather than guessing. Shared by `_reply_target_mirrors` and
+        `__resolve_tg_link_mirrors`.
+        """
+        by_channel: Dict[int, List[MirrorMessage]] = {}
+        for mm in mirrors:
+            by_channel.setdefault(mm.mirror_channel, []).append(mm)
+        return {ch: rows[0] for ch, rows in by_channel.items() if len(rows) == 1}
+
     async def _reply_target_mirrors(
         self: "EventProcessor", chat_id: int, reply_to_msg_id: int
     ) -> Dict[int, int]:
@@ -291,10 +395,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         is left out entirely rather than reply-chaining to a mirror_id that
         may live in the wrong topic.
         """
-        by_channel: Dict[int, List[int]] = {}
-        for m in await self._database.get_messages(reply_to_msg_id, chat_id):
-            by_channel.setdefault(m.mirror_channel, []).append(m.mirror_id)
-        return {ch: ids[0] for ch, ids in by_channel.items() if len(ids) == 1}
+        mirrors = await self._database.get_messages(reply_to_msg_id, chat_id)
+        return {
+            ch: mm.mirror_id
+            for ch, mm in self._unambiguous_mirror_per_channel(mirrors).items()
+        }
 
     async def _send_with_reference_refresh(
         self: "EventProcessor",
@@ -468,8 +573,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         A ``FileReferenceExpiredError`` from this fallback's own send (the
         reference was already stale on the primary, not-yet-refreshed attempt)
         gets the same one-refresh-then-retry treatment as `new_message`'s outer
-        handler, via `_send_with_reference_refresh`, rather than being dropped
-        by the generic exception handler below.
+        handler, via `_send_with_reference_refresh`.
         """
         if not filtered_message.media or not filtered_message.message:
             self._logger.error(
@@ -487,34 +591,25 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             # Also refresh the shared source message: see new_message.
             message.media = fresh[0]
 
-        try:
-            outgoing_message = await self._send_with_reference_refresh(
-                send=lambda: send_message(
-                    self._client,
-                    entity=outgoing_chat,
-                    message=filtered_message,
-                    formatting_entities=None,
-                    reply_to=reply_to,
-                    reply_to_topic_id=reply_to_topic_id,
-                ),
-                apply_fresh_media=_apply_fresh_message_media,
-                kind="message",
-                outgoing_chat=outgoing_chat,
-                chat_id=chat_id,
-                ids=[message.id],
-                source_link=source_link,
-                flush_inserted=flush_inserted,
-                log_kind="split message",
-                context_suffix=context_suffix,
-            )
-        except errors.MediaCaptionTooLongError as split_err:
-            # Can't actually happen (caption is already empty), but keep the
-            # same catch-all contract as every other branch here.
-            self._logger.error(
-                f"Error while sending split message to chat#{outgoing_chat}{context_suffix}. "
-                f"{type(split_err).__name__}: {split_err}"
-            )
-            return
+        outgoing_message = await self._send_with_reference_refresh(
+            send=lambda: send_message(
+                self._client,
+                entity=outgoing_chat,
+                message=filtered_message,
+                formatting_entities=None,
+                reply_to=reply_to,
+                reply_to_topic_id=reply_to_topic_id,
+            ),
+            apply_fresh_media=_apply_fresh_message_media,
+            kind="message",
+            outgoing_chat=outgoing_chat,
+            chat_id=chat_id,
+            ids=[message.id],
+            source_link=source_link,
+            flush_inserted=flush_inserted,
+            log_kind="split message",
+            context_suffix=context_suffix,
+        )
         if outgoing_message is None:
             return
         # Track the media now, before the tail-text send below: that send may
@@ -557,8 +652,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         A ``FileReferenceExpiredError`` from this fallback's own send (the
         reference was already stale on the primary, not-yet-refreshed attempt)
         gets the same one-refresh-then-retry treatment as `new_album`'s outer
-        handler, via `_send_with_reference_refresh`, rather than being dropped
-        by the generic exception handler below.
+        handler, via `_send_with_reference_refresh`.
         """
         texts_to_send = []
         safe_captions = []
@@ -584,34 +678,25 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 if original_message.id in fresh_media_by_id:
                     original_message.media = fresh_media_by_id[original_message.id]
 
-        try:
-            outgoing_messages = await self._send_with_reference_refresh(
-                send=lambda: send_file(
-                    self._client,
-                    entity=outgoing_chat,
-                    caption=safe_captions,
-                    file=files,
-                    formatting_entities=safe_entities,
-                    reply_to=reply_to,
-                    reply_to_topic_id=reply_to_topic_id,
-                ),
-                apply_fresh_media=_apply_fresh_album_media,
-                kind="album",
-                outgoing_chat=outgoing_chat,
-                chat_id=chat_id,
-                ids=idxs,
-                source_link=album_link,
-                log_kind="split album",
-                context_suffix=context_suffix,
-            )
-        except errors.MediaCaptionTooLongError as split_err:
-            # Can't actually happen (captions are already split short), but
-            # keep the same catch-all contract as every other branch here.
-            self._logger.error(
-                f"Error while sending split album to chat#{outgoing_chat}{context_suffix}. "
-                f"{type(split_err).__name__}: {split_err}"
-            )
-            return
+        outgoing_messages = await self._send_with_reference_refresh(
+            send=lambda: send_file(
+                self._client,
+                entity=outgoing_chat,
+                caption=safe_captions,
+                file=files,
+                formatting_entities=safe_entities,
+                reply_to=reply_to,
+                reply_to_topic_id=reply_to_topic_id,
+            ),
+            apply_fresh_media=_apply_fresh_album_media,
+            kind="album",
+            outgoing_chat=outgoing_chat,
+            chat_id=chat_id,
+            ids=idxs,
+            source_link=album_link,
+            log_kind="split album",
+            context_suffix=context_suffix,
+        )
         if outgoing_messages is None:
             return
         # Track the album now, before the tail-caption sends below: those may
@@ -691,33 +776,22 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         for outgoing_chat, configs in outgoing_chats.items():
             matching = [c for c in configs if self._matches_from_topic(c, message)]
-            # Skip a target we've already mirrored this message to — but only
-            # when it has a single route: `binding_id` has no topic column, so
-            # for a multi-topic target one delivered topic would wrongly skip
-            # the rest.
-            if outgoing_chat in already_mirrored and len(matching) <= 1:
-                self._logger.debug(
-                    "[New message]: %s already mirrored to chat#%s, skip",
-                    message_link, outgoing_chat,
-                )
+            if self._already_mirrored_skip(
+                "[New message]", message_link, outgoing_chat, matching, already_mirrored
+            ):
                 continue
             for config in matching:
-                if restricted_saving_content and (
-                    not config.filters.restricted_content_allowed
-                    or config.mode == "forward"
+                if self._restricted_content_blocks(
+                    config, restricted_saving_content, chat_id, outgoing_chat
                 ):
-                    self._logger.warning(
-                        f"Forwards from channel#{chat_id} "
-                        f"with `restricted saving content` "
-                        f"enabled to channel#{outgoing_chat} are not supported."
-                    )
                     continue
 
                 message_copy = self.copy_message(message)
                 # Rewrite internal t.me links BEFORE filters can strip them (copy mode only)
                 if config.mode == "copy":
                     await self._rewrite_links(
-                        message_copy, chat_id, config.fallback_link_url, link_cache
+                        message_copy, chat_id, outgoing_chat,
+                        config.fallback_link_url, link_cache,
                     )
 
                 filtered_message: EventMessage
@@ -742,16 +816,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     )
                     continue
 
-                outgoing_topic_reply = (
-                    reply_to_messages.get(outgoing_chat) is not None
-                    and config.to_topic_id is not None
+                reply_to, reply_to_topic_id = self._resolve_reply_target(
+                    config, reply_to_messages, outgoing_chat
                 )
-                reply_to = (
-                    reply_to_messages.get(outgoing_chat)
-                    if outgoing_topic_reply or config.to_topic_id is None
-                    else config.to_topic_id
-                )
-                reply_to_topic_id = config.to_topic_id if outgoing_topic_reply else None
 
                 async def track_media(
                     sent: types.Message,
@@ -925,24 +992,14 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 c for c in configs
                 if self._matches_from_topic(c, incoming_first_message)
             ]
-            # See new_message: only skip a single-route target (binding_id has
-            # no topic column).
-            if outgoing_chat in already_mirrored and len(matching) <= 1:
-                self._logger.debug(
-                    "[New album]: %s already mirrored to chat#%s, skip",
-                    album_link, outgoing_chat,
-                )
+            if self._already_mirrored_skip(
+                "[New album]", album_link, outgoing_chat, matching, already_mirrored
+            ):
                 continue
             for config in matching:
-                if restricted_saving_content and (
-                    not config.filters.restricted_content_allowed
-                    or config.mode == "forward"
+                if self._restricted_content_blocks(
+                    config, restricted_saving_content, chat_id, outgoing_chat
                 ):
-                    self._logger.warning(
-                        f"Forwards from channel#{chat_id} with "
-                        f"`restricted saving content` "
-                        f"enabled to channel#{outgoing_chat} are not supported."
-                    )
                     continue
 
                 album_copy = self.copy_album(album)
@@ -950,7 +1007,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 if config.mode == "copy":
                     for msg in album_copy:
                         await self._rewrite_links(
-                            msg, chat_id, config.fallback_link_url, link_cache
+                            msg, chat_id, outgoing_chat,
+                            config.fallback_link_url, link_cache,
                         )
 
                 filtered_album: EventAlbumMessage
@@ -977,16 +1035,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     captions.append(incoming_message.message or "")
                     album_entities.append(incoming_message.entities or [])
 
-                outgoing_topic_reply = (
-                    reply_to_messages.get(outgoing_chat) is not None
-                    and config.to_topic_id is not None
+                reply_to, reply_to_topic_id = self._resolve_reply_target(
+                    config, reply_to_messages, outgoing_chat
                 )
-                reply_to = (
-                    reply_to_messages.get(outgoing_chat)
-                    if outgoing_topic_reply or config.to_topic_id is None
-                    else config.to_topic_id
-                )
-                reply_to_topic_id = config.to_topic_id if outgoing_topic_reply else None
 
                 async def track_media(
                     sent: List[types.Message],
@@ -1178,9 +1229,23 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 if config.disable_edit is True or config.mode == "forward":
                     continue
 
-                filter_action, filtered_message = await config.filters.process(
-                    self.copy_message(message), events.MessageEdited.Event
-                )
+                try:
+                    filter_action, filtered_message = await config.filters.process(
+                        self.copy_message(message), events.MessageEdited.Event
+                    )
+                except (
+                    errors.FloodWaitError,
+                    errors.FloodPremiumWaitError,
+                    MediaDownloadError,
+                ):
+                    # Same "don't abort the rest of the fan-out" reasoning as
+                    # the send below — see the comment there.
+                    self._logger.error(
+                        f"Error while filtering edited message for "
+                        f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}."
+                    )
+                    continue
+
                 if filter_action is FilterAction.DISCARD:
                     self._logger.info(
                         f"[Edit message]: Message {message_link} was skipped "
@@ -1216,6 +1281,13 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}"
                     )
 
+                # FloodWaitError is deliberately NOT special-cased to propagate
+                # here (unlike new_message/new_album): edit_message is only
+                # reachable from the live on_edit_message handler and from
+                # _sync_broadcast_channel's catch-up loop, neither of which has
+                # a retry wrapper for it — propagating would only abort the
+                # edit for every other, un-flooded outgoing_message in this
+                # same loop, with no compensating benefit.
                 except Exception as e:
                     self._logger.error(
                         f"Error while editing message "
@@ -1243,9 +1315,25 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         )
 
         deleting_per_channel: Dict[int, List[int]] = {}
-        deleted_original_ids: set[int] = set()
+        # `delete_messages_batch` purges by (original_id, chat_id) with no
+        # mirror_channel scoping — it drops an original_id's DB row across
+        # *every* mirror channel at once. So an original_id is only safe to
+        # purge once *every* channel the DB currently has a row for it in is
+        # confirmed done. This must include a channel with no direction config
+        # (removed from CHAT_MAPPING) or with disable_delete=True: neither is
+        # ever attempted below, but their binding row still matters (edits,
+        # link-rewrite, pin-sync) and their Telegram message is untouched, so
+        # letting a sibling channel's success purge it out from under them
+        # would be the same "still-live mirror loses its tracking" bug this
+        # whole scheme exists to avoid.
+        needed_channels_by_original: Dict[int, set[int]] = {}
+        done_channels: set[int] = set()
 
         for deleting_message in deleting_messages:
+            needed_channels_by_original.setdefault(
+                deleting_message.original_id, set()
+            ).add(deleting_message.mirror_channel)
+
             configs = self._chat_mapping.get(chat_id, {}).get(
                 deleting_message.mirror_channel
             )
@@ -1266,7 +1354,6 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 )
                 if deleting_message.mirror_id not in _ch_ids:
                     _ch_ids.append(deleting_message.mirror_id)
-                deleted_original_ids.add(deleting_message.original_id)
                 break  # add to deletion list once per mirror message
 
         for channel_id, mirror_ids in deleting_per_channel.items():
@@ -1275,15 +1362,35 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     entity=channel_id, message_ids=mirror_ids
                 )
             except Exception as e:
+                # FloodWaitError is deliberately NOT special-cased to propagate
+                # here (unlike new_message/new_album): delete_message is only
+                # reachable from the live on_deleted_message handler and from
+                # _sync_broadcast_channel's catch-up loop, neither of which has
+                # a retry wrapper for it — propagating would only abort the
+                # delete for every other, un-flooded channel below, with no
+                # compensating benefit. This channel's messages simply stay
+                # untracked-as-done, so the purge below correctly leaves them
+                # in the DB for a future delete_message call to retry.
                 self._logger.error(
                     f"Error while deleting messages from chat#{channel_id}. "
                     f"{type(e).__name__}: {e}"
                 )
+            else:
+                done_channels.add(channel_id)
 
-        if deleted_original_ids:
-            await self._database.delete_messages_batch(
-                list(deleted_original_ids), chat_id
-            )
+        safe_to_purge = {
+            oid
+            for oid, channels in needed_channels_by_original.items()
+            if channels <= done_channels
+        }
+        if safe_to_purge:
+            try:
+                await self._database.delete_messages_batch(list(safe_to_purge), chat_id)
+            except Exception as e:
+                self._logger.error(
+                    f"{len(safe_to_purge)} message(s) deleted from Telegram but "
+                    f"DB purge failed for chat#{chat_id}: {type(e).__name__}: {e}"
+                )
 
 
 class TelegramLogHandler(logging.Handler):

@@ -65,3 +65,16 @@ def test_reply_in_non_forum_is_general():
     m.reply_to = ReplyTo(forum_topic=False, msg_id=5)
     assert p._matches_from_topic(_cfg(1), m) is True
     assert p._matches_from_topic(_cfg(5), m) is False
+
+
+class ReplyToStoryHeader:
+    """Stand-in for Telethon's MessageReplyStoryHeader (a reply to a Telegram
+    Story) — unlike MessageReplyHeader it carries no `forum_topic` field."""
+
+
+def test_reply_to_story_is_general_topic():
+    p = _proc()
+    m = make_message("hi")
+    m.reply_to = ReplyToStoryHeader()
+    assert p._matches_from_topic(_cfg(1), m) is True
+    assert p._matches_from_topic(_cfg(5), m) is False

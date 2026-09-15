@@ -34,6 +34,18 @@ def test_forum_pair_topic_map():
     assert pair.to_topics == [1, 3, 4]
 
 
+def test_mixed_topic_scoped_and_whole_chat_to_topics_does_not_raise():
+    """One donor->recipient pair can combine a topic-scoped direction
+    (to_topic_id=int) with a from-topic-only direction whose to_topic_id is
+    None (mirrors the whole recipient chat) — to_topics must not choke on the
+    mixed None/int values when sorting.
+    """
+    mapping = {-1002: {-9002: [_cfg(5, None), _cfg(7, 50)]}}
+    (pair,) = sp.iter_sync_directions(mapping, BC)
+    assert pair.topic_map == {5: None, 7: 50}
+    assert pair.to_topics == [50]
+
+
 def test_broadcast_donor_excluded_by_default_included_with_flag():
     mapping = {BC: {-9001: [_cfg()], -9002: [_cfg()]}}
     assert sp.iter_sync_directions(mapping, BC) == []

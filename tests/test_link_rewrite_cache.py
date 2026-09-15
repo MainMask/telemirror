@@ -16,6 +16,7 @@ import telemirror.mirroring as mirroring
 from config import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventProcessor
+from telemirror.misc.links import private_message_link
 from telemirror.storage import InMemoryDatabase, MirrorMessage
 from tests.conftest import make_message, run
 
@@ -80,6 +81,68 @@ def test_link_resolution_is_cached_across_fanout(monkeypatch):
 
     # 2 fan-out targets, but the referenced link is resolved once.
     assert db.get_messages_calls == 1
+
+
+def test_ambiguous_topic_mirrors_are_not_guessed():
+    """A referenced message mirrored twice into the same channel (reached via
+    two topic-scoped configs — binding_id has no topic column) must not be
+    rewritten to an arbitrary one of those mirror ids: the fallback is used
+    instead, same "leave out rather than guess" rule as _reply_target_mirrors.
+    """
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(5, REF, 500, REF_MIRROR)))
+    run(db.insert(MirrorMessage(5, REF, 501, REF_MIRROR)))
+
+    proc = EventProcessor(
+        chat_mapping={REF: {REF_MIRROR: [_cfg()]}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test.linkcache"),
+    )
+    msg = make_message("link", channel_id=1000)
+
+    result = run(
+        proc._try_rewrite_tg_link(
+            f"https://t.me/c/{REF_RAW}/5", SOURCE, msg, REF_MIRROR,
+            "https://fallback.example/5",
+        )
+    )
+
+    assert result == "https://fallback.example/5"
+
+
+def test_each_fanout_target_gets_its_own_mirror_link():
+    """A referenced message mirrored into two *different* target channels
+    (REF_MIRROR_A, REF_MIRROR_B — each unambiguous on its own) must have its
+    link rewritten to the mirror in the *same* channel the current copy is
+    being sent to, not to whichever target's mirror was resolved first and
+    then reused for every other target via link_cache.
+    """
+    ref_mirror_a = REF_MIRROR
+    ref_mirror_b = -1002000000088
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(5, REF, 500, ref_mirror_a)))
+    run(db.insert(MirrorMessage(5, REF, 600, ref_mirror_b)))
+
+    proc = EventProcessor(
+        chat_mapping={REF: {ref_mirror_a: [_cfg()], ref_mirror_b: [_cfg()]}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test.linkcache"),
+    )
+    msg = make_message("link", channel_id=1000)
+    url = f"https://t.me/c/{REF_RAW}/5"
+    link_cache: dict = {}
+
+    result_a = run(
+        proc._try_rewrite_tg_link(url, SOURCE, msg, ref_mirror_a, link_cache=link_cache)
+    )
+    result_b = run(
+        proc._try_rewrite_tg_link(url, SOURCE, msg, ref_mirror_b, link_cache=link_cache)
+    )
+
+    assert result_a == private_message_link(ref_mirror_a, 500)
+    assert result_b == private_message_link(ref_mirror_b, 600)
 
 
 def test_username_resolution_is_cached_on_the_processor():
