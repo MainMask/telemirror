@@ -42,7 +42,7 @@ class MessageFilter(Protocol):
 
                 Processed entity
         """
-        if isinstance(entity, EventMessage):
+        if isinstance(entity, EventMessage):  # type: ignore[misc]  # telethon ships no py.typed marker
             return await self._process_message(entity, event_type)
 
         if isinstance(entity, list):

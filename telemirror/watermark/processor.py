@@ -108,7 +108,7 @@ def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
     sx = cv2.Sobel(enhanced, cv2.CV_32F, 1, 0, ksize=3)
     sy = cv2.Sobel(enhanced, cv2.CV_32F, 0, 1, ksize=3)
     mag = np.sqrt(sx ** 2 + sy ** 2)
-    return cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    return cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)  # type: ignore[call-overload]  # cv2 stubs don't cover dst=None
 
 
 def _load_template(
@@ -315,7 +315,7 @@ def stamp_watermark_on_image(
     img_w, img_h = img.size
     wm_w = int(img_w * config.stamp_scale)
     wm_h = int(wm.height * wm_w / wm.width)
-    wm = wm.resize((wm_w, wm_h), Image.LANCZOS)
+    wm = wm.resize((wm_w, wm_h), Image.Resampling.LANCZOS)
 
     a = wm.getchannel("A").point(lambda v: int(v * config.stamp_opacity))
     wm.putalpha(a)

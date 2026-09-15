@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import tempfile
-from typing import Optional, Type
+from typing import Any, Optional, Type
 
 from telethon import errors
 from telethon.tl import types
@@ -84,7 +84,7 @@ class WatermarkRemovalFilter(MessageFilter):
     def __init__(
         self,
         channels: Optional[list[int]] = None,
-        **config: object,
+        **config: Any,
     ) -> None:
         self._config = WatermarkConfig(**config)
         self._channels: Optional[set[int]] = (
@@ -208,6 +208,7 @@ class WatermarkRemovalFilter(MessageFilter):
                 if config.remove_watermark
                 else None
             )
+            output: Optional[bytes]
             if config.stamp_watermark:
                 output = await async_stamp_watermark_on_image(
                     cleaned if cleaned is not None else photo_bytes, config

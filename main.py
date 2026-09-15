@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 from telemirror.mirroring import Telemirror
 from telemirror.misc.log_setup import setup_stdout_logger
@@ -38,8 +39,8 @@ async def run_telemirror(
     logger: logging.Logger,
     host: str,
     port: int,
-    broadcast_channel: int = None,
-    tech_channel: int = None,
+    broadcast_channel: Optional[int] = None,
+    tech_channel: Optional[int] = None,
 ):
     await serve_health_endpoint(host=host, port=port)
 

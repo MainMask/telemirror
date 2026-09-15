@@ -385,6 +385,7 @@ else:
     DISABLE_EDIT: bool = config("DISABLE_EDIT", cast=bool, default=False)
     DISABLE_DELETE: bool = config("DISABLE_DELETE", cast=bool, default=False)
 
+    message_filter: MessageFilter
     if REMOVE_URLS:
         message_filter = UrlMessageFilter(
             blacklist=REMOVE_URLS_LIST, whitelist=REMOVE_URLS_WHITELIST

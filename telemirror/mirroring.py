@@ -58,6 +58,15 @@ _TAIL_SEND_MAX_SINGLE_WAIT_SEC = 60
 _CAPTION_SPLIT_HANDLED = object()
 
 
+def _resolve_logger(logger: Optional[Union[str, logging.Logger]]) -> logging.Logger:
+    """Normalizes a `str` name / `Logger` / `None` constructor arg into a `Logger`."""
+    if isinstance(logger, str):
+        return logging.getLogger(logger)
+    if isinstance(logger, logging.Logger):
+        return logger
+    return logging.getLogger(__name__)
+
+
 def _consume_task_result(task: asyncio.Task) -> None:
     """Retrieve a done task's result so asyncio doesn't log
     'Task exception was never retrieved' for a fire-and-forget task."""
@@ -656,7 +665,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         """
         texts_to_send = []
         safe_captions = []
-        safe_entities = []
+        safe_entities: List[List[types.TypeMessageEntity]] = []
         for i, caption in enumerate(captions):
             # Telegram counts caption length in UTF-16 code units, not Python
             # codepoints — an emoji-heavy caption can be <=1024 Python chars
@@ -1253,6 +1262,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     )
                     continue
 
+                # process() is called with a single EventMessage (not an album),
+                # so it always routes through _process_message and returns one
+                # back — never the EventAlbumMessage half of FilterResult's type.
+                assert not isinstance(filtered_message, list)
+
                 # Prevent `MediaPrevInvalidError`: The old media cannot be edited
                 # with anything else (such as stickers or voice notes).
                 edit_media_allowed = (
@@ -1531,12 +1545,13 @@ class EventHandlers:
     def event_message_link(self: "EventHandlers", event: EventLike) -> str:
         """Get link to event message"""
 
+        incoming_message_id: int
         if isinstance(event, (events.NewMessage.Event, events.MessageEdited.Event)):
-            incoming_message_id: int = event.message.id
+            incoming_message_id = event.message.id
         elif isinstance(event, events.Album.Event):
-            incoming_message_id: int = event.messages[0].id
+            incoming_message_id = event.messages[0].id
         else:  # events.MessageDeleted.Event
-            incoming_message_id: int = event.deleted_id
+            incoming_message_id = event.deleted_id
 
         return private_message_link(event.chat_id, incoming_message_id)
 
@@ -1625,7 +1640,7 @@ class Mirroring:
         database: Database,
         receiver: TelegramClient,
         sender: TelegramClient,
-        logger: Union[str, logging.Logger] = None,
+        logger: Optional[Union[str, logging.Logger]] = None,
         broadcast_channel: Optional[int] = None,
         tech_channel: Optional[int] = None,
     ) -> None:
@@ -1640,6 +1655,8 @@ class Mirroring:
             broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup.
             tech_channel (`int`, optional): Technical monitoring channel ID.
         """
+        logger = _resolve_logger(logger)
+
         self._chat_mapping = chat_mapping
         self._database = database
         self._receiver = receiver
@@ -1701,6 +1718,7 @@ class Mirroring:
         target added later is NOT backfilled by this sync.
         """
         bc = self._broadcast_channel
+        assert bc is not None, "_sync_broadcast_channel requires broadcast_channel to be configured"
         self._logger.info(f"[Sync broadcast]: starting sync for channel#{bc}")
 
         synced = await self._database.get_broadcast_sync(bc)  # {msg_id: edit_ts|None}
@@ -1971,10 +1989,10 @@ class Telemirror:
         session_string: str,
         chat_mapping: Dict[int, Dict[int, List[DirectionConfig]]],
         database: Database,
-        logger: Union[str, logging.Logger] = None,
-        api_device_model: str = None,
-        api_system_version: str = None,
-        api_app_version: str = None,
+        logger: Optional[Union[str, logging.Logger]] = None,
+        api_device_model: Optional[str] = None,
+        api_system_version: Optional[str] = None,
+        api_app_version: Optional[str] = None,
         broadcast_channel: Optional[int] = None,
         tech_channel: Optional[int] = None,
     ):
@@ -2010,10 +2028,7 @@ class Telemirror:
             retry_delay=5,
         )
 
-        if isinstance(logger, str):
-            logger = logging.getLogger(logger)
-        elif not isinstance(logger, logging.Logger):
-            logger = logging.getLogger(__name__)
+        logger = _resolve_logger(logger)
 
         self._logger = logger
 

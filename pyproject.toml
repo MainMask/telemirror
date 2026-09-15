@@ -13,3 +13,12 @@ select = ["F", "E9", "B", "PIE", "C4", "FLY", "LOG"]
 [tool.ruff.lint.per-file-ignores]
 # vendored Telethon fork — kept close to upstream
 "telemirror/_patch/*" = ["B", "PIE", "C4"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# vendored Telethon fork — kept close to upstream
+module = "telemirror._patch.*"
+ignore_errors = true

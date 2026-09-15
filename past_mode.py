@@ -184,6 +184,7 @@ async def _replay_direction(
     Returns the number of messages/albums processed.
     """
     pm = cfgs[0].past_mode
+    assert pm is not None, "_replay_direction requires cfgs[0].past_mode to be set"
     prefix = f"[PastMode] {source_id}→{target_id}"
 
     labels = {_strategy_label(c.past_mode) for c in cfgs}
@@ -225,6 +226,7 @@ async def _replay_direction(
             iter_kwargs["offset_date"] = pm.since_date
         # full_history: reverse=True only
         if bounded_resume:
+            assert pm.last_n is not None  # implied by bounded_resume
             iter_total = max(0, pm.last_n - mirrors_done)
             # Not bounded here via iter_messages(limit=...): a hard cutoff
             # could land mid-album (an album is only known complete once
@@ -415,6 +417,7 @@ async def _edit_links_pass(
         cfg = next((c for c in cfgs if c.mode == "copy"), None)
         if cfg is None:
             continue
+        assert cfg.past_mode is not None, "pairs values are pre-filtered to past_mode-configured cfgs"
 
         prefix = f"[EditPass] {source_id}→{target_id}"
         mirrors = await database.get_messages_for_channel_pair(source_id, target_id)

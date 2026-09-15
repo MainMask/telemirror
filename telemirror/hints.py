@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, TypeAlias, Union
 
 from telethon import events, tl
 
@@ -9,7 +9,7 @@ EventLike = Union[
     events.MessageDeleted.Event,
 ]
 
-EventMessage = tl.patched.Message
+EventMessage: TypeAlias = tl.patched.Message
 
 EventAlbumMessage = List[EventMessage]
 

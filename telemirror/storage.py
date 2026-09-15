@@ -1,6 +1,6 @@
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict, List, NamedTuple, Optional, Protocol, Tuple
+from typing import Any, AsyncIterator, Dict, List, NamedTuple, Optional, Tuple
 
 from psycopg import AsyncCursor, errors
 from psycopg.rows import class_row
@@ -28,7 +28,7 @@ class MirrorMessage(NamedTuple):
     mirror_channel: int
 
 
-class Database(Protocol):
+class Database(ABC):
     """
     Base database class
 
@@ -198,7 +198,7 @@ class Database(Protocol):
         """Removes broadcast-sync rows for messages deleted from the source."""
         raise NotImplementedError
 
-    async def close(self: "Database") -> None:
+    async def close(self: "Database") -> None:  # noqa: B027 - intentional no-op default
         """Release any held resources (connection pool). No-op by default."""
 
     def __repr__(self) -> str:
@@ -218,7 +218,7 @@ class InMemoryDatabase(Database):
 
     def __init__(
         self: "InMemoryDatabase", max_capacity: int = MAX_CAPACITY
-    ) -> "InMemoryDatabase":
+    ) -> None:
         self.__storage = LRUCache[str, List[MirrorMessage]](capacity=max_capacity)
         self.__checkpoints: Dict[Tuple[int, int], int] = {}
         self.__broadcast_sync: Dict[int, Dict[int, Optional[int]]] = {}
@@ -431,7 +431,7 @@ class PostgresDatabase(Database):
         min_conn: int = MIN_CONN,
         max_conn: int = MAX_CONN,
         **kwargs: Any,
-    ) -> "PostgresDatabase":
+    ) -> None:
         self.__conn_info = connection_string
         self.__min_conn = min_conn
         self.__max_conn = max_conn

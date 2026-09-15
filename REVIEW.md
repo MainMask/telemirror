@@ -2309,3 +2309,140 @@ changed function and call site, the `None`-vs-empty-dict branch semantics,
 and the `past_mode.py` `chat_mapping` interaction, plus a separate
 fresh-context agent pass with no shared history. **Zero findings** — nothing
 to add to this pass's fix list.
+
+# Pass 19 — whole-project production-readiness audit + mypy enabled in CI
+
+Requested by the project owner: a fresh whole-project review and a verdict on
+production readiness. Rather than re-reading ~10k lines this journal had
+already closed pass after pass, this pass verified the journal's claims
+against the current `HEAD` (full test suite + `ruff` green) and covered
+ground the correctness-focused checklist above doesn't: deployment
+(`Dockerfile`, `docker-compose.yaml`, `deploy/systemd/*`), secrets handling
+(`.env` permissions/exclusion), and injection surfaces (SQL — all
+parameterized; `subprocess` calls — list-args, no `shell=True`, no untrusted
+input in `ffmpeg`/`ffmpeg`-adjacent commands). No new correctness finding;
+the existing deploy/CI setup was already sound.
+
+One deferred item from pass 7/8 (`telemirror/mirroring.py`'s "Deferred"
+section, "not re-verified against Telethon's actual update-buffering
+behaviour") was flagged in the initial verdict as still open — that was
+stale: pass 11 (`aac5bf8`) had already investigated and fixed it (reordered
+`EventHandlers` construction before `_sync_broadcast_channel`, see Batch B
+there). No action needed; noted here only to correct the record.
+
+## `mypy` — enabled as a blocking CI step
+
+The owner asked to add `mypy` to CI, then, on discovering the scope, to fix
+the pre-existing debt rather than run it non-blocking. Baseline: 213 raw
+errors, 111 after excluding missing-stub noise for `telethon`/`yaml`
+(`ignore_missing_imports = true`, `pyproject.toml`). Fixed down to 0:
+
+- `telemirror/storage.py::Database` — changed base class from `Protocol` to
+  `ABC`. Both `InMemoryDatabase`/`PostgresDatabase` already used it via
+  nominal inheritance only (no structural/duck typing anywhere in the
+  codebase relies on `Protocol`'s special behavior), and mypy has a known
+  false-positive with `Protocol` subclasses: a concrete (non-abstract) method
+  with a trivial body (docstring only) was misidentified as still abstract,
+  making mypy claim `InMemoryDatabase`/`PostgresDatabase` couldn't be
+  instantiated — confirmed a false positive by a minimal repro (`ABC`: clean;
+  `Protocol`: same error) and by runtime instantiation succeeding either way.
+  `Database.close`'s empty body then needed `# noqa: B027` (ruff's bugbear
+  check for the same "empty method, no `@abstractmethod`" shape — here
+  intentional, it's a no-op default hook).
+- `telemirror/hints.py::EventMessage` — `tl.patched.Message` (telethon has no
+  `py.typed` marker) needed an explicit `TypeAlias` annotation for mypy to
+  treat it as a type rather than an ambiguous variable; this alone resolved
+  most of the `mirroring.py`/`messagefilters.py` `EventMessage? has no
+  attribute` errors downstream.
+- `telemirror/mirroring.py::Mirroring.__init__` — the `logger:
+  Union[str, Logger]` parameter was passed straight through to
+  `EventProcessor(logger=...)` (which correctly expects a plain `Logger`)
+  without narrowing; `Telemirror.__init__` already had the
+  str-name-or-Logger-or-None → `Logger` resolution snippet, just one layer
+  up. Initially copied verbatim into `Mirroring` (same-shape fix, not a
+  behavior change: every real caller only ever reaches `Mirroring` via
+  `Telemirror`, which had already resolved it) — then, per a `/code-review`
+  pass over this pass's own diff (below), extracted into a shared
+  module-level `_resolve_logger` helper used by both constructors instead.
+- `implicit-Optional` params (`x: int = None` instead of `Optional[int] =
+  None`) in `main.py`, `telemirror/mirroring.py` — mechanical, no behavior
+  change.
+- `past_mode.py` — `pm = cfgs[0].past_mode` and `cfg.past_mode` are typed
+  `Optional[PastModeConfig]` on `DirectionConfig`, but both call sites
+  (`_replay_direction`, `_edit_links_pass`) only ever see `cfgs`/`pairs`
+  pre-filtered to `past_mode is not None` (`_run`'s `pm_cfgs` list-comp) —
+  added `assert ... is not None` at each site to encode that invariant for
+  mypy; no `assert` existed anywhere in this codebase before, but it's the
+  standard idiom for this exact situation and there was no established
+  alternative to match.
+- `telemirror/mirroring.py::EventHandlers.edit_message` — `filtered_message`
+  from `config.filters.process(...)` is typed
+  `EventMessage | EventAlbumMessage` (the general `process()` signature
+  shared with the album path), but this call site always passes a single
+  message, never a list. `assert not isinstance(filtered_message, list)`
+  narrows it back to a single message for the rest of the block.
+- `telemirror/mirroring.py::event_message_link` — three branches each
+  re-annotated `incoming_message_id: int` (mypy treats repeated annotations
+  as a redefinition error); annotated once above the `if`/`elif`/`else`
+  instead. `_send_media_group_caption_fallback`'s `safe_entities = []` got an
+  explicit `List[List[types.TypeMessageEntity]]` annotation (mypy couldn't
+  infer the element type across the two append sites, one of them `[]`).
+- `telemirror/mirroring.py::_sync_broadcast_channel` — `bc =
+  self._broadcast_channel` is `Optional[int]`; every caller only invokes this
+  method inside `if self._broadcast_channel:`, a guarantee mypy can't see
+  across the method boundary. Added the same `assert bc is not None` idiom.
+- `telemirror/messagefilters/base.py::MessageFilter.process` —
+  `isinstance(entity, EventMessage)` where `EventMessage` resolves to `Any`
+  (no telethon stubs) is a `mypy` error class of its own
+  (`Cannot use isinstance() with Any type`) distinct from the `TypeAlias` fix
+  above; silenced with `# type: ignore[misc]` — an actual stub gap, not
+  fixable from this side.
+- `telemirror/watermark/processor.py` — `Image.LANCZOS` → `Image.Resampling.
+  LANCZOS` (the pre-Pillow-9.1 alias still works at runtime but current
+  stubs don't declare it — switched to the non-deprecated form, a genuine
+  cleanup, not just a type-checker workaround). `cv2.normalize(mag, None,
+  ...)` (`dst=None`, valid OpenCV usage for auto-allocated output) isn't
+  covered by the bundled stubs' overloads — `# type: ignore[call-overload]`.
+- `telemirror/messagefilters/watermarkfilter.py::WatermarkRemovalFilter.__init__`
+  — `**config: object` couldn't satisfy `WatermarkConfig`'s typed
+  (`str`/`float`/`int`/`bool`) fields when unpacked; changed to `**config:
+  Any` (these kwargs are always loosely-typed, YAML-config-driven values by
+  design — `object` was never actually enforcing anything real here).
+  `_process_photo`'s `output` variable held `bytes` on one branch and
+  `Optional[bytes]` on the other (mypy infers a variable's type from its
+  first assignment); added an explicit `output: Optional[bytes]` annotation
+  above the `if`.
+- `config.py` — `message_filter` assigned `UrlMessageFilter(...)` in one
+  branch, `EmptyMessageFilter()` in the other (same first-assignment
+  inference issue); annotated `message_filter: MessageFilter` above the
+  `if`.
+- `telemirror/storage.py::InMemoryDatabase.__init__` /
+  `PostgresDatabase.__init__` — both were annotated `-> "InMemoryDatabase"` /
+  `-> "PostgresDatabase"` instead of `-> None` (copy-paste from the
+  `_async__init__`/`__await__` factory pattern next to them, which
+  legitimately returns `self`) — `__init__` must return `None`; harmless at
+  runtime (the annotation is never checked there) but wrong, and it's what
+  produced the "missing return statement" / "return type must be None"
+  errors. Fixed both to `-> None`.
+
+`telemirror/_patch/*` (vendored Telethon fork, kept close to upstream —
+already exempted from `ruff`'s B/PIE/C4 in `pyproject.toml`) is exempted the
+same way for `mypy` (`ignore_errors = true` override), consistent with the
+existing policy of not touching that code to satisfy local lint/type
+preferences.
+
+Full suite (338) and `ruff` green throughout; `mypy .` clean at 0 errors.
+`python -m mypy .` added as a blocking step in `.github/workflows/ci.yml`,
+`mypy==2.3.1` pinned in `requirements-dev.txt` (matching the version already
+installed and exercised in `.venv` during this pass).
+
+## Pass 19 self-review — `/code-review` over this pass's own diff, one dedup fixed
+
+Requested by the project owner immediately after the pass landed (before
+committing) — same discipline as pass 18's independent cross-check. One
+finding, not a bug: the logger str/None → `Logger` resolution snippet
+(3 lines) was duplicated verbatim between `Mirroring.__init__` and
+`Telemirror.__init__` rather than shared, introduced by this pass itself
+when narrowing the type. Fixed by extracting a module-level
+`_resolve_logger(logger) -> logging.Logger` helper, used by both. Full
+suite (338), `ruff`, and `mypy .` re-verified green after the fix.
