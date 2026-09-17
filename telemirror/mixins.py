@@ -79,6 +79,8 @@ class CopyEventMessage:
             forwards=message.forwards,
             replies=message.replies,
             action=message.action,
+            invert_media=message.invert_media,
+            effect=message.effect,
         )
         cloned._chat = message._chat
         cloned._client = message._client

@@ -238,6 +238,73 @@ def test_new_album_flood_on_caption_tail_recovers(monkeypatch):
     assert sorted(m.mirror_id for m in tracked) == [911, 912]
 
 
+def test_new_album_caption_tail_skips_gracefully_on_short_send_response(monkeypatch):
+    """If the album send returns fewer messages than were sent (the same
+    "count mismatch" case `track_media` already treats as reachable and
+    guards for its own DB insert), a caption-tail text for an album item
+    beyond the truncated response must be logged and skipped, not index past
+    the end of `outgoing_messages` and crash the whole target's send."""
+    db = run(InMemoryDatabase())
+    send_file_calls = []
+
+    async def fake_send_file(client, entity, caption, file, **kw):
+        send_file_calls.append(caption)
+        if len(send_file_calls) == 1:
+            raise mirroring.errors.MediaCaptionTooLongError(request=None)
+        # Only 1 message for a 2-item album: item index 1 (the one with the
+        # overflowing caption) has no corresponding sent message.
+        return [types.Message(id=941, peer_id=types.PeerChannel(1), message="")]
+
+    monkeypatch.setattr(mirroring, "send_file", fake_send_file)
+
+    long_caption = "x" * 1100
+    album = [
+        make_message("a", media=types.MessageMediaUnsupported(), channel_id=1000),
+        make_message(long_caption, media=types.MessageMediaUnsupported(), channel_id=1000),
+    ]
+    album[1].id = 2
+    run(_proc(db).new_album(SOURCE, album, "link"))  # must not raise IndexError
+
+
+def test_new_album_caption_tail_replies_to_correct_album_item(monkeypatch):
+    """The caption-tail text for an over-1024-char caption must reply to the
+    album item whose own caption actually overflowed, not always item 0."""
+    db = run(InMemoryDatabase())
+    send_file_calls = []
+    reply_to_ids = []
+
+    async def fake_send_file(client, entity, caption, file, **kw):
+        send_file_calls.append(caption)
+        if len(send_file_calls) == 1:
+            raise mirroring.errors.MediaCaptionTooLongError(request=None)
+        return [
+            types.Message(id=931, peer_id=types.PeerChannel(1), message=""),
+            types.Message(id=932, peer_id=types.PeerChannel(1), message=""),
+            types.Message(id=933, peer_id=types.PeerChannel(1), message=""),
+        ]
+
+    async def fake_send_message(client, entity, message, **kw):
+        reply_to_ids.append(kw.get("reply_to"))
+        return types.Message(id=934, peer_id=types.PeerChannel(1), message="")
+
+    monkeypatch.setattr(mirroring, "send_file", fake_send_file)
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    long_caption = "x" * 1100
+    album = [
+        make_message("a", media=types.MessageMediaUnsupported(), channel_id=1000),
+        make_message(long_caption, media=types.MessageMediaUnsupported(), channel_id=1000),
+        make_message("c", media=types.MessageMediaUnsupported(), channel_id=1000),
+    ]
+    album[1].id = 2
+    album[2].id = 3
+    run(_proc(db).new_album(SOURCE, album, "link"))
+
+    # Item index 1's overflowing caption must reply to outgoing_messages[1] (932),
+    # not outgoing_messages[0] (931).
+    assert reply_to_ids == [932]
+
+
 def test_new_album_split_measures_caption_in_utf16_not_codepoints(monkeypatch):
     """`_send_album_with_caption_split`'s per-item 1024 check must use
     Telegram's UTF-16 code-unit length, not Python's codepoint `len()`. An

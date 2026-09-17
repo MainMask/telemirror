@@ -4,7 +4,6 @@ import os
 import tempfile
 from typing import Any, Optional, Type
 
-from telethon import errors
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
@@ -18,11 +17,11 @@ from ..watermark.processor import (
 )
 from ._media import (
     UPLOAD_LIMIT_BYTES,
-    MediaDownloadError,
     ReuploadCache,
+    cached_reupload,
     download_media_with_retry,
-    source_media_id,
-    strict_media_mode,
+    downloaded_tempfile,
+    reupload_errors,
 )
 from .base import FilterAction, FilterResult, MessageFilter
 
@@ -104,13 +103,6 @@ class WatermarkRemovalFilter(MessageFilter):
         ):
             return FilterResult(FilterAction.CONTINUE, message)
 
-        key = source_media_id(message.media)
-        if key is not None:
-            cached = self._cache.get(key)
-            if cached is not None:
-                message.media = cached
-                return FilterResult(FilterAction.CONTINUE, message)
-
         handle = None
         if isinstance(message.media, types.MessageMediaPhoto):
             handle = await self._process_photo(message, config)
@@ -190,53 +182,44 @@ class WatermarkRemovalFilter(MessageFilter):
 
         if handle is not None:
             message.media = handle
-            if key is not None:
-                self._cache.put(key, handle)
 
         return FilterResult(FilterAction.CONTINUE, message)
 
+    @cached_reupload()
+    @reupload_errors(
+        fallback=None,
+        media_error_fmt="WatermarkRemovalFilter: download failed, mirroring original photo (chat_id=%s)",
+        exception_fmt="WatermarkRemovalFilter: photo processing failed (chat_id=%s)",
+    )
     async def _process_photo(
         self,
         message: EventMessage,
         config: WatermarkConfig,
     ):
         """Return the re-uploaded file handle, or None on failure."""
-        try:
-            photo_bytes: bytes = await download_media_with_retry(message, file=bytes)
-            cleaned = (
-                await async_remove_watermark_from_image(photo_bytes, config)
-                if config.remove_watermark
-                else None
+        photo_bytes: bytes = await download_media_with_retry(message, file=bytes)
+        cleaned = (
+            await async_remove_watermark_from_image(photo_bytes, config)
+            if config.remove_watermark
+            else None
+        )
+        output: Optional[bytes]
+        if config.stamp_watermark:
+            output = await async_stamp_watermark_on_image(
+                cleaned if cleaned is not None else photo_bytes, config
             )
-            output: Optional[bytes]
-            if config.stamp_watermark:
-                output = await async_stamp_watermark_on_image(
-                    cleaned if cleaned is not None else photo_bytes, config
-                )
-            else:
-                output = cleaned  # nothing to re-upload unless removal changed it
-            if output is None:
-                return None
-            return await message._client.upload_file(output, file_name="photo.jpg")
-        except MediaDownloadError:
-            if strict_media_mode.get():
-                raise  # past_mode: keep the checkpoint put and retry the message
-            logger.warning(
-                "WatermarkRemovalFilter: download failed, mirroring original photo (chat_id=%s)",
-                message.chat_id,
-            )
+        else:
+            output = cleaned  # nothing to re-upload unless removal changed it
+        if output is None:
             return None
-        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-            # A >threshold flood must reach past_mode's retry wrapper instead of
-            # silently falling back to the unwatermarked original. Same contract
-            # as mirroring.py.
-            raise
-        except Exception:
-            logger.exception(
-                "WatermarkRemovalFilter: photo processing failed (chat_id=%s)", message.chat_id
-            )
-            return None
+        return await message._client.upload_file(output, file_name="photo.jpg")
 
+    @cached_reupload()
+    @reupload_errors(
+        fallback=None,
+        media_error_fmt="WatermarkRemovalFilter: download failed, mirroring original video (chat_id=%s)",
+        exception_fmt="WatermarkRemovalFilter: video processing failed (chat_id=%s)",
+    )
     async def _process_video(
         self,
         message: EventMessage,
@@ -244,12 +227,8 @@ class WatermarkRemovalFilter(MessageFilter):
         doc: types.Document,
     ):
         """Return the re-uploaded media, or None if nothing was produced."""
-        tmp_in = tmp_out = tmp_stamp = None
+        tmp_out = tmp_stamp = None
         try:
-            with tempfile.NamedTemporaryFile(
-                prefix="telemirror-tmp-", suffix=".mp4", delete=False
-            ) as f:
-                tmp_in = f.name
             with tempfile.NamedTemporaryFile(
                 prefix="telemirror-tmp-", suffix=".mp4", delete=False
             ) as f:
@@ -259,20 +238,20 @@ class WatermarkRemovalFilter(MessageFilter):
             ) as f:
                 tmp_stamp = f.name
 
-            await download_media_with_retry(message, file=tmp_in)
-            semaphore = _get_video_encode_semaphore(config.max_concurrent_video_encodes)
-            async with semaphore:
-                removed = (
-                    await async_remove_watermark_from_video(tmp_in, config, tmp_out)
-                    if config.remove_watermark
-                    else False
-                )
-                source_for_stamp = tmp_out if removed else tmp_in
-                stamped = (
-                    await async_stamp_watermark_on_video(source_for_stamp, config, tmp_stamp)
-                    if config.stamp_watermark
-                    else False
-                )
+            async with downloaded_tempfile(message, suffix=".mp4") as tmp_in:
+                semaphore = _get_video_encode_semaphore(config.max_concurrent_video_encodes)
+                async with semaphore:
+                    removed = (
+                        await async_remove_watermark_from_video(tmp_in, config, tmp_out)
+                        if config.remove_watermark
+                        else False
+                    )
+                    source_for_stamp = tmp_out if removed else tmp_in
+                    stamped = (
+                        await async_stamp_watermark_on_video(source_for_stamp, config, tmp_stamp)
+                        if config.stamp_watermark
+                        else False
+                    )
 
             upload_path = tmp_stamp if stamped else (tmp_out if removed else None)
             if upload_path is not None:
@@ -288,25 +267,7 @@ class WatermarkRemovalFilter(MessageFilter):
                     file=handle, mime_type=doc.mime_type, attributes=doc.attributes
                 )
             return None
-        except MediaDownloadError:
-            if strict_media_mode.get():
-                raise  # past_mode: keep the checkpoint put and retry the message
-            logger.warning(
-                "WatermarkRemovalFilter: download failed, mirroring original video (chat_id=%s)",
-                message.chat_id,
-            )
-            return None
-        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-            # A >threshold flood must reach past_mode's retry wrapper instead of
-            # silently falling back to the unwatermarked original. Same contract
-            # as mirroring.py.
-            raise
-        except Exception:
-            logger.exception(
-                "WatermarkRemovalFilter: video processing failed (chat_id=%s)", message.chat_id
-            )
-            return None
         finally:
-            for p in (tmp_in, tmp_out, tmp_stamp):
+            for p in (tmp_out, tmp_stamp):
                 if p and os.path.exists(p):
                     os.unlink(p)

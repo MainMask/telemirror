@@ -37,6 +37,35 @@ def test_no_suffix_no_remove_is_noop():
     assert f._rename("whatever.zip") == "whatever.zip"
 
 
+def test_suffix_boundary_with_remove_cruft_still_cleans_on_first_pass():
+    """A source filename whose stem happens to already look "suffixed" (ends
+    with " - {suffix}") must still get its `remove`-list cleanup applied on a
+    genuine first pass — the idempotency guard only skips re-appending the
+    suffix, not the cleanup."""
+    f = DocumentFilenameFilter(suffix="Repost", remove=["WATERMARK"])
+    result = f._rename("SomeFile WATERMARK - Repost.pdf")
+    assert "WATERMARK" not in result
+    assert result.endswith("Repost.pdf")
+
+
+def test_remove_and_suffix_together_stay_idempotent_on_second_pass():
+    f = DocumentFilenameFilter(suffix="Repost", remove=["WATERMARK"])
+    once = f._rename("Movie WATERMARK.mkv")
+    twice = f._rename(once)
+    assert once == twice == "Movie - Repost.mkv"
+
+
+def test_remove_entry_matching_the_suffix_text_does_not_lose_the_suffix():
+    """`remove` overlapping `suffix` (e.g. both configured as the same word)
+    must not let the cleanup strip the suffix marker out from under a stale
+    idempotency check — the suffix is always re-appended after cleanup, so
+    the result is stable across repeated passes instead of oscillating."""
+    f = DocumentFilenameFilter(suffix="Repost", remove=["Repost"])
+    once = f._rename("Movie - Repost.mkv")
+    twice = f._rename(once)
+    assert once == twice == "Movie - Repost.mkv"
+
+
 def _doc_message(client):
     media = types.MessageMediaDocument(
         document=types.Document(

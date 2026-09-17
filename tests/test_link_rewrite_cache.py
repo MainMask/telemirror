@@ -111,6 +111,60 @@ def test_ambiguous_topic_mirrors_are_not_guessed():
     assert result == "https://fallback.example/5"
 
 
+def test_topic_scoped_mirror_is_resolved_when_mirror_topic_is_known():
+    """Same two-mirror setup as `test_ambiguous_topic_mirrors_are_not_guessed`,
+    but the rows carry their real `mirror_topic_id` (as new inserts record
+    post-fix) — the link must now be rewritten to the mirror matching the
+    requested `to_topic_id` instead of falling back."""
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(5, REF, 500, REF_MIRROR, mirror_topic_id=10)))
+    run(db.insert(MirrorMessage(5, REF, 501, REF_MIRROR, mirror_topic_id=20)))
+
+    proc = EventProcessor(
+        chat_mapping={REF: {REF_MIRROR: [_cfg()]}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test.linkcache"),
+    )
+    msg = make_message("link", channel_id=1000)
+
+    result = run(
+        proc._try_rewrite_tg_link(
+            f"https://t.me/c/{REF_RAW}/5", SOURCE, msg, REF_MIRROR,
+            "https://fallback.example/5", to_topic_id=20,
+        )
+    )
+
+    assert result == private_message_link(REF_MIRROR, 501)
+
+
+def test_legacy_untagged_mirror_resolved_for_a_topic_scoped_request():
+    """A referenced message with only a pre-migration mirror row
+    (`mirror_topic_id=None` — inserted before that column existed, no
+    backfill) must still resolve for a topic-scoped `to_topic_id` request,
+    or every already-mirrored pre-migration link would fall back to
+    `fallback_link_url` the moment a topic-scoped direction rewrites it."""
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(5, REF, 500, REF_MIRROR)))  # mirror_topic_id=None
+
+    proc = EventProcessor(
+        chat_mapping={REF: {REF_MIRROR: [_cfg()]}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test.linkcache"),
+    )
+    msg = make_message("link", channel_id=1000)
+
+    result = run(
+        proc._try_rewrite_tg_link(
+            f"https://t.me/c/{REF_RAW}/5", SOURCE, msg, REF_MIRROR,
+            "https://fallback.example/5", to_topic_id=7,
+        )
+    )
+
+    assert result == private_message_link(REF_MIRROR, 500)
+
+
 def test_each_fanout_target_gets_its_own_mirror_link():
     """A referenced message mirrored into two *different* target channels
     (REF_MIRROR_A, REF_MIRROR_B — each unambiguous on its own) must have its

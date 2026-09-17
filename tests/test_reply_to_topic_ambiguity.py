@@ -90,3 +90,55 @@ def test_ambiguous_reply_target_across_topics_is_not_guessed(monkeypatch):
     # anchor, no reply_to_topic_id (matches the pre-existing "no known
     # mirror to reply to" path).
     assert set(calls) == {(10, None), (20, None)}
+
+
+def test_reply_target_resolved_when_mirror_topic_is_known(monkeypatch):
+    """Same TARGET/config setup as above, but the seeded rows carry their
+    real `mirror_topic_id` (as new inserts record post-fix) — the reply must
+    now correctly reply-chain to each config's own topic's mirror instead of
+    falling back to a plain topic post."""
+    db = run(InMemoryDatabase())
+
+    run(
+        db.insert_batch(
+            [
+                MirrorMessage(
+                    original_id=1, original_channel=SOURCE,
+                    mirror_id=111, mirror_channel=TARGET, mirror_topic_id=10,
+                ),
+                MirrorMessage(
+                    original_id=1, original_channel=SOURCE,
+                    mirror_id=222, mirror_channel=TARGET, mirror_topic_id=20,
+                ),
+            ]
+        )
+    )
+
+    calls = []
+
+    async def fake_send_message(
+        client, entity, message, reply_to=None, reply_to_topic_id=None, **kw
+    ):
+        calls.append((reply_to, reply_to_topic_id))
+        return types.Message(id=999, peer_id=types.PeerChannel(1), message="x")
+
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    proc = EventProcessor(
+        chat_mapping={SOURCE: {TARGET: [_cfg(None, 10), _cfg(5, 20)]}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test.reply_ambiguity"),
+    )
+
+    child = make_message("reply", channel_id=1000)
+    child.id = 2
+    child.reply_to = types.MessageReplyHeader(
+        forum_topic=True, reply_to_top_id=5, reply_to_msg_id=1
+    )
+
+    run(proc.new_message(SOURCE, child, "link"))
+
+    # Each config now correctly reply-chains to its own topic's mirror
+    # instead of both falling back to a plain topic post.
+    assert set(calls) == {(111, 10), (222, 20)}

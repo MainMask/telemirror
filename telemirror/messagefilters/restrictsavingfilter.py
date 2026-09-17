@@ -3,23 +3,26 @@ import mimetypes
 import os
 from typing import Type
 
-from telethon import errors
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
 from ._media import (
     UPLOAD_LIMIT_BYTES,
-    MediaDownloadError,
     ReuploadCache,
+    cached_reupload,
     download_media_with_retry,
     downloaded_tempfile,
     filename_of,
-    source_media_id,
-    strict_media_mode,
+    reupload_errors,
 )
 from .base import FilterAction, FilterResult, MessageFilter
 
 logger = logging.getLogger(__name__)
+
+# Distinct from `None` (= "no processing needed for this media kind, pass
+# through unchanged") so `_process_message` can tell a real reupload failure
+# apart from a legitimately unhandled media kind and DISCARD only the former.
+_REUPLOAD_FAILED = object()
 
 
 class RestrictSavingContentBypassFilter(MessageFilter):
@@ -45,13 +48,6 @@ class RestrictSavingContentBypassFilter(MessageFilter):
         if not (message.chat and message.chat.noforwards and message.media):
             return FilterResult(FilterAction.CONTINUE, message)
 
-        key = source_media_id(message.media)
-        if key is not None:
-            cached = self._cache.get(key)
-            if cached is not None:
-                message.media = cached
-                return FilterResult(FilterAction.CONTINUE, message)
-
         if isinstance(message.media, types.MessageMediaDocument):
             doc = message.media.document
             if not isinstance(doc, types.Document):
@@ -65,42 +61,32 @@ class RestrictSavingContentBypassFilter(MessageFilter):
                 )
                 return FilterResult(FilterAction.DISCARD, message)
 
-        try:
-            if isinstance(message.media, types.MessageMediaPhoto):
-                new_media = await self._process_photo(message)
-            elif isinstance(message.media, types.MessageMediaDocument):
-                new_media = await self._process_document(message)
-            else:
-                new_media = None
-        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-            # A >threshold flood must reach past_mode's retry wrapper instead of
-            # becoming a silent DISCARD (checkpoint would advance past an
-            # un-mirrored message). Same contract as mirroring.py.
-            raise
-        except MediaDownloadError:
-            if strict_media_mode.get():
-                raise  # past_mode: retry from the checkpoint
-            # live: protected media is unusable without the download that just
-            # failed — there is nothing to mirror, so drop it (logged).
-            logger.warning(
-                "RestrictSavingContentBypassFilter: download failed, cannot bypass "
-                "protection (chat_id=%s) — discarding",
-                message.chat_id,
-            )
-            return FilterResult(FilterAction.DISCARD, message)
-        except Exception:
-            logger.exception(
-                "RestrictSavingContentBypassFilter: bypass failed (chat_id=%s)",
-                message.chat_id,
-            )
+        new_media = await self._reupload(message)
+        if new_media is _REUPLOAD_FAILED:
+            # live: protected media is unusable without a successful reupload
+            # — there is nothing to mirror, so drop it (already logged).
             return FilterResult(FilterAction.DISCARD, message)
 
         if new_media is not None:
             message.media = new_media
-            if key is not None:
-                self._cache.put(key, new_media)
 
         return FilterResult(FilterAction.CONTINUE, message)
+
+    @cached_reupload(cacheable=lambda v: v is not None and v is not _REUPLOAD_FAILED)
+    @reupload_errors(
+        fallback=_REUPLOAD_FAILED,
+        media_error_fmt=(
+            "RestrictSavingContentBypassFilter: download failed, cannot bypass "
+            "protection (chat_id=%s) — discarding"
+        ),
+        exception_fmt="RestrictSavingContentBypassFilter: bypass failed (chat_id=%s)",
+    )
+    async def _reupload(self, message: EventMessage):
+        if isinstance(message.media, types.MessageMediaPhoto):
+            return await self._process_photo(message)
+        if isinstance(message.media, types.MessageMediaDocument):
+            return await self._process_document(message)
+        return None
 
     async def _process_photo(self, message: EventMessage):
         photo_bytes: bytes = await download_media_with_retry(message, file=bytes)

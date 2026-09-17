@@ -213,9 +213,23 @@ async def _replay_direction(
     # a hard iter_messages(limit=...) cutoff — see the consumption loop below.
     bounded_resume = pm.last_n is not None and checkpoint is not None
     if use_buffer:
+        assert pm.last_n is not None  # implied by use_buffer
         buffer: List = []
-        async for msg in client.iter_messages(source_id, limit=pm.last_n):
-            buffer.append(msg)
+        # Bounded via limit=last_n plus an album margin rather than a hard
+        # iter_messages(limit=last_n) cutoff: that could land mid-album (an
+        # album is only known complete once iter_message_groups sees the
+        # next non-matching message), silently dropping its older members.
+        # +10 covers the worst case since Telegram caps albums at ~10 items.
+        # iter_message_groups (already used below for the final consumption
+        # pass) keeps each boundary album whole, so no manual grouped_id
+        # tracking is needed here.
+        async for group in iter_message_groups(
+            client.iter_messages(source_id, limit=pm.last_n + 10)
+        ):
+            items = group if isinstance(group, list) else [group]
+            buffer.extend(items)
+            if len(buffer) >= pm.last_n:
+                break
         buffer.reverse()
         iter_total = len(buffer)
     else:
@@ -432,10 +446,10 @@ async def _edit_links_pass(
         )
 
         # A source message can hold more than one mirror in this pair when
-        # it's reached by more than one topic-scoped config (`binding_id`
-        # has no topic column — same gap as `mirroring.py`'s
-        # `_reply_target_mirrors`) — keep every one of them, not just the
-        # last seen, or only one topic's copy would ever get its link fixed.
+        # it's reached by more than one topic-scoped config — keep every one
+        # of them, not just the last seen, or only one topic's copy would
+        # ever get its link fixed. Each mirror's own `mirror_topic_id` is
+        # used below to resolve *its* referenced-link target correctly.
         mirror_map: Dict[int, List[MirrorMessage]] = {}
         for m in mirrors:
             mirror_map.setdefault(m.original_id, []).append(m)
@@ -463,24 +477,39 @@ async def _edit_links_pass(
                 ):
                     continue
 
-                msg_copy = processor.copy_message(src_msg)
-                entities_before = deepcopy(msg_copy.entities)
-                text_before = msg_copy.message
-                await processor._rewrite_links(
-                    msg_copy, source_id, target_id, cfg.fallback_link_url
-                )
-
-                text_changed = msg_copy.message != text_before
-                url_changed = any(
-                    getattr(a, "url", None) != getattr(b, "url", None)
-                    for a, b in zip(
-                        msg_copy.entities or [], entities_before or [], strict=False
-                    )
-                )
-                if not text_changed and not url_changed:
-                    continue
-
+                # Rewritten per-mirror (not once per src_msg): different
+                # topics of the same channel can hold different mirrors of a
+                # referenced message, so each mirror's own `mirror_topic_id`
+                # must drive its own link resolution. The per-URL DB lookup
+                # itself is topic-independent (see `_rewrite_links`'s own
+                # docstring), so one `link_cache` is shared across every
+                # mirror of this src_msg — same reasoning as `new_message`/
+                # `new_album`'s per-event cache in mirroring.py.
+                link_cache: dict = {}
+                # Baseline for the text/url-changed check below — identical
+                # for every mirror of this src_msg, so computed once here
+                # rather than re-derived from a fresh copy_message() per
+                # mirror (which would also deep-copy .media, unused in this
+                # path, on every iteration).
+                entities_before = deepcopy(src_msg.entities)
+                text_before = src_msg.message
                 for mirror in mirror_map[src_msg.id]:
+                    msg_copy = processor.copy_message(src_msg)
+                    await processor._rewrite_links(
+                        msg_copy, source_id, target_id, cfg.fallback_link_url,
+                        link_cache=link_cache, to_topic_id=mirror.mirror_topic_id,
+                    )
+
+                    text_changed = msg_copy.message != text_before
+                    url_changed = any(
+                        getattr(a, "url", None) != getattr(b, "url", None)
+                        for a, b in zip(
+                            msg_copy.entities or [], entities_before or [], strict=False
+                        )
+                    )
+                    if not text_changed and not url_changed:
+                        continue
+
                     try:
                         await client.edit_message(
                             entity=target_id,

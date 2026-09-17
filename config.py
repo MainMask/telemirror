@@ -5,7 +5,7 @@ Loads environment(.env)/config.yaml config
 import os
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, cast
 from urllib.parse import quote
 
 from decouple import AutoConfig, Csv, RepositoryEnv
@@ -87,6 +87,19 @@ def _channel_id(value, name: str) -> Optional[int]:
         raise ValueError(
             f"{name}: expected an integer channel id, got {value!r}"
         ) from None
+
+
+_VALID_MODES = {"copy", "forward"}
+
+
+def _validate_mode(value: str, context: str) -> Literal["copy", "forward"]:
+    """Fail fast on a bad `mode` instead of letting it silently mix the
+    `== "forward"`/`== "copy"` branches downstream in mirroring.py."""
+    if value not in _VALID_MODES:
+        raise ValueError(
+            f"{context}: mode must be 'copy' or 'forward', got {value!r}"
+        )
+    return cast(Literal["copy", "forward"], value)
 
 
 def _parse_chat_topic(value) -> tuple:
@@ -317,7 +330,10 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
                         ),
                         from_topic_id=source_topic_id,
                         to_topic_id=target_topic_id,
-                        mode=direction.get("mode", yaml_config.get("mode", "copy")),
+                        mode=_validate_mode(
+                            direction.get("mode", yaml_config.get("mode", "copy")),
+                            f"{source}->{target}",
+                        ),
                         past_mode=build_past_mode(direction.get("past_mode")),
                         send_delay=direction.get("send_delay", _LIVE_SEND_DELAY),
                         fallback_link_url=direction.get(

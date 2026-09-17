@@ -8,7 +8,8 @@ import tempfile
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from functools import wraps
+from typing import Any, Awaitable, Callable, Optional
 
 from telethon import errors, utils
 from telethon.tl import types
@@ -161,6 +162,50 @@ async def download_media_with_retry(message: EventMessage, **kwargs):
             i += 1
 
 
+def reupload_errors(
+    fallback: Any,
+    media_error_fmt: str,
+    exception_fmt: str,
+    log_arg=lambda message: message.chat_id,
+):
+    """Decorator for a re-upload coroutine ``(self, message, *a, **kw) -> T``,
+    applying the contract every re-uploading filter needs:
+
+    - ``FloodWaitError``/``FloodPremiumWaitError`` always propagate — past_mode's
+      retry wrapper must see them, not a swallowed fallback.
+    - ``MediaDownloadError`` propagates too under ``strict_media_mode``
+      (past_mode replay); otherwise it's logged via ``media_error_fmt %
+      log_arg(message)`` and ``fallback`` is returned.
+    - Any other exception is logged (with traceback) via ``exception_fmt %
+      log_arg(message)`` and also returns ``fallback``.
+
+    ``fallback`` may be a plain value or a ``callable(message) -> T`` for a
+    case that needs the message to build it (e.g. a distinct failure sentinel).
+    ``log_arg`` defaults to the message's ``chat_id``; pass e.g.
+    ``private_message_link`` when a site's existing log text needs the full link.
+    """
+
+    def decorator(fn):
+        @wraps(fn)
+        async def wrapper(self, message, *args, **kwargs):
+            try:
+                return await fn(self, message, *args, **kwargs)
+            except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+                raise
+            except MediaDownloadError:
+                if strict_media_mode.get():
+                    raise  # past_mode: keep the checkpoint put and retry the message
+                logger.warning(media_error_fmt, log_arg(message))
+                return fallback(message) if callable(fallback) else fallback
+            except Exception:
+                logger.exception(exception_fmt, log_arg(message))
+                return fallback(message) if callable(fallback) else fallback
+
+        return wrapper
+
+    return decorator
+
+
 class ReuploadCache:
     """TTL + LRU cache of re-uploaded media, keyed by the source media id.
 
@@ -181,6 +226,7 @@ class ReuploadCache:
         self._size = size
         self._ttl = ttl
         self._data: OrderedDict[int, tuple[float, Any]] = OrderedDict()
+        self._inflight: dict[int, "asyncio.Future"] = {}
 
     def get(self, key: int) -> Optional[Any]:
         entry = self._data.get(key)
@@ -199,6 +245,50 @@ class ReuploadCache:
         while len(self._data) > self._size:
             self._data.popitem(last=False)
 
+    async def get_or_create(
+        self,
+        key: int,
+        factory: Callable[[], Awaitable[Any]],
+        cacheable: Callable[[Any], bool] = lambda v: v is not None,
+    ) -> Any:
+        """Return the cached value for `key`, or run `factory()` once and
+        cache its result. Concurrent callers for the same key (e.g. two
+        Telegram updates dispatched as separate tasks that both process the
+        same source media through a shared filter instance) await the same
+        in-flight call instead of each redundantly downloading/re-encoding/
+        re-uploading it. An exception from `factory()` propagates to every
+        concurrent awaiter, matching each one's own expectation had it run
+        alone (e.g. FloodWaitError must still reach past_mode's retry
+        wrapper). `cacheable` decides whether a given result is worth
+        caching — defaults to "not None" (a filter's own fallback value on
+        failure is never cached, so the next attempt retries rather than
+        being stuck with a remembered failure).
+
+        Awaiting is shielded from the calling task's own cancellation: an
+        awaiter being cancelled must not cancel `factory()` out from under
+        any *other* concurrent awaiter of the same key. Cleanup of
+        `_inflight[key]` happens once, via a done-callback on the shared
+        task itself, rather than in each awaiter's own `finally` — so it
+        can't race a still-waiting sibling either.
+        """
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        inflight = self._inflight.get(key)
+        if inflight is None:
+            inflight = asyncio.ensure_future(factory())
+            self._inflight[key] = inflight
+
+            def _cleanup(_task: "asyncio.Future") -> None:
+                if self._inflight.get(key) is inflight:
+                    del self._inflight[key]
+
+            inflight.add_done_callback(_cleanup)
+        result = await asyncio.shield(inflight)
+        if cacheable(result):
+            self.put(key, result)
+        return result
+
 
 def source_media_id(media: Optional["types.TypeMessageMedia"]) -> Optional[int]:
     """Stable id of the source photo/document, for `ReuploadCache` keys."""
@@ -211,6 +301,34 @@ def source_media_id(media: Optional["types.TypeMessageMedia"]) -> Optional[int]:
     ):
         return media.document.id
     return None
+
+
+def cached_reupload(
+    cache_attr: str = "_cache",
+    cacheable: Callable[[Any], bool] = lambda v: v is not None,
+):
+    """Decorator for a re-upload coroutine ``(self, message, *a, **kw) -> T``:
+    single-flighted and cached by ``source_media_id(message.media)`` via
+    ``self.<cache_attr>`` (a `ReuploadCache`). Stack it *outside*
+    ``@reupload_errors`` (applied first / listed last) so a propagating
+    FloodWaitError still reaches every concurrent awaiter, and a swallowed
+    failure's fallback value is never cached (see ``cacheable``).
+    """
+
+    def decorator(fn):
+        @wraps(fn)
+        async def wrapper(self, message, *args, **kwargs):
+            key = source_media_id(message.media)
+            if key is None:
+                return await fn(self, message, *args, **kwargs)
+            cache: ReuploadCache = getattr(self, cache_attr)
+            return await cache.get_or_create(
+                key, lambda: fn(self, message, *args, **kwargs), cacheable
+            )
+
+        return wrapper
+
+    return decorator
 
 
 def filename_of(document: types.Document) -> Optional[str]:

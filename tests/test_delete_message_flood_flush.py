@@ -1,14 +1,16 @@
-"""delete_message's DB purge must be scoped correctly: `delete_messages_batch`
-has no mirror_channel granularity — it drops an original_id's DB row across
-*every* mirror channel at once. So after a FloodWait (or any other failure) on
-one channel:
+"""delete_message's DB purge is scoped per mirror_channel:
+`delete_messages_for_channels_batch` purges a message's row for exactly the
+channel(s) whose Telegram delete just succeeded, independent of any sibling
+channel's outcome. So after a FloodWait (or any other failure) on one
+channel:
 
-- an original_id whose *every* target channel already had its Telegram delete
-  confirmed is safe to purge (otherwise it's stuck in the DB forever even
-  though it's already gone from Telegram everywhere), but
-- an original_id with a channel that failed or was never attempted must NOT
-  be purged — that would silently drop DB tracking for a mirror message still
-  sitting on Telegram, with no way to retry deleting it later.
+- a channel whose Telegram delete succeeded has its rows purged immediately,
+  even if a sibling channel for the same original_id failed/was
+  unconfigured/was never attempted, but
+- a channel that failed, was never attempted (no direction config), or is
+  configured with disable_delete=True keeps its row — that would silently
+  drop DB tracking for a mirror message still sitting on Telegram, with no
+  way to retry deleting it later.
 
 delete_message itself must not raise on a flood (see
 test_edit_delete_flood_propagates.py for why) — every channel is always
@@ -70,10 +72,11 @@ def test_fully_completed_message_is_purged_even_when_another_channel_floods():
     assert len(run(db.get_messages(200, SOURCE))) == 1
 
 
-def test_message_needing_the_flooded_channel_is_not_purged():
-    """original_id 100 is mirrored into *both* TARGET_A and TARGET_B — TARGET_B's
-    copy is still untouched on Telegram when the flood hits, so its DB row must
-    survive for a future retry to find it."""
+def test_flooded_channels_row_survives_while_succeeded_channels_purge():
+    """original_id 100 is mirrored into *both* TARGET_A and TARGET_B — TARGET_A's
+    delete succeeds and its row is purged right away; TARGET_B's copy is still
+    untouched on Telegram when the flood hits, so its DB row must survive for
+    a future retry to find it."""
     db = run(InMemoryDatabase())
     run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
     run(db.insert(MirrorMessage(100, SOURCE, 9000, TARGET_B)))
@@ -89,16 +92,19 @@ def test_message_needing_the_flooded_channel_is_not_purged():
     run(proc.delete_message(SOURCE, [100]))  # must not raise
 
     assert client.deleted == [TARGET_A]
-    # TARGET_B's mirror is still live on Telegram — the row must stay tracked.
-    assert len(run(db.get_messages(100, SOURCE))) == 2
+    remaining = run(db.get_messages(100, SOURCE))
+    # TARGET_A's row purged immediately; TARGET_B's mirror is still live on
+    # Telegram, so its row must stay tracked.
+    assert [m.mirror_channel for m in remaining] == [TARGET_B]
 
 
-def test_message_needing_an_unconfigured_channel_is_not_purged():
+def test_channel_missing_from_chat_mapping_keeps_its_row_while_others_purge():
     """original_id 100 has a DB row in TARGET_B, but TARGET_B was removed from
     chat_mapping (e.g. the direction was deleted from config) — delete_message
-    never attempts (and never can attempt) a Telegram delete there, so 100 must
-    not be purged just because TARGET_A's delete succeeds: TARGET_B's row is
-    still the only record of that still-live mirror."""
+    never attempts (and never can attempt) a Telegram delete there, so
+    TARGET_B's row must survive even though TARGET_A's delete succeeds and is
+    purged: TARGET_B's row is still the only record of that still-live
+    mirror."""
     db = run(InMemoryDatabase())
     run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
     run(db.insert(MirrorMessage(100, SOURCE, 9000, TARGET_B)))
@@ -116,14 +122,14 @@ def test_message_needing_an_unconfigured_channel_is_not_purged():
 
     run(proc.delete_message(SOURCE, [100]))  # must not raise
 
-    # The purge is all-or-nothing per original_id — since TARGET_B was never
-    # attempted, neither row is purged (TARGET_A's included).
-    assert len(run(db.get_messages(100, SOURCE))) == 2
+    remaining = run(db.get_messages(100, SOURCE))
+    assert [m.mirror_channel for m in remaining] == [TARGET_B]
 
 
-def test_message_needing_a_disable_delete_channel_is_not_purged():
+def test_disable_delete_channel_keeps_its_row_while_others_purge():
     """Same as above, but TARGET_B is configured with disable_delete=True — its
-    mirror is intentionally kept forever, so 100 must not be purged either."""
+    mirror is intentionally kept forever, so its row must survive even though
+    TARGET_A's delete succeeds and is purged."""
     db = run(InMemoryDatabase())
     run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
     run(db.insert(MirrorMessage(100, SOURCE, 9000, TARGET_B)))
@@ -148,11 +154,14 @@ def test_message_needing_a_disable_delete_channel_is_not_purged():
 
     run(proc.delete_message(SOURCE, [100]))  # must not raise
 
-    assert len(run(db.get_messages(100, SOURCE))) == 2  # all-or-nothing, see above
+    remaining = run(db.get_messages(100, SOURCE))
+    assert [m.mirror_channel for m in remaining] == [TARGET_B]
 
 
 class _FailingPurgeDB(InMemoryDatabase):
-    async def delete_messages_batch(self, original_ids, original_channel):
+    async def delete_messages_for_channels_batch(
+        self, original_channel, mirror_ids_by_channel
+    ):
         raise RuntimeError("db unavailable")
 
 
@@ -170,3 +179,51 @@ def test_purge_db_failure_is_logged_and_does_not_raise():
     )
 
     run(proc.delete_message(SOURCE, [100, 200]))  # must not raise
+
+
+def test_delete_message_respects_the_specific_topics_disable_delete():
+    """TARGET_A is reached by two topic-scoped directions: topic 1 is
+    `disable_delete=True` (protected), topic 2 is not. A row belonging to
+    topic 1 must never be deleted just because topic 2's config for the same
+    channel happens to be unprotected — picking "any non-disabled config for
+    the channel" (the pre-mirror_topic_id behavior) would wrongly delete
+    it."""
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([
+        MirrorMessage(100, SOURCE, 5000, TARGET_A, mirror_topic_id=1),
+        MirrorMessage(100, SOURCE, 5001, TARGET_A, mirror_topic_id=2),
+    ]))
+
+    class _SucceedsClient:
+        def __init__(self):
+            self.deleted_ids: list[int] = []
+
+        async def delete_messages(self, entity, message_ids):
+            self.deleted_ids.extend(message_ids)
+
+    client = _SucceedsClient()
+    proc = EventProcessor(
+        chat_mapping={
+            SOURCE: {
+                TARGET_A: [
+                    DirectionConfig(
+                        disable_delete=True, disable_edit=False,
+                        filters=EmptyMessageFilter(), to_topic_id=1,
+                    ),
+                    DirectionConfig(
+                        disable_delete=False, disable_edit=False,
+                        filters=EmptyMessageFilter(), to_topic_id=2,
+                    ),
+                ]
+            }
+        },
+        database=db,
+        client=client,
+        logger=logging.getLogger("test.deleteflush"),
+    )
+
+    run(proc.delete_message(SOURCE, [100]))
+
+    assert client.deleted_ids == [5001]  # only topic 2's (unprotected) mirror
+    remaining = run(db.get_messages(100, SOURCE))
+    assert [m.mirror_id for m in remaining] == [5000]  # topic 1's row survives

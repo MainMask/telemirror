@@ -130,6 +130,23 @@ def test_replay_last_n_buffer_oldest_first(monkeypatch):
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 10
 
 
+def test_replay_last_n_buffer_does_not_split_album_at_boundary(monkeypatch):
+    """A first-run (no checkpoint) last_n buffer must never land mid-album:
+    if the last_n raw-message cutoff would fall inside a grouped_id run, the
+    whole album must still be included, not just its newest members."""
+    msgs = [_msg(i) for i in range(1, 7)] + [
+        _msg(7, grouped_id=99),
+        _msg(8, grouped_id=99),
+        _msg(9, grouped_id=99),
+        _msg(10),
+    ]
+    # last_n=3 would, with a hard cutoff, only grab {10, 9, 8} — landing
+    # inside the 7/8/9 album and silently dropping message 7.
+    calls, db = _run_replay(monkeypatch, msgs, PastModeConfig(last_n=3, send_delay=0))
+    assert calls == [("album", (7, 8, 9)), ("new", 10)]
+    assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 10
+
+
 def test_replay_last_n_resume_does_not_split_album(monkeypatch):
     """A bounded last_n resume must stop after `iter_total` complete
     messages/albums, never mid-album: a hard iter_messages(limit=...) cutoff
@@ -596,3 +613,38 @@ def test_edit_links_pass_fixes_every_mirror_of_a_multi_topic_source_message():
     ))
 
     assert sorted(message_id for _e, message_id, _t, _ents in client.edits) == [910, 920]
+
+
+def test_edit_links_pass_resolves_topic_scoped_mirror():
+    """Both the edited mirror and the referenced mirror carry a real
+    `mirror_topic_id` (a topic-scoped direction) — the link-fixing pass must
+    resolve the reference using *that mirror's own* topic, not a (channel,
+    None) lookup that would never match a topic-scoped row."""
+    from telemirror.misc.links import private_message_link
+
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([
+        MirrorMessage(10, SRC, 910, TGT, mirror_topic_id=5),
+        MirrorMessage(7, SRC, 907, TGT, mirror_topic_id=5),
+    ]))
+
+    src_peer = -SRC - 1000000000000
+    linked = types.Message(
+        id=10,
+        peer_id=types.PeerChannel(1),
+        message="link",
+        entities=[types.MessageEntityTextUrl(
+            offset=0, length=4, url=f"https://t.me/c/{src_peer}/7"
+        )],
+    )
+    client = _EditFakeClient([linked])
+
+    run(past_mode._edit_links_pass(
+        client, db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]},
+        _LOG,
+    ))
+
+    assert len(client.edits) == 1
+    entity, message_id, _text, ents = client.edits[0]
+    assert (entity, message_id) == (TGT, 910)
+    assert ents[0].url == private_message_link(TGT, 907)

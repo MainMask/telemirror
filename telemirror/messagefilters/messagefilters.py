@@ -143,18 +143,17 @@ class UrlMessageFilter(UpdateEntitiesParams, MessageFilter):
             drop_entity = False
             update_pos = False
 
+            entity_text = filtered_text[entity.offset : entity.offset + entity.length]
             if (
                 isinstance(entity, types.MessageEntityUrl)
-                and self._url_matcher.match(
-                    filtered_text[entity.offset : entity.offset + entity.length]
-                )
+                and self._url_matcher.match(entity_text)
             ) or (
-                isinstance(
-                    entity, (types.MessageEntityMention, types.MessageEntityTextUrl)
-                )
-                and self._match_mention(
-                    filtered_text[entity.offset : entity.offset + entity.length]
-                )
+                isinstance(entity, types.MessageEntityMention)
+                and self._match_mention(entity_text)
+            ) or (
+                isinstance(entity, types.MessageEntityTextUrl)
+                and self._mention_blacklist is not None
+                and self._match_mention(entity_text)
             ):
                 filtered_text = (
                     filtered_text[: entity.offset]

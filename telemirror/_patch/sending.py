@@ -33,6 +33,7 @@ async def send_message(
     nosound_video: bool = None,
     send_as: typing.Optional["hints.EntityLike"] = None,
     message_effect_id: typing.Optional[int] = None,
+    invert_media: typing.Optional[bool] = None,
 ) -> "types.Message":
     """
     Sends a message to the specified user, chat or channel.
@@ -253,6 +254,7 @@ async def send_message(
             nosound_video=nosound_video,
             send_as=send_as,
             message_effect_id=message_effect_id,
+            invert_media=invert_media,
         )
 
     entity = await client.get_input_entity(entity)
@@ -286,6 +288,7 @@ async def send_message(
                 schedule=schedule,
                 send_as=send_as,
                 message_effect_id=message_effect_id,
+                invert_media=invert_media,
             )
 
         request = functions.messages.SendMessageRequest(
@@ -303,6 +306,7 @@ async def send_message(
             schedule_date=schedule,
             send_as=await client.get_input_entity(send_as) if send_as else None,
             effect=message_effect_id,
+            invert_media=invert_media,
         )
         message = message.message
     else:
@@ -328,6 +332,7 @@ async def send_message(
             schedule_date=schedule,
             send_as=await client.get_input_entity(send_as) if send_as else None,
             effect=message_effect_id,
+            invert_media=invert_media,
         )
 
     result = await client(request)
@@ -532,6 +537,7 @@ async def send_file(
     nosound_video: bool = None,
     send_as: typing.Optional["hints.EntityLike"] = None,
     message_effect_id: typing.Optional[int] = None,
+    invert_media: typing.Optional[bool] = None,
     **kwargs,
 ) -> typing.Union[typing.List[typing.Any], typing.Any]:
     """
@@ -849,6 +855,7 @@ async def send_file(
                 background=background,
                 send_as=send_as,
                 message_effect_id=message_effect_id,
+                invert_media=invert_media,
             )
             file = file[10:]
             captions = captions[10:]
@@ -900,6 +907,7 @@ async def send_file(
         background=background,
         send_as=await client.get_input_entity(send_as) if send_as else None,
         effect=message_effect_id,
+        invert_media=invert_media,
     )
     return client._get_response_message(request, await client(request), entity)
 
@@ -923,6 +931,7 @@ async def _send_album(
     ttl=None,
     send_as: typing.Optional["hints.EntityLike"] = None,
     message_effect_id: typing.Optional[int] = None,
+    invert_media: typing.Optional[bool] = None,
 ):
     """Specialized version of .send_file for albums"""
     # We don't care if the user wants to avoid cache, we will use it
@@ -1023,6 +1032,7 @@ async def _send_album(
         background=background,
         send_as=await client.get_input_entity(send_as) if send_as else None,
         effect=message_effect_id,
+        invert_media=invert_media,
     )
     result = await client(request)
 

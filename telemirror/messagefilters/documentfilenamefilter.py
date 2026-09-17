@@ -3,18 +3,17 @@ import os
 import re
 from typing import Optional, Type
 
-from telethon import errors
 from telethon.tl import types
 
 from ..hints import EventLike, EventMessage
 from ..misc.links import private_message_link
 from ._media import (
     UPLOAD_LIMIT_BYTES,
-    MediaDownloadError,
     ReuploadCache,
+    cached_reupload,
     downloaded_tempfile,
     filename_of,
-    strict_media_mode,
+    reupload_errors,
 )
 from .base import FilterAction, FilterResult, MessageFilter
 
@@ -60,10 +59,18 @@ class DocumentFilenameFilter(MessageFilter):
     def _rename(self, name: str) -> str:
         stem, ext = os.path.splitext(name)
 
-        if self._suffix and (
-            stem == self._suffix or stem.endswith(f" - {self._suffix}")
-        ):
-            return name
+        # Idempotency: strip a suffix marker left by a previous pass (e.g.
+        # cache hit, or reprocessing after RestrictSavingContentBypassFilter)
+        # *before* `remove`-list cleanup runs, then re-append it
+        # unconditionally below — rather than gating the append on an
+        # "already suffixed?" flag computed before cleanup, which a `remove`
+        # entry overlapping the suffix text could invalidate (stripping the
+        # suffix out from under a flag that still thinks it's there).
+        if self._suffix:
+            if stem == self._suffix:
+                stem = ""
+            elif stem.endswith(f" - {self._suffix}"):
+                stem = stem[: -len(f" - {self._suffix}")]
 
         if self._remove_regex is not None:
             stem = self._remove_regex.sub("", stem).strip(" _-")
@@ -100,11 +107,6 @@ class DocumentFilenameFilter(MessageFilter):
         if new_name == old_name:
             return FilterResult(FilterAction.CONTINUE, message)
 
-        cached = self._cache.get(doc.id)
-        if cached is not None:
-            message.media = cached
-            return FilterResult(FilterAction.CONTINUE, message)
-
         if doc.size > UPLOAD_LIMIT_BYTES:
             logger.info(
                 "DocumentFilenameFilter: skipping rename of %.2f GB file (chat_id=%s) — "
@@ -121,36 +123,26 @@ class DocumentFilenameFilter(MessageFilter):
             for a in doc.attributes
         ]
 
-        try:
-            async with downloaded_tempfile(
-                message, suffix=os.path.splitext(new_name)[1]
-            ) as tmp_path:
-                handle = await message._client.upload_file(
-                    tmp_path, file_name=new_name
-                )
-            uploaded = types.InputMediaUploadedDocument(
-                file=handle, mime_type=doc.mime_type, attributes=attributes
-            )
+        uploaded = await self._reupload(message, new_name, doc, attributes)
+        if uploaded is not None:
             message.media = uploaded
-            # An upload handle can be re-sent to several chats, so a broadcast
-            # fan-out reuses it instead of re-uploading once per target.
-            self._cache.put(doc.id, uploaded)
-        except MediaDownloadError:
-            if strict_media_mode.get():
-                raise  # past_mode: keep the checkpoint put and retry the message
-            logger.warning(
-                "DocumentFilenameFilter: download failed, mirroring original name (%s)",
-                private_message_link(message.chat_id, message.id),
-            )
-        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-            # A >threshold flood must reach past_mode's retry wrapper instead of
-            # silently falling back to the un-renamed original. Same contract
-            # as mirroring.py.
-            raise
-        except Exception:
-            logger.exception(
-                "DocumentFilenameFilter: rename failed (%s), sending original",
-                private_message_link(message.chat_id, message.id),
-            )
 
         return FilterResult(FilterAction.CONTINUE, message)
+
+    @cached_reupload()
+    @reupload_errors(
+        fallback=None,
+        media_error_fmt="DocumentFilenameFilter: download failed, mirroring original name (%s)",
+        exception_fmt="DocumentFilenameFilter: rename failed (%s), sending original",
+        log_arg=lambda message: private_message_link(message.chat_id, message.id),
+    )
+    async def _reupload(self, message, new_name, doc, attributes):
+        async with downloaded_tempfile(
+            message, suffix=os.path.splitext(new_name)[1]
+        ) as tmp_path:
+            handle = await message._client.upload_file(
+                tmp_path, file_name=new_name
+            )
+        return types.InputMediaUploadedDocument(
+            file=handle, mime_type=doc.mime_type, attributes=attributes
+        )

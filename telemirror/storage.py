@@ -20,12 +20,26 @@ class MirrorMessage(NamedTuple):
         original_channel (`int`): Source channel ID
         mirror_id (`int`): Mirror message ID
         mirror_channel (`int`): Mirror channel ID
+        mirror_topic_id (`int`, optional): Forum topic this mirror was posted
+            into (the `DirectionConfig.to_topic_id` that produced it), or
+            `None` for a non-topic-scoped mirror. Lets a channel reached by
+            more than one topic-scoped direction be disambiguated instead of
+            treated as one ambiguous blob.
+        source_topic_id (`int`, optional): The `DirectionConfig.from_topic_id`
+            that produced this mirror (the config's own declared value, not
+            necessarily the source message's actual topic). Needed alongside
+            `mirror_topic_id` because two directions can share the same
+            destination topic (e.g. both `to_topic_id=None` for a non-forum
+            target) while differing in `from_topic_id` — `mirror_topic_id`
+            alone can't tell such rows apart.
     """
 
     original_id: int
     original_channel: int
     mirror_id: int
     mirror_channel: int
+    mirror_topic_id: Optional[int] = None
+    source_topic_id: Optional[int] = None
 
 
 class Database(ABC):
@@ -96,28 +110,26 @@ class Database(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def delete_messages(
-        self: "Database", original_id: int, original_channel: int
+    async def delete_messages_for_channels_batch(
+        self: "Database",
+        original_channel: int,
+        mirror_ids_by_channel: Dict[int, List[int]],
     ) -> None:
         """
-        Deletes `MirrorMessage` objects with `original_id` and `original_channel` values
+        Deletes `MirrorMessage` objects matching `original_channel`, scoped
+        per mirror channel to the `mirror_id`s in `mirror_ids_by_channel`
+        — precise row-level scoping, in one call covering every channel. A
+        channel reached by more than one topic-scoped direction can hold
+        several rows sharing the same `original_id` (one per topic);
+        scoping by `mirror_id` (unique per channel) instead of
+        `original_id` means purging one topic's successfully-deleted row
+        never also drops a sibling topic's still-live row for the same
+        `original_id`/`mirror_channel`.
 
         Args:
-            original_id (`int`): Original message ID
             original_channel (`int`): Source channel ID
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    async def delete_messages_batch(
-        self: "Database", original_ids: List[int], original_channel: int
-    ) -> None:
-        """
-        Deletes `MirrorMessage` objects with `original_id` and `original_channel` values
-
-        Args:
-            original_ids (`List[int]`): Original message IDs
-            original_channel (`int`): Source channel ID
+            mirror_ids_by_channel (`Dict[int, List[int]]`): Mirror message
+                IDs to delete, keyed by mirror channel ID
         """
         raise NotImplementedError
 
@@ -287,32 +299,26 @@ class InMemoryDatabase(Database):
             )
         ]
 
-    async def delete_messages(
-        self: "InMemoryDatabase", original_id: int, original_channel: int
+    async def delete_messages_for_channels_batch(
+        self: "InMemoryDatabase",
+        original_channel: int,
+        mirror_ids_by_channel: Dict[int, List[int]],
     ) -> None:
-        """
-        Deletes `MirrorMessage` objects with `original_id` and `original_channel` values
-
-        Args:
-            original_id (`int`): Original message ID
-            original_channel (`int`): Source channel ID
-        """
-        self.__storage.pop(
-            self.__build_message_key(original_id, original_channel), None
-        )
-
-    async def delete_messages_batch(
-        self: "InMemoryDatabase", original_ids: List[int], original_channel: int
-    ) -> None:
-        """
-        Deletes `MirrorMessage` objects with `original_id` and `original_channel` values
-
-        Args:
-            original_ids (`List[int]`): Original message IDs
-            original_channel (`int`): Source channel ID
-        """
-        for idx in original_ids:
-            self.__storage.pop(self.__build_message_key(idx, original_channel), None)
+        mirror_id_sets = {
+            channel: set(ids) for channel, ids in mirror_ids_by_channel.items()
+        }
+        prefix = f"{original_channel}:"
+        for key in list(self.__storage.keys()):
+            if not key.startswith(prefix):
+                continue
+            kept = [
+                m for m in self.__storage[key]
+                if m.mirror_id not in mirror_id_sets.get(m.mirror_channel, ())
+            ]
+            if kept:
+                self.__storage[key] = kept
+            else:
+                self.__storage.pop(key, None)
 
     async def get_all_messages_for_channel(
         self: "InMemoryDatabase", original_channel: int
@@ -458,14 +464,17 @@ class PostgresDatabase(Database):
         async with self.__pg_cursor() as cursor:
             await cursor.execute(
                 """
-                INSERT INTO binding_id (original_id, original_channel, mirror_id, mirror_channel)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO binding_id
+                (original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (
                     entity.original_id,
                     entity.original_channel,
                     entity.mirror_id,
                     entity.mirror_channel,
+                    entity.mirror_topic_id,
+                    entity.source_topic_id,
                 ),
             )
 
@@ -480,8 +489,9 @@ class PostgresDatabase(Database):
         async with self.__pg_cursor() as cursor:
             await cursor.executemany(
                 """
-                INSERT INTO binding_id (original_id, original_channel, mirror_id, mirror_channel)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO binding_id
+                (original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 entity,
             )
@@ -503,7 +513,7 @@ class PostgresDatabase(Database):
             cursor.row_factory = class_row(MirrorMessage)
             await cursor.execute(
                 """
-                SELECT original_id, original_channel, mirror_id, mirror_channel
+                SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id
                 FROM binding_id
                 WHERE original_channel = %s
                 AND original_id = %s
@@ -533,7 +543,7 @@ class PostgresDatabase(Database):
             cursor.row_factory = class_row(MirrorMessage)
             await cursor.execute(
                 """
-                SELECT original_id, original_channel, mirror_id, mirror_channel
+                SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id
                 FROM binding_id
                 WHERE original_channel = %s
                 AND original_id = ANY(%s)
@@ -546,49 +556,42 @@ class PostgresDatabase(Database):
             rows = await cursor.fetchall()
         return rows
 
-    async def delete_messages(
-        self: "PostgresDatabase", original_id: int, original_channel: int
+    async def delete_messages_for_channels_batch(
+        self: "PostgresDatabase",
+        original_channel: int,
+        mirror_ids_by_channel: Dict[int, List[int]],
     ) -> None:
         """
-        Deletes `MirrorMessage` objects with `original_id` and `original_channel` values
+        Deletes `MirrorMessage` objects matching `original_channel`, scoped
+        per mirror channel to the `mirror_id`s in `mirror_ids_by_channel`,
+        in a single statement covering every channel.
 
         Args:
-            original_id (`int`): Original message ID
             original_channel (`int`): Source channel ID
+            mirror_ids_by_channel (`Dict[int, List[int]]`): Mirror message
+                IDs to delete, keyed by mirror channel ID
         """
+        if not mirror_ids_by_channel:
+            return
+        channels = []
+        ids = []
+        for channel, mirror_ids in mirror_ids_by_channel.items():
+            for mirror_id in mirror_ids:
+                channels.append(channel)
+                ids.append(mirror_id)
         async with self.__pg_cursor() as cursor:
             await cursor.execute(
                 """
                 DELETE FROM binding_id
                 WHERE original_channel = %s
-                AND original_id = %s
+                AND (mirror_channel, mirror_id) IN (
+                    SELECT * FROM unnest(%s::bigint[], %s::bigint[])
+                )
                 """,
                 (
                     original_channel,
-                    original_id,
-                ),
-            )
-
-    async def delete_messages_batch(
-        self: "PostgresDatabase", original_ids: List[int], original_channel: int
-    ) -> None:
-        """
-        Deletes `MirrorMessage` objects with `original_id` and `original_channel` values
-
-        Args:
-            original_ids (`List[int]`): Original message IDs
-            original_channel (`int`): Source channel ID
-        """
-        async with self.__pg_cursor() as cursor:
-            await cursor.execute(
-                """
-                DELETE FROM binding_id
-                WHERE original_channel = %s
-                AND original_id = ANY(%s)
-                """,
-                (
-                    original_channel,
-                    original_ids,
+                    channels,
+                    ids,
                 ),
             )
 
@@ -599,7 +602,7 @@ class PostgresDatabase(Database):
             cursor.row_factory = class_row(MirrorMessage)
             await cursor.execute(
                 """
-                SELECT original_id, original_channel, mirror_id, mirror_channel
+                SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id
                 FROM binding_id
                 WHERE original_channel = %s
                 """,
@@ -613,7 +616,7 @@ class PostgresDatabase(Database):
         async with self.__pg_cursor() as cursor:
             cursor.row_factory = class_row(MirrorMessage)
             await cursor.execute(
-                "SELECT original_id, original_channel, mirror_id, mirror_channel "
+                "SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id "
                 "FROM binding_id "
                 "WHERE original_channel = %s AND mirror_channel = %s",
                 (original_channel, mirror_channel),
@@ -625,13 +628,18 @@ class PostgresDatabase(Database):
         async with self.__pg_cursor() as cursor:
             await cursor.execute(
                 """
-                CREATE TABLE IF NOT EXISTS binding_id(   
+                CREATE TABLE IF NOT EXISTS binding_id(
                     id serial primary key not null,
                     original_id bigint not null,
                     original_channel bigint not null,
                     mirror_id bigint not null,
-                    mirror_channel bigint not null
+                    mirror_channel bigint not null,
+                    mirror_topic_id bigint,
+                    source_topic_id bigint
                 );
+
+                ALTER TABLE binding_id ADD COLUMN IF NOT EXISTS mirror_topic_id bigint;
+                ALTER TABLE binding_id ADD COLUMN IF NOT EXISTS source_topic_id bigint;
 
                 CREATE INDEX IF NOT EXISTS binding_id_original_idx
                 ON binding_id (original_channel, original_id);

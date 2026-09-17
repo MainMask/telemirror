@@ -25,6 +25,15 @@ def test_insert_batch_and_get_messages_roundtrip():
     assert run(db.get_messages(999, SRC)) == []
 
 
+def test_source_topic_id_roundtrips():
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(
+        1, SRC, 100, DST_A, mirror_topic_id=5, source_topic_id=20
+    )))
+    got = run(db.get_messages(1, SRC))[0]
+    assert (got.mirror_topic_id, got.source_topic_id) == (5, 20)
+
+
 def test_get_messages_batch_spans_ids():
     db = run(InMemoryDatabase())
     run(db.insert_batch([_mm(1, 11), _mm(2, 22), _mm(3, 33)]))
@@ -32,10 +41,45 @@ def test_get_messages_batch_spans_ids():
     assert sorted(m.mirror_id for m in got) == [11, 33]
 
 
-def test_delete_messages_batch_removes_only_named_ids():
+def test_delete_messages_for_channels_batch_removes_only_named_ids():
     db = run(InMemoryDatabase())
     run(db.insert_batch([_mm(1, 11), _mm(2, 22)]))
-    run(db.delete_messages_batch([1], SRC))
+    run(db.delete_messages_for_channels_batch(SRC, {DST_A: [11]}))
+    assert run(db.get_messages(1, SRC)) == []
+    assert run(db.get_messages(2, SRC))[0].mirror_id == 22
+
+
+def test_delete_messages_for_channels_batch_is_scoped_to_one_channel():
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([_mm(1, 11, mchan=DST_A), _mm(1, 12, mchan=DST_B)]))
+    run(db.delete_messages_for_channels_batch(SRC, {DST_A: [11]}))
+    remaining = run(db.get_messages(1, SRC))
+    assert [m.mirror_channel for m in remaining] == [DST_B]
+
+
+def test_delete_messages_for_channels_batch_is_scoped_to_named_mirror_ids():
+    """Two topic-scoped mirrors of the *same* original_id in the *same*
+    channel (different mirror_id each) — purging one must not drop the
+    other. Scoping by mirror_id (not original_id) is what makes
+    `delete_message`'s per-topic purge precise."""
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([
+        _mm(1, 11, mchan=DST_A),
+        _mm(1, 12, mchan=DST_A),
+    ]))
+    run(db.delete_messages_for_channels_batch(SRC, {DST_A: [11]}))
+    remaining = run(db.get_messages(1, SRC))
+    assert [m.mirror_id for m in remaining] == [12]
+
+
+def test_delete_messages_for_channels_batch_covers_multiple_channels_in_one_call():
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([
+        _mm(1, 11, mchan=DST_A),
+        _mm(1, 12, mchan=DST_B),
+        _mm(2, 22, mchan=DST_A),
+    ]))
+    run(db.delete_messages_for_channels_batch(SRC, {DST_A: [11], DST_B: [12]}))
     assert run(db.get_messages(1, SRC)) == []
     assert run(db.get_messages(2, SRC))[0].mirror_id == 22
 

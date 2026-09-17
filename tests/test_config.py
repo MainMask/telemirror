@@ -2,7 +2,13 @@ import datetime
 
 import pytest
 
-from config import DirectionConfig, PastModeConfig, _channel_id, _parse_chat_topic
+from config import (
+    DirectionConfig,
+    PastModeConfig,
+    _channel_id,
+    _parse_chat_topic,
+    _validate_mode,
+)
 from telemirror.messagefilters import EmptyMessageFilter
 
 
@@ -54,6 +60,18 @@ def test_parse_chat_topic_shared_by_yaml_and_env_branches():
     assert _parse_chat_topic("-1001234") == (-1001234, None)
     assert _parse_chat_topic("-1001234#5") == (-1001234, 5)
     assert _parse_chat_topic(-1001234) == (-1001234, None)  # YAML bare int
+
+
+def test_validate_mode_accepts_copy_and_forward():
+    assert _validate_mode("copy", "src->dst") == "copy"
+    assert _validate_mode("forward", "src->dst") == "forward"
+
+
+def test_validate_mode_rejects_bad_value_with_context():
+    """A YAML typo (e.g. `mode: Copy`) must fail fast at load time instead of
+    silently mixing mirroring.py's `== "forward"`/`== "copy"` branches."""
+    with pytest.raises(ValueError, match="src->dst"):
+        _validate_mode("Copy", "src->dst")
 
 
 def test_direction_config_defaults():

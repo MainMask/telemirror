@@ -60,6 +60,29 @@ def test_url_message_filter_redacts_blacklisted_bare_url():
     assert res.message == "go *** now"
 
 
+def test_url_message_filter_mention_true_does_not_mangle_plain_hyperlinks():
+    """`filter_mention=True` is documented as filtering @-mentions
+    (MessageEntityMention); it must not also swallow every ordinary inline
+    hyperlink (MessageEntityTextUrl) just because `_match_mention` returns the
+    bare bool unconditionally for that entity kind too. A non-matching
+    blacklist isolates this from the separate (pre-existing, correct)
+    "drop a blacklisted TextUrl's link" branch — an *empty* blacklist means
+    "everything is blacklisted" by `UrlMatcher.match()`'s own contract, which
+    would confound the assertion."""
+    msg = make_message(
+        "Read the full report here",
+        entities=[
+            types.MessageEntityTextUrl(
+                offset=9, length=11, url="https://legit-news.example.com/report"
+            )
+        ],
+    )
+    f = UrlMessageFilter(blacklist={"other-domain.example"}, filter_mention=True)
+    _, res = _process(f, msg)
+    assert res.message == "Read the full report here"
+    assert len(res.entities) == 1
+
+
 def test_url_message_filter_keeps_whitelisted_url():
     msg = make_message(
         "go example.com now", entities=[types.MessageEntityUrl(offset=3, length=11)]
