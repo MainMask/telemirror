@@ -1258,6 +1258,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     reply_to: Optional[int] = reply_to,
                     reply_to_topic_id: Optional[int] = reply_to_topic_id,
                     config: DirectionConfig = config,
+                    invert_media: Optional[bool] = filtered_album[0].invert_media,
+                    message_effect_id: Optional[int] = filtered_album[0].effect,
                 ):
                     # Same caption-too-long fallback as the primary attempt
                     # above.
@@ -1274,8 +1276,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         reply_to_topic_id=reply_to_topic_id,
                         config=config,
                         track_media=track_media,
-                        invert_media=filtered_album[0].invert_media,
-                        message_effect_id=filtered_album[0].effect,
+                        invert_media=invert_media,
+                        message_effect_id=message_effect_id,
                         context_suffix=" after file_reference refresh",
                     )
                     if config.send_delay:
