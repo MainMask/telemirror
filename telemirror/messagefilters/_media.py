@@ -16,6 +16,7 @@ from telethon.tl import types
 
 from ..hints import EventMessage
 from ..misc.links import private_message_link
+from .base import FilterAction, FilterResult
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,15 @@ class ReuploadCache:
         wrapper). `cacheable` decides whether a given result is worth
         caching — defaults to "not None" (a filter's own fallback value on
         failure is never cached, so the next attempt retries rather than
-        being stuck with a remembered failure).
+        being stuck with a remembered failure). It's evaluated exactly once,
+        by whichever caller's `_run()` created the in-flight entry for this
+        key — a caller that instead finds an existing `inflight` and just
+        awaits it never gets its own `cacheable` argument consulted. Every
+        caller sharing a given key must therefore agree on the caching
+        policy for it (true today: each `@cached_reupload`-decorated method
+        passes one fixed `cacheable` for the lifetime of its own `self._cache`
+        instance) — this cache is not a fit for two call sites disagreeing on
+        whether the same key's result is worth caching.
 
         Awaiting is shielded from the calling task's own cancellation: an
         awaiter being cancelled must not cancel `factory()` out from under
@@ -276,7 +285,14 @@ class ReuploadCache:
             return cached
         inflight = self._inflight.get(key)
         if inflight is None:
-            inflight = asyncio.ensure_future(factory())
+
+            async def _run() -> Any:
+                result = await factory()
+                if cacheable(result):
+                    self.put(key, result)
+                return result
+
+            inflight = asyncio.ensure_future(_run())
             self._inflight[key] = inflight
 
             def _cleanup(_task: "asyncio.Future") -> None:
@@ -284,10 +300,7 @@ class ReuploadCache:
                     del self._inflight[key]
 
             inflight.add_done_callback(_cleanup)
-        result = await asyncio.shield(inflight)
-        if cacheable(result):
-            self.put(key, result)
-        return result
+        return await asyncio.shield(inflight)
 
 
 def source_media_id(media: Optional["types.TypeMessageMedia"]) -> Optional[int]:
@@ -303,13 +316,38 @@ def source_media_id(media: Optional["types.TypeMessageMedia"]) -> Optional[int]:
     return None
 
 
+def cached_media_result(
+    cache: "ReuploadCache", message: EventMessage
+) -> Optional["FilterResult[EventMessage]"]:
+    """Applies a cached re-upload to `message.media` and returns the
+    `FilterResult` a filter's `_process_message` should return immediately,
+    or `None` if there's nothing cached yet for this media's source id — the
+    caller should fall through to its own pre-check work in that case. Lets a
+    filter's `_process_message` short-circuit before its own pre-check work
+    (rename, size checks, attribute scans) on a fan-out target whose media a
+    prior target already cached — `@cached_reupload`'s own single-flight
+    cache alone only skips the expensive re-upload itself, not that up-front
+    work. Shared by every re-uploading filter (`WatermarkRemovalFilter`,
+    `DocumentFilenameFilter`, `RestrictSavingContentBypassFilter`) so this
+    short-circuit is written once instead of identically copy-pasted into
+    each `_process_message`.
+    """
+    key = source_media_id(message.media)
+    if key is None:
+        return None
+    cached = cache.get(key)
+    if cached is None:
+        return None
+    message.media = cached
+    return FilterResult(FilterAction.CONTINUE, message)
+
+
 def cached_reupload(
-    cache_attr: str = "_cache",
     cacheable: Callable[[Any], bool] = lambda v: v is not None,
 ):
     """Decorator for a re-upload coroutine ``(self, message, *a, **kw) -> T``:
     single-flighted and cached by ``source_media_id(message.media)`` via
-    ``self.<cache_attr>`` (a `ReuploadCache`). Stack it *outside*
+    ``self._cache`` (a `ReuploadCache`). Stack it *outside*
     ``@reupload_errors`` (applied first / listed last) so a propagating
     FloodWaitError still reaches every concurrent awaiter, and a swallowed
     failure's fallback value is never cached (see ``cacheable``).
@@ -321,7 +359,7 @@ def cached_reupload(
             key = source_media_id(message.media)
             if key is None:
                 return await fn(self, message, *args, **kwargs)
-            cache: ReuploadCache = getattr(self, cache_attr)
+            cache: ReuploadCache = self._cache
             return await cache.get_or_create(
                 key, lambda: fn(self, message, *args, **kwargs), cacheable
             )

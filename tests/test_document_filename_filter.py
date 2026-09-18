@@ -79,6 +79,45 @@ def _doc_message(client):
     return msg
 
 
+class _WorkingClient:
+    def __init__(self):
+        self.download_calls = 0
+
+    async def download_media(self, message, file):
+        self.download_calls += 1
+        with open(file, "wb") as f:
+            f.write(b"data")
+
+    async def upload_file(self, path, file_name=None):
+        return "uploaded-handle"
+
+
+def test_process_message_skips_reupload_on_repeat_target_via_cache(monkeypatch):
+    """A second _process_message call for the same media (simulating a second
+    fan-out target reusing the already re-uploaded file) must short-circuit
+    via the top-level ReuploadCache lookup before ever invoking the decorated
+    `_reupload` coroutine, instead of paying for the rename/size-check
+    pre-work again on every target and relying solely on `@cached_reupload`'s
+    own internal caching."""
+    f = DocumentFilenameFilter(suffix="@CitadelClan")
+    client = _WorkingClient()
+
+    calls = []
+    orig_reupload = f._reupload
+
+    async def spy(*a, **kw):
+        calls.append(1)
+        return await orig_reupload(*a, **kw)
+
+    monkeypatch.setattr(f, "_reupload", spy)
+
+    run(f._process_message(_doc_message(client), events.NewMessage.Event))
+    run(f._process_message(_doc_message(client), events.NewMessage.Event))
+
+    assert client.download_calls == 1
+    assert len(calls) == 1
+
+
 class _MDEClient:
     async def download_media(self, message, file):
         raise MediaDownloadError("t.me/c/1/2: exhausted")

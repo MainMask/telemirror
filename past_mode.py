@@ -143,7 +143,11 @@ async def _integrity_check(
         return None, 0
 
     mirrors = await database.get_messages_for_channel_pair(source_id, target_id)
-    mirror_count = len(mirrors)
+    # Deduplicated by source message: overlapping DirectionConfigs (e.g. a
+    # catch-all from_topic_id=None config plus a topic-scoped one) can mirror
+    # the same source message to the same target twice, producing 2 rows —
+    # a raw row count would overshoot the budget used for bounded last_n resume.
+    mirror_count = len({m.original_id for m in mirrors})
     logger.info(f"{prefix}: checkpoint={checkpoint}, mirrors in DB={mirror_count}")
 
     if mirror_count == 0:

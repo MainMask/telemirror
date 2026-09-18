@@ -10,6 +10,7 @@ from ..misc.links import private_message_link
 from ._media import (
     UPLOAD_LIMIT_BYTES,
     ReuploadCache,
+    cached_media_result,
     cached_reupload,
     downloaded_tempfile,
     filename_of,
@@ -106,6 +107,10 @@ class DocumentFilenameFilter(MessageFilter):
         new_name = self._rename(old_name)
         if new_name == old_name:
             return FilterResult(FilterAction.CONTINUE, message)
+
+        result = cached_media_result(self._cache, message)
+        if result is not None:
+            return result
 
         if doc.size > UPLOAD_LIMIT_BYTES:
             logger.info(

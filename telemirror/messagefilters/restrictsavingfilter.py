@@ -9,6 +9,7 @@ from ..hints import EventLike, EventMessage
 from ._media import (
     UPLOAD_LIMIT_BYTES,
     ReuploadCache,
+    cached_media_result,
     cached_reupload,
     download_media_with_retry,
     downloaded_tempfile,
@@ -47,6 +48,10 @@ class RestrictSavingContentBypassFilter(MessageFilter):
     ) -> FilterResult[EventMessage]:
         if not (message.chat and message.chat.noforwards and message.media):
             return FilterResult(FilterAction.CONTINUE, message)
+
+        result = cached_media_result(self._cache, message)
+        if result is not None:
+            return result
 
         if isinstance(message.media, types.MessageMediaDocument):
             doc = message.media.document

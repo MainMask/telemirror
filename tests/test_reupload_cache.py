@@ -1,9 +1,14 @@
 import asyncio
 import time
 
-from telemirror.messagefilters._media import ReuploadCache, source_media_id
+from telemirror.messagefilters._media import (
+    ReuploadCache,
+    cached_media_result,
+    source_media_id,
+)
+from telemirror.messagefilters.base import FilterAction
 from telethon.tl import types
-from tests.conftest import run
+from tests.conftest import make_message, run
 
 
 def test_hit_and_miss():
@@ -121,6 +126,42 @@ def test_get_or_create_survives_one_awaiter_being_cancelled():
     assert c.get(1) == "handle"
 
 
+def test_get_or_create_no_redundant_factory_for_caller_arriving_at_cleanup():
+    """A caller landing in the single tick where the in-flight entry's
+    done-callback (`_cleanup`) has just deleted `self._inflight[key]`, but
+    the original awaiter hasn't yet resumed past `await asyncio.shield(...)`
+    to cache the result, must still see the cached value rather than
+    restarting `factory()` — the exact race window `_cleanup` firing before
+    the result is cached could open. Reproduced deterministically by hooking
+    `_inflight`'s `__delitem__` (fired by `_cleanup`) to schedule the late
+    caller for the very next loop iteration, matching where the real race
+    window used to land."""
+    c = ReuploadCache()
+    calls = 0
+    late_caller: list = []
+
+    class _NotifyingInflight(dict):
+        def __delitem__(self, key):
+            super().__delitem__(key)
+            late_caller.append(asyncio.ensure_future(c.get_or_create(1, factory)))
+
+    c._inflight = _NotifyingInflight()
+
+    async def factory():
+        nonlocal calls
+        calls += 1
+        return "handle"
+
+    async def scenario():
+        first = await c.get_or_create(1, factory)
+        late = await late_caller[0]
+        return first, late
+
+    first, late = run(scenario())
+    assert calls == 1
+    assert first == late == "handle"
+
+
 def test_get_or_create_respects_cacheable_predicate():
     c = ReuploadCache()
     calls = 0
@@ -136,6 +177,30 @@ def test_get_or_create_respects_cacheable_predicate():
 
     run(c.get_or_create(1, factory, cacheable=lambda v: False))
     assert calls == 2  # factory re-ran since nothing was cached
+
+
+def test_get_or_create_cacheable_decided_only_by_entry_creating_caller():
+    """`cacheable` is evaluated once, by whichever concurrent caller's
+    `_run()` created the in-flight entry — a caller that instead finds an
+    existing in-flight task and just awaits it never gets its own
+    `cacheable` argument consulted (see `get_or_create`'s docstring). Pins
+    down that documented precondition: every caller sharing a key must agree
+    on the caching policy for it, since only the creator's predicate runs."""
+    c = ReuploadCache()
+
+    async def factory():
+        await asyncio.sleep(0)  # yield, so the second call arrives mid-flight
+        return "handle"
+
+    async def scenario():
+        return await asyncio.gather(
+            c.get_or_create(1, factory, cacheable=lambda v: False),  # creator
+            c.get_or_create(1, factory, cacheable=lambda v: True),  # joins in-flight
+        )
+
+    results = run(scenario())
+    assert results == ["handle", "handle"]
+    assert c.get(1) is None  # the joiner's cacheable=True was never consulted
 
 
 def test_source_media_id():
@@ -157,3 +222,32 @@ def test_source_media_id():
 
     assert source_media_id(types.MessageMediaWebPage(webpage=types.WebPageEmpty(id=0))) is None
     assert source_media_id(None) is None
+
+
+def _photo(id_):
+    return types.MessageMediaPhoto(
+        photo=types.Photo(
+            id=id_, access_hash=0, file_reference=b"", date=None,
+            sizes=[], dc_id=1,
+        )
+    )
+
+
+def test_cached_media_result_none_when_nothing_cached():
+    c = ReuploadCache()
+    msg = make_message(media=_photo(1))
+    assert cached_media_result(c, msg) is None
+    assert msg.media == _photo(1)  # untouched
+
+
+def test_cached_media_result_applies_cached_media_and_continues():
+    c = ReuploadCache()
+    run(c.get_or_create(1, lambda: asyncio.sleep(0, result="UPLOADED"), lambda v: True))
+
+    msg = make_message(media=_photo(1))
+    result = cached_media_result(c, msg)
+
+    assert result is not None
+    assert result.action is FilterAction.CONTINUE
+    assert result.entity.media == "UPLOADED"
+    assert msg.media == "UPLOADED"

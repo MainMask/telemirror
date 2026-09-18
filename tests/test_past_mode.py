@@ -57,6 +57,21 @@ def test_integrity_keeps_healthy_checkpoint():
     assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (99, 1)
 
 
+def test_integrity_dedupes_mirror_count_by_source_message():
+    """A source message reached by two overlapping direction configs (e.g. a
+    catch-all from_topic_id=None plus a topic-scoped one to the same target)
+    produces two MirrorMessage rows for the same original_id. mirror_count
+    must count distinct source messages, not raw rows, or a bounded last_n
+    resume's budget (last_n - mirrors_done) undercounts and stops early."""
+    db = run(InMemoryDatabase())
+    run(db.set_past_mode_checkpoint(SRC, TGT, 42))
+    run(db.insert_batch([
+        MirrorMessage(42, SRC, 942, TGT, mirror_topic_id=None),
+        MirrorMessage(42, SRC, 943, TGT, mirror_topic_id=7),
+    ]))
+    assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (42, 1)
+
+
 # --- _replay_direction ----------------------------------------------------
 
 def _msg(mid, grouped_id=None):

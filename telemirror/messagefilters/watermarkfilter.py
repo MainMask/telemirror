@@ -18,6 +18,7 @@ from ..watermark.processor import (
 from ._media import (
     UPLOAD_LIMIT_BYTES,
     ReuploadCache,
+    cached_media_result,
     cached_reupload,
     download_media_with_retry,
     downloaded_tempfile,
@@ -102,6 +103,10 @@ class WatermarkRemovalFilter(MessageFilter):
             or (not config.remove_watermark and not config.stamp_watermark)
         ):
             return FilterResult(FilterAction.CONTINUE, message)
+
+        result = cached_media_result(self._cache, message)
+        if result is not None:
+            return result
 
         handle = None
         if isinstance(message.media, types.MessageMediaPhoto):

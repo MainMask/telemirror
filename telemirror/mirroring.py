@@ -511,7 +511,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         chat_id: int,
         ids: List[int],
         source_link: str,
-        flush_inserted: Optional[Callable[[], Awaitable[None]]] = None,
+        flush_inserted: Callable[[], Awaitable[None]],
         on_caption_too_long: Optional[Callable[[], Awaitable]] = None,
         log_kind: Optional[str] = None,
         context_suffix: str = "",
@@ -523,8 +523,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         outgoing message/album *and* the shared source message/album), the
         same `send` closure serves both attempts unchanged.
 
-        `FloodWaitError`/`FloodPremiumWaitError` are flushed (if `flush_inserted`
-        is given) and re-raised at either attempt, same contract as every send
+        `FloodWaitError`/`FloodPremiumWaitError` are flushed via `flush_inserted`
+        and re-raised at either attempt, same contract as every send
         in this module. A ``MediaCaptionTooLongError`` from the *first* attempt
         is left uncaught for the caller's own handler to dispatch to its
         caption-split fallback; `on_caption_too_long` covers it recurring on
@@ -543,8 +543,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             try:
                 return await send()
             except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-                if flush_inserted is not None:
-                    await flush_inserted()
+                await flush_inserted()
                 raise
             except Exception as e:
                 if isinstance(e, errors.MediaCaptionTooLongError) and on_caption_too_long is not None:
@@ -558,8 +557,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         try:
             return await send()
         except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-            if flush_inserted is not None:
-                await flush_inserted()
+            await flush_inserted()
             raise
         except errors.FileReferenceExpiredError:
             # Refetch the source message(s) by id for a fresh file_reference
@@ -570,8 +568,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             try:
                 fresh_media = await fetch_fresh_media(self._client, chat_id, ids)
             except (errors.FloodWaitError, errors.FloodPremiumWaitError):
-                if flush_inserted is not None:
-                    await flush_inserted()
+                await flush_inserted()
                 raise
             except Exception as e:
                 self._logger.error(
@@ -743,6 +740,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         reply_to: Optional[int],
         reply_to_topic_id: Optional[int],
         config: DirectionConfig,
+        flush_inserted: Callable[[], Awaitable[None]],
         track_media: Callable[[List[types.Message]], Awaitable[None]],
         invert_media: Optional[bool],
         message_effect_id: Optional[int],
@@ -800,6 +798,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             chat_id=chat_id,
             ids=idxs,
             source_link=album_link,
+            flush_inserted=flush_inserted,
             log_kind="split album",
             context_suffix=context_suffix,
         )
@@ -830,6 +829,34 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 what="album",
                 context_suffix=context_suffix,
             )
+
+    def _make_flush_inserted(
+        self: "EventProcessor", inserted: List[MirrorMessage], link: str
+    ) -> Callable[[], Awaitable[None]]:
+        """Closure over `inserted`: persists buffered `MirrorMessage` rows via
+        `insert_batch`, leaving them queued for a later flush attempt if the
+        write fails — the fan-out targets they describe are already sent, so
+        losing their rows would strand them for a later edit/delete/resync.
+        Shared by `new_message` and `new_album` so both fan-outs get the same
+        already-sent-survives-a-DB-hiccup guarantee.
+        """
+
+        async def flush_inserted() -> None:
+            if not inserted:
+                return
+            try:
+                await self._database.insert_batch(inserted)
+            except Exception as e:
+                self._logger.error(
+                    f"{len(inserted)} message(s) sent but NOT tracked in DB "
+                    f"({link}): {type(e).__name__}: {e}"
+                )
+            else:
+                # Written — drop them so a later flush in this same fan-out
+                # doesn't re-insert them (duplicate binding_id rows).
+                inserted.clear()
+
+        return flush_inserted
 
     @__handle_exceptions
     async def new_message(
@@ -874,22 +901,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             for m in await self._database.get_messages(message.id, chat_id)
         }
 
-        async def flush_inserted() -> None:
-            if not inserted:
-                return
-            try:
-                await self._database.insert_batch(inserted)
-            except Exception as e:
-                # Messages are already sent; without their DB rows a later
-                # edit/delete can't reach them and a resync may duplicate them.
-                self._logger.error(
-                    f"{len(inserted)} message(s) sent but NOT tracked in DB "
-                    f"({message_link}): {type(e).__name__}: {e}"
-                )
-            else:
-                # Written — drop them so a later flush in this same fan-out
-                # doesn't re-insert them (duplicate binding_id rows).
-                inserted.clear()
+        flush_inserted = self._make_flush_inserted(inserted, message_link)
 
         for outgoing_chat, configs in outgoing_chats.items():
             matching = [c for c in configs if self._matches_from_topic(c, message)]
@@ -1100,6 +1112,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             else {}
         )
 
+        inserted: List[MirrorMessage] = []
         # Resolve each distinct t.me link once for the whole fan-out.
         link_cache: dict = {}
         already_mirrored = {
@@ -1108,6 +1121,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 incoming_first_message.id, chat_id
             )
         }
+
+        flush_inserted = self._make_flush_inserted(inserted, album_link)
 
         for outgoing_chat, configs in outgoing_chats.items():
             matching = [
@@ -1134,9 +1149,19 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         )
 
                 filtered_album: EventAlbumMessage
-                filter_action, filtered_album = await config.filters.process(
-                    album_copy, events.Album.Event
-                )
+                try:
+                    filter_action, filtered_album = await config.filters.process(
+                        album_copy, events.Album.Event
+                    )
+                except (
+                    errors.FloodWaitError,
+                    errors.FloodPremiumWaitError,
+                    MediaDownloadError,
+                ):
+                    # earlier fan-out targets are already sent — persist their
+                    # rows before this propagates (same as the send handlers)
+                    await flush_inserted()
+                    raise
 
                 if filter_action is FilterAction.DISCARD:
                     self._logger.info(
@@ -1180,19 +1205,21 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"the source won't reach it)"
                         )
                         return
-                    await self._database.insert_batch(
-                        [
-                            MirrorMessage(
-                                original_id=idxs[message_index],
-                                original_channel=chat_id,
-                                mirror_id=sent_message.id,
-                                mirror_channel=outgoing_chat,
-                                mirror_topic_id=config.to_topic_id,
-                                source_topic_id=config.from_topic_id,
-                            )
-                            for message_index, sent_message in enumerate(sent)
-                        ]
+                    inserted.extend(
+                        MirrorMessage(
+                            original_id=idxs[message_index],
+                            original_channel=chat_id,
+                            mirror_id=sent_message.id,
+                            mirror_channel=outgoing_chat,
+                            mirror_topic_id=config.to_topic_id,
+                            source_topic_id=config.from_topic_id,
+                        )
+                        for message_index, sent_message in enumerate(sent)
                     )
+                    # Persist before the delay: a kill during the sleep must
+                    # not leave an already-delivered album untracked (same
+                    # write-then-sleep order as new_message).
+                    await flush_inserted()
 
                 # `files` is intentionally read by name (not bound as a
                 # default arg like the other loop locals below) in `_do_send`
@@ -1275,6 +1302,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         reply_to=reply_to,
                         reply_to_topic_id=reply_to_topic_id,
                         config=config,
+                        flush_inserted=flush_inserted,
                         track_media=track_media,
                         invert_media=invert_media,
                         message_effect_id=message_effect_id,
@@ -1296,6 +1324,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         chat_id=chat_id,
                         ids=idxs,
                         source_link=album_link,
+                        flush_inserted=flush_inserted,
                         on_caption_too_long=_on_caption_too_long,
                     )
                 except errors.MediaCaptionTooLongError:
@@ -1313,6 +1342,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         reply_to=reply_to,
                         reply_to_topic_id=reply_to_topic_id,
                         config=config,
+                        flush_inserted=flush_inserted,
                         track_media=track_media,
                         invert_media=filtered_album[0].invert_media,
                         message_effect_id=filtered_album[0].effect,
@@ -1334,6 +1364,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
                 if config.send_delay:
                     await asyncio.sleep(config.send_delay)
+
+        await flush_inserted()
 
     @__handle_exceptions
     async def edit_message(
@@ -1411,7 +1443,11 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         for attr in filtered_message.media.document.attributes
                     )
                 )
-                try:
+                async def _do_edit(
+                    outgoing_message=outgoing_message,
+                    filtered_message=filtered_message,
+                    edit_media_allowed=edit_media_allowed,
+                ):
                     await self._client.edit_message(
                         entity=outgoing_message.mirror_channel,
                         message=outgoing_message.mirror_id,
@@ -1422,11 +1458,60 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             filtered_message.media, types.MessageMediaWebPage
                         ),
                     )
+
+                try:
+                    await _do_edit()
                 except errors.MessageNotModifiedError:
                     self._logger.warning(
                         f"Suppressed MessageNotModifiedError for message "
                         f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}"
                     )
+                except errors.FileReferenceExpiredError:
+                    # Refetch the source message for a fresh file_reference
+                    # (the one grabbed when the edit was dispatched went stale
+                    # before send) and retry once, same contract as
+                    # new_message/new_album's _send_with_reference_refresh.
+                    try:
+                        fresh_media = await fetch_fresh_media(
+                            self._client, chat_id, message.id
+                        )
+                    except Exception as e:
+                        self._logger.error(
+                            f"Error while editing message "
+                            f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}. "
+                            f"FileReferenceExpiredError: refetch failed. "
+                            f"{type(e).__name__}: {e}"
+                        )
+                    else:
+                        if fresh_media is None:
+                            self._logger.error(
+                                f"Error while editing message "
+                                f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}. "
+                                f"FileReferenceExpiredError: source {message_link} "
+                                f"is gone, can't refresh file_reference"
+                            )
+                        else:
+                            filtered_message.media = fresh_media
+                            # Also refresh the shared source message: every
+                            # remaining outgoing_message/config for it copies
+                            # from `message`, and would otherwise redo this
+                            # same refetch against the same stale reference
+                            # once per target — same reasoning as
+                            # new_message/new_album's _apply_fresh_message_media.
+                            message.media = fresh_media
+                            try:
+                                await _do_edit()
+                            except errors.MessageNotModifiedError:
+                                self._logger.warning(
+                                    f"Suppressed MessageNotModifiedError for message "
+                                    f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}"
+                                )
+                            except Exception as e:
+                                self._logger.error(
+                                    f"Error while editing message "
+                                    f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id} "
+                                    f"after file_reference refresh. {type(e).__name__}: {e}"
+                                )
 
                 # FloodWaitError is deliberately NOT special-cased to propagate
                 # here (unlike new_message/new_album): edit_message is only
