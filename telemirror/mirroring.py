@@ -26,7 +26,11 @@ from telemirror.misc import sdnotify
 from telemirror.misc.links import private_message_link
 from telemirror.misc.lrucache import LRUCache
 from telemirror.misc.message_groups import iter_message_groups
-from telemirror.misc.telegram_client import build_telegram_client, connect_with_timeout
+from telemirror.misc.telegram_client import (
+    build_telegram_client,
+    cancel_and_await,
+    connect_with_timeout,
+)
 from telemirror.misc.topics import topic_id_of
 from telemirror.mixins import CopyEventMessage, UpdateEntitiesParams
 from telemirror.storage import Database, MirrorMessage
@@ -1580,6 +1584,17 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                                     f"Suppressed MessageNotModifiedError for message "
                                     f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}"
                                 )
+                            except (
+                                errors.FloodWaitError, errors.FloodPremiumWaitError,
+                            ) as e:
+                                # Same sibling-config fallback as the primary
+                                # _do_edit() attempt's flood handler below.
+                                self._logger.warning(
+                                    f"FloodWait while editing message "
+                                    f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id} "
+                                    f"after file_reference refresh. {type(e).__name__}: {e}"
+                                )
+                                continue
                             except Exception as e:
                                 self._logger.error(
                                     f"Error while editing message "
@@ -1593,7 +1608,17 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 # _sync_broadcast_channel's catch-up loop, neither of which has
                 # a retry wrapper for it — propagating would only abort the
                 # edit for every other, un-flooded outgoing_message in this
-                # same loop, with no compensating benefit.
+                # same loop, with no compensating benefit. It's still worth
+                # trying a sibling config, when one exists (see
+                # _config_for_topic's docstring), before giving up on this
+                # outgoing_message entirely.
+                except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+                    self._logger.warning(
+                        f"FloodWait while editing message "
+                        f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}. "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    continue
                 except Exception as e:
                     self._logger.error(
                         f"Error while editing message "
@@ -2165,11 +2190,7 @@ class Mirroring:
             )
         finally:
             if watchdog_task is not None:
-                watchdog_task.cancel()
-                try:
-                    await watchdog_task
-                except asyncio.CancelledError:
-                    pass
+                await cancel_and_await(watchdog_task)
             sdnotify.notify("STOPPING=1")
             await client.disconnect()
 

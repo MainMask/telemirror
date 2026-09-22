@@ -9,11 +9,14 @@ from config import (
     _parse_chat_topic,
     _validate_forward_filters,
     _validate_mode,
+    _validate_watermark_filter_order,
 )
 from telemirror.messagefilters import (
     CompositeMessageFilter,
+    DocumentFilenameFilter,
     EmptyMessageFilter,
     KeywordReplaceFilter,
+    RestrictSavingContentBypassFilter,
     SkipWithKeywordsFilter,
     WatermarkRemovalFilter,
 )
@@ -106,6 +109,61 @@ def test_validate_forward_filters_checks_inside_composite():
     )
     with pytest.raises(ValueError, match="KeywordReplaceFilter"):
         _validate_forward_filters(composite, "forward", "src->dst")
+
+
+def test_validate_watermark_filter_order_rejects_restrict_before_watermark():
+    composite = CompositeMessageFilter(
+        [RestrictSavingContentBypassFilter(), WatermarkRemovalFilter()]
+    )
+    with pytest.raises(ValueError, match="src->dst"):
+        _validate_watermark_filter_order(composite, "src->dst")
+
+
+def test_validate_watermark_filter_order_rejects_document_filename_before_watermark():
+    """DocumentFilenameFilter also re-uploads media (into an upload handle)
+    whenever a rename actually fires — the same hazard as
+    RestrictSavingContentBypassFilter for a following WatermarkRemovalFilter."""
+    composite = CompositeMessageFilter(
+        [DocumentFilenameFilter(), WatermarkRemovalFilter()]
+    )
+    with pytest.raises(ValueError, match="src->dst"):
+        _validate_watermark_filter_order(composite, "src->dst")
+
+
+def test_validate_watermark_filter_order_names_the_first_offending_filter():
+    composite = CompositeMessageFilter([
+        RestrictSavingContentBypassFilter(),
+        DocumentFilenameFilter(),
+        WatermarkRemovalFilter(),
+    ])
+    with pytest.raises(ValueError, match="RestrictSavingContentBypassFilter"):
+        _validate_watermark_filter_order(composite, "src->dst")
+
+
+def test_validate_watermark_filter_order_rejects_consuming_filter_between_two_watermark_instances():
+    """channels= lets WatermarkRemovalFilter appear more than once in one
+    chain (different watermark config per channel group) — a consuming
+    filter placed between two instances must still be caught, not just one
+    placed before the first."""
+    composite = CompositeMessageFilter([
+        WatermarkRemovalFilter(channels=[1]),
+        RestrictSavingContentBypassFilter(),
+        WatermarkRemovalFilter(channels=[2]),
+    ])
+    with pytest.raises(ValueError, match="src->dst"):
+        _validate_watermark_filter_order(composite, "src->dst")
+
+
+def test_validate_watermark_filter_order_allows_watermark_before_restrict():
+    composite = CompositeMessageFilter(
+        [WatermarkRemovalFilter(), RestrictSavingContentBypassFilter()]
+    )
+    _validate_watermark_filter_order(composite, "src->dst")
+
+
+def test_validate_watermark_filter_order_allows_watermark_alone():
+    _validate_watermark_filter_order(WatermarkRemovalFilter(), "src->dst")
+    _validate_watermark_filter_order(EmptyMessageFilter(), "src->dst")
 
 
 def test_direction_config_defaults():

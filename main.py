@@ -61,6 +61,8 @@ async def run_telemirror(
         return_exceptions=True,
     )
     if isinstance(db_result, BaseException):
+        if isinstance(health_result, BaseException):
+            logger.error(health_result, exc_info=health_result)
         raise db_result
     database = db_result
     if isinstance(health_result, BaseException):

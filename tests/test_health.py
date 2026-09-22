@@ -1,6 +1,10 @@
-"""telemirror.health: alert on a fast-climbing restart count or a stuck unit."""
+"""telemirror.health: alert on a fast-climbing restart count or a stuck unit,
+and main() must surface a failed alert send, not exit 0 regardless (the same
+SPOF class already fixed in telemirror.alert's own entrypoint)."""
 
 import json
+
+import pytest
 
 from telemirror import health
 
@@ -63,3 +67,33 @@ def test_deliberate_stop_for_course_backfill_does_not_alert(monkeypatch, tmp_pat
           {"NRestarts": "2", "ActiveState": "inactive"},
           prev={"nrestarts": 2, "active": "inactive"})
     assert health.check() == []
+
+
+def test_main_exits_nonzero_when_alert_not_delivered(monkeypatch):
+    monkeypatch.setattr(health, "check", lambda: ["⚠️ telemirror.service: ActiveState=failed"])
+    monkeypatch.setattr(health.alert, "journal_tail", lambda unit, lines=15: "boom")
+    monkeypatch.setattr(health.alert, "send_alert", lambda text: False)
+    with pytest.raises(SystemExit) as exc_info:
+        health.main()
+    assert exc_info.value.code != 0
+
+
+def test_main_exits_zero_when_alert_delivered(monkeypatch):
+    monkeypatch.setattr(health, "check", lambda: ["⚠️ telemirror.service: ActiveState=failed"])
+    monkeypatch.setattr(health.alert, "journal_tail", lambda unit, lines=15: "boom")
+    monkeypatch.setattr(health.alert, "send_alert", lambda text: True)
+    with pytest.raises(SystemExit) as exc_info:
+        health.main()
+    assert exc_info.value.code == 0
+
+
+def test_main_exits_zero_and_skips_alert_when_no_problems(monkeypatch):
+    monkeypatch.setattr(health, "check", list)
+
+    def _no_alert(text):
+        raise AssertionError("must not send an alert when nothing's wrong")
+
+    monkeypatch.setattr(health.alert, "send_alert", _no_alert)
+    with pytest.raises(SystemExit) as exc_info:
+        health.main()
+    assert exc_info.value.code == 0

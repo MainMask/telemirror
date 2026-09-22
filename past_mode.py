@@ -312,6 +312,10 @@ async def _replay_direction(
             # before this propagates) — if retries are exhausted, give up on the
             # WHOLE album, not just the one item that failed, so earlier siblings
             # aren't silently excluded by a checkpoint landing between them.
+            # e.message_id is overwritten for that checkpoint purpose only;
+            # e.failed_message_id (defaulted in MediaDownloadError.__init__)
+            # still points at the item that actually failed to download, for
+            # the skip notification below.
             e.message_id = album[-1].id
             raise
         await database.set_past_mode_checkpoint(source_id, target_id, album[-1].id)
@@ -420,11 +424,14 @@ async def _replay_with_retry(
             if media_failures > _MEDIA_RETRY_LIMIT:
                 if e.message_id is None:
                     raise  # can't skip what we can't name
+                # failed_message_id defaults to message_id when not set separately
+                # (see MediaDownloadError.__init__), so this is never None here.
+                assert e.failed_message_id is not None
                 logger.error(
                     f"{e} — {_MEDIA_RETRY_LIMIT} retries didn't help, "
-                    f"skipping message {e.message_id} and moving on"
+                    f"skipping message {e.failed_message_id} and moving on"
                 )
-                await _notify_skipped(client, source_id, e.message_id, logger)
+                await _notify_skipped(client, source_id, e.failed_message_id, logger)
                 await database.set_past_mode_checkpoint(source_id, target_id, e.message_id)
                 media_failures = 0
                 media_failure_checkpoint = e.message_id

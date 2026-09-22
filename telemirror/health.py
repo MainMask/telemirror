@@ -75,9 +75,12 @@ def check() -> list[str]:
 
 def main() -> None:
     problems = check()
+    result = None
     if problems:
-        alert.send_alert("\n".join(problems) + "\n\n" + alert.journal_tail(_UNIT)[-2500:])
-    sys.exit(0)
+        result = alert.send_alert(
+            "\n".join(problems) + "\n\n" + alert.journal_tail(_UNIT)[-2500:]
+        )
+    sys.exit(1 if result is False else 0)
 
 
 if __name__ == "__main__":

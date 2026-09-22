@@ -10,6 +10,7 @@ import logging
 
 import pytest
 from telethon import errors
+from telethon.tl import types
 
 from config import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
@@ -115,6 +116,134 @@ def test_edit_message_flood_from_filters_process_does_not_abort_the_others():
     run(proc.edit_message(SOURCE, msg, "link"))  # must not raise
 
     assert edited == [TARGET_B]
+
+
+class _FloodOnceEditClient:
+    """Floods on the first edit_message call, succeeds on every call after —
+    stands in for a send-time FloodWaitError (as opposed to one raised from
+    filters.process, covered above)."""
+
+    def __init__(self):
+        self.edited: list[int] = []
+        self._calls = 0
+
+    async def edit_message(self, entity, **kw):
+        self._calls += 1
+        if self._calls == 1:
+            raise errors.FloodWaitError(request=None)
+        self.edited.append(entity)
+
+
+def test_edit_message_retries_a_sibling_config_when_the_first_floods_on_send():
+    """Same legacy/orphaned-row setup as the discard case above, but the
+    first candidate's actual client.edit_message() call floods instead of
+    its filter discarding — edit_message must still try the next sibling
+    config rather than giving up on the whole row (see _config_for_topic's
+    docstring)."""
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))  # no topic recorded -> no exact match
+    client = _FloodOnceEditClient()
+
+    proc = EventProcessor(
+        chat_mapping={
+            SOURCE: {
+                TARGET_A: [
+                    DirectionConfig(
+                        disable_delete=False, disable_edit=False,
+                        filters=EmptyMessageFilter(), from_topic_id=5,
+                    ),
+                    DirectionConfig(
+                        disable_delete=False, disable_edit=False,
+                        filters=EmptyMessageFilter(), from_topic_id=6,
+                    ),
+                ]
+            }
+        },
+        database=db,
+        client=client,
+        logger=logging.getLogger("test.floodpropagate"),
+    )
+    msg = make_message("hi", channel_id=1000)
+    msg.id = 100
+
+    run(proc.edit_message(SOURCE, msg, "link"))  # must not raise
+
+    assert client.edited == [TARGET_A]  # landed via the second config
+
+
+def _doc_media(file_reference: bytes) -> types.MessageMediaDocument:
+    return types.MessageMediaDocument(
+        document=types.Document(
+            id=42, access_hash=0, file_reference=file_reference, date=None,
+            mime_type="application/pdf", size=1024, dc_id=1, attributes=[],
+        )
+    )
+
+
+class _StaleThenFloodEditClient:
+    """First edit_message call goes stale (FileReferenceExpiredError); the
+    refreshed retry then floods. Stands in for a flood raised from the
+    file-reference-refresh retry path, not the primary attempt."""
+
+    def __init__(self, fresh_message):
+        self._fresh_message = fresh_message
+        self.edit_attempts: list[int] = []
+        self.get_messages_calls = []
+
+    async def edit_message(self, entity, message, file=None, **kw):
+        self.edit_attempts.append(entity)
+        if len(self.edit_attempts) == 1:
+            raise errors.FileReferenceExpiredError(request=None)
+        if len(self.edit_attempts) == 2:
+            raise errors.FloodWaitError(request=None)
+        # third attempt: the second sibling config's edit succeeds outright.
+
+    async def get_messages(self, entity, ids):
+        self.get_messages_calls.append((entity, ids))
+        return self._fresh_message
+
+
+def test_edit_message_retries_a_sibling_config_when_the_refresh_retry_floods():
+    """Same legacy/orphaned-row, two-sibling-config setup as the send-time
+    flood case above, but the flood happens on the RETRY after a
+    FileReferenceExpiredError refresh, not the primary attempt — that nested
+    retry must fall back to the next sibling config too, not just log and
+    give up on the whole row."""
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))  # no topic recorded -> no exact match
+
+    fresh_message = make_message(media=_doc_media(b"fresh-reference"), channel_id=1000)
+    client = _StaleThenFloodEditClient(fresh_message)
+
+    proc = EventProcessor(
+        chat_mapping={
+            SOURCE: {
+                TARGET_A: [
+                    DirectionConfig(
+                        disable_delete=False, disable_edit=False,
+                        filters=EmptyMessageFilter(), from_topic_id=5,
+                    ),
+                    DirectionConfig(
+                        disable_delete=False, disable_edit=False,
+                        filters=EmptyMessageFilter(), from_topic_id=6,
+                    ),
+                ]
+            }
+        },
+        database=db,
+        client=client,
+        logger=logging.getLogger("test.floodpropagate"),
+    )
+    msg = make_message(media=_doc_media(b"stale-reference"), channel_id=1000)
+    msg.id = 100
+    msg._client = client
+
+    run(proc.edit_message(SOURCE, msg, "link"))  # must not raise
+
+    # 1st config: stale reference, then refreshed retry floods. 2nd config:
+    # succeeds outright (message.media was already refreshed in place).
+    assert len(client.edit_attempts) == 3
+    assert client.edit_attempts == [TARGET_A, TARGET_A, TARGET_A]
 
 
 class _AlwaysDiscardsFilter:

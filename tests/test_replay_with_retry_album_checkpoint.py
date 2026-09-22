@@ -102,4 +102,8 @@ def test_give_up_on_stuck_album_advances_checkpoint_past_whole_album(monkeypatch
     # excluded on resume (min_id is exclusive) despite never having actually
     # been mirrored.
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 102
-    assert notified == [102]
+    # The skip notification must name the item that actually failed to
+    # download (100), not the checkpoint-advancement id (102) — an operator
+    # following the alert's link needs to find the broken file, not a
+    # message that sent fine.
+    assert notified == [100]

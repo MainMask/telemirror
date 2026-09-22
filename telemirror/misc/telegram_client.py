@@ -1,8 +1,11 @@
 import asyncio
+import logging
 from typing import Optional
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+
+logger = logging.getLogger(__name__)
 
 
 def _consume_task_result(task: "asyncio.Task") -> None:
@@ -10,6 +13,23 @@ def _consume_task_result(task: "asyncio.Task") -> None:
     'Task exception was never retrieved' for a fire-and-forget task."""
     if not task.cancelled():
         task.exception()
+
+
+async def cancel_and_await(task: "asyncio.Task") -> None:
+    """Cancel `task` and wait for it to actually settle before moving on.
+    Swallows its own CancelledError; any other exception it settles with
+    (e.g. an unrelated failure that happened to land in the same window we
+    decided to cancel it, making `.cancel()` a no-op) is logged rather than
+    silently dropped — the caller only needs to know the task is no longer
+    running, not its outcome, but a real bug in it shouldn't vanish without
+    a trace."""
+    task.cancel()
+    results = await asyncio.gather(task, return_exceptions=True)
+    exc = results[0]
+    if exc is not None and not isinstance(exc, asyncio.CancelledError):
+        logger.warning(
+            "cancel_and_await: task raised %s: %s", type(exc).__name__, exc
+        )
 
 
 async def connect_with_timeout(client: TelegramClient, timeout_sec: float = 30.0) -> None:
@@ -28,10 +48,19 @@ async def connect_with_timeout(client: TelegramClient, timeout_sec: float = 30.0
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_sec
 
-    while not connection_task.done() and not client.is_connected():
-        if loop.time() >= deadline:
-            break
-        await asyncio.sleep(0.05)
+    try:
+        while not connection_task.done() and not client.is_connected():
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(0.05)
+    except asyncio.CancelledError:
+        # Don't leak connection_task racing a subsequent client.disconnect()
+        # (e.g. SIGTERM during a slow handshake) — cancel it and wait for it
+        # to settle before propagating our own CancelledError, not its
+        # result: it can independently finish with an unrelated exception in
+        # the same window, which must not replace ours.
+        await cancel_and_await(connection_task)
+        raise
 
     if client.is_connected():
         # Connected — don't block on the task settling; just make sure

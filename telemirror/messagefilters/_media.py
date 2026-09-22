@@ -44,14 +44,26 @@ class MediaDownloadError(Exception):
     A filter re-raises it only under ``strict_media_mode`` (past_mode) so its
     retry wrapper re-runs from the checkpoint instead of committing a degraded
     mirror; the live mirror mirrors the original (un-watermarked / unrenamed)
-    rather than lose the message. ``message_id`` is the source message that
-    could not be downloaded — past_mode uses it to skip past a permanently
-    stuck message instead of retrying forever.
+    rather than lose the message. ``message_id`` is the source message
+    past_mode uses to advance/skip its checkpoint — for an album this is
+    overwritten to the album's last id so earlier siblings aren't stranded
+    (see ``past_mode.process_album``). ``failed_message_id`` is always the
+    specific message that actually could not be downloaded, for operator-
+    facing reporting (e.g. the TECH_CHANNEL skip alert); it defaults to
+    ``message_id`` when not given separately.
     """
 
-    def __init__(self, *args, message_id: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        *args,
+        message_id: Optional[int] = None,
+        failed_message_id: Optional[int] = None,
+    ) -> None:
         super().__init__(*args)
         self.message_id = message_id
+        self.failed_message_id = (
+            failed_message_id if failed_message_id is not None else message_id
+        )
 
 
 async def fetch_fresh_media(client, chat_id: int, ids):

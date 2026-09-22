@@ -79,6 +79,29 @@ def _validate_forward_filters(filters: MessageFilter, mode: str, context: str) -
         )
 
 
+_MEDIA_CONSUMING_FILTERS = (RestrictSavingContentBypassFilter, DocumentFilenameFilter)
+
+
+def _validate_watermark_filter_order(filters: MessageFilter, context: str) -> None:
+    """WatermarkRemovalFilter can't watermark media an earlier filter already
+    re-uploaded (no raw bytes left) — see watermarkfilter.py's runtime WARNING.
+    Fail fast at load time if the YAML lists a re-uploading filter
+    (RestrictSavingContentBypassFilter, DocumentFilenameFilter) before any
+    WatermarkRemovalFilter, including between two channel-scoped instances."""
+    flat = filters.filters if isinstance(filters, CompositeMessageFilter) else [filters]
+    seen_consuming = None
+    for f in flat:
+        if isinstance(f, _MEDIA_CONSUMING_FILTERS) and seen_consuming is None:
+            seen_consuming = type(f).__name__
+        elif isinstance(f, WatermarkRemovalFilter) and seen_consuming is not None:
+            raise ValueError(
+                f"{context}: {seen_consuming} must not run before "
+                f"WatermarkRemovalFilter — the watermark filter would silently "
+                f"skip every image/video (no raw media left to process). "
+                f"Reorder the filters."
+            )
+
+
 def _parse_chat_topic(value) -> tuple:
     """Split a ``chat_id`` or ``chat_id#topic_id`` value into ``(chat_id, topic_id)``.
 
@@ -303,6 +326,9 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
                 )
                 _validate_forward_filters(
                     _direction_filters, _direction_mode, f"{source}->{target}"
+                )
+                _validate_watermark_filter_order(
+                    _direction_filters, f"{source}->{target}"
                 )
 
                 CHAT_MAPPING.setdefault(source, {}).setdefault(target, []).append(
