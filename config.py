@@ -8,73 +8,22 @@ from datetime import date, datetime
 from typing import Dict, List, Literal, Optional, cast
 from urllib.parse import quote
 
-from decouple import AutoConfig, Csv, RepositoryEnv
+from decouple import AutoConfig, Csv
 
 from telemirror.messagefilters import (
     CompositeMessageFilter,
+    DocumentFilenameFilter,
     EmptyMessageFilter,
+    ForwardFormatFilter,
+    KeywordReplaceFilter,
     MessageFilter,
+    RestrictSavingContentBypassFilter,
     UrlMessageFilter,
+    WatermarkRemovalFilter,
 )
 
 
-class RepositoryMultilineEnv(RepositoryEnv):
-    """
-    Retrieves option keys from .env files with fall back to os.environ.
-    Multiline values are supported with '' or "" quoted strings.
-    """
-
-    def __init__(self, source, encoding=...):
-        self.data = {}
-        multiline_key = None
-        multiline_quote_sign = None
-        with open(source, encoding=encoding) as file_:
-            for line in file_:
-                if multiline_key:
-                    k = multiline_key
-                    v = line.rstrip()
-                    if v and v[-1] == multiline_quote_sign:
-                        v = v[:-1]
-                        multiline_key = None
-                        multiline_quote_sign = None
-
-                    self.data[k] += f"\n{v}"
-                    continue
-
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip()
-                if len(v) >= 2 and (
-                    (v[0] == "'" and v[-1] == "'") or (v[0] == '"' and v[-1] == '"')
-                ):
-                    v = v[1:-1]
-                elif v and (
-                    (v[0] == "'" and (len(v) < 2 or v[-1] != "'"))
-                    or (v[0] == '"' and (len(v) < 2 or v[-1] != '"'))
-                ):
-                    multiline_key = k
-                    multiline_quote_sign = v[0]
-                    v = v[1:]
-
-                self.data[k] = v
-
-        if multiline_key:
-            raise ValueError(
-                f"Unterminated multiline env string value for key = {multiline_key}, "
-                f"expected {multiline_quote_sign} at end"
-            )
-
-
-class Config(AutoConfig):
-    def __init__(self, search_path=None):
-        super().__init__(search_path)
-        self.SUPPORTED[".env"] = RepositoryMultilineEnv
-
-
-config = Config()
+config = AutoConfig()
 
 
 def _channel_id(value, name: str) -> Optional[int]:
@@ -100,6 +49,34 @@ def _validate_mode(value: str, context: str) -> Literal["copy", "forward"]:
             f"{context}: mode must be 'copy' or 'forward', got {value!r}"
         )
     return cast(Literal["copy", "forward"], value)
+
+
+_CONTENT_MUTATING_FILTERS = (
+    WatermarkRemovalFilter,
+    DocumentFilenameFilter,
+    RestrictSavingContentBypassFilter,
+    UrlMessageFilter,
+    KeywordReplaceFilter,
+    ForwardFormatFilter,
+)
+
+
+def _validate_forward_filters(filters: MessageFilter, mode: str, context: str) -> None:
+    """Fail fast on `mode: forward` combined with a filter that mutates
+    content: `_do_send` forwards the pristine original for `mode: forward`,
+    so a content-mutating filter's output (re-uploaded media, rewritten
+    text/entities) would be computed and then silently discarded."""
+    if mode != "forward":
+        return
+    flat = filters.filters if isinstance(filters, CompositeMessageFilter) else [filters]
+    offending = {type(f).__name__ for f in flat if isinstance(f, _CONTENT_MUTATING_FILTERS)}
+    if offending:
+        raise ValueError(
+            f"{context}: mode 'forward' can't carry filters that mutate content "
+            f"({', '.join(sorted(offending))}) — forward_messages() always sends "
+            f"the pristine original, so their output would be silently discarded "
+            f"and the work wasted. Use mode: copy, or drop these filters here."
+        )
 
 
 def _parse_chat_topic(value) -> tuple:
@@ -317,6 +294,17 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
             for target in targets:
                 target, target_topic_id = _parse_chat_topic(target)
 
+                _direction_mode = _validate_mode(
+                    direction.get("mode", yaml_config.get("mode", "copy")),
+                    f"{source}->{target}",
+                )
+                _direction_filters = build_filters(
+                    direction.get("filters", None), default_filters
+                )
+                _validate_forward_filters(
+                    _direction_filters, _direction_mode, f"{source}->{target}"
+                )
+
                 CHAT_MAPPING.setdefault(source, {}).setdefault(target, []).append(
                     DirectionConfig(
                         disable_delete=direction.get(
@@ -325,15 +313,10 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
                         disable_edit=direction.get(
                             "disable_edit", yaml_config.get("disable_edit", False)
                         ),
-                        filters=build_filters(
-                            direction.get("filters", None), default_filters
-                        ),
+                        filters=_direction_filters,
                         from_topic_id=source_topic_id,
                         to_topic_id=target_topic_id,
-                        mode=_validate_mode(
-                            direction.get("mode", yaml_config.get("mode", "copy")),
-                            f"{source}->{target}",
-                        ),
+                        mode=_direction_mode,
                         past_mode=build_past_mode(direction.get("past_mode")),
                         send_delay=direction.get("send_delay", _LIVE_SEND_DELAY),
                         fallback_link_url=direction.get(

@@ -1,3 +1,4 @@
+import logging
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, List, NamedTuple, Optional, Tuple
@@ -215,6 +216,20 @@ class Database(ABC):
 
     def __repr__(self) -> str:
         return self.__class__.__name__
+
+
+def warn_memory_db_limits(logger: logging.Logger) -> None:
+    """Log InMemoryDatabase's process-wide capacity limit. Shared by
+    main.py/past_mode.py so the warning text (and the capacity number, if
+    InMemoryDatabase.MAX_CAPACITY ever changes) is maintained in one place."""
+    logger.warning(
+        f"USE_MEMORY_DB=true: InMemoryDatabase holds at most "
+        f"{InMemoryDatabase.MAX_CAPACITY} tracked messages for the WHOLE "
+        "PROCESS (not per channel). Once that's exceeded, LRU eviction can "
+        "silently break dedup, delete, and edit-reply lookups for older "
+        "messages — not just broadcast-channel resync on restart. Use "
+        "PostgreSQL for a 24/7 deployment."
+    )
 
 
 class InMemoryDatabase(Database):

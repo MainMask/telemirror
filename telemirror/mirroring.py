@@ -2,7 +2,8 @@ import asyncio
 import logging
 import re
 import time
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple, Union
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 from telethon import TelegramClient, errors, events, utils
 from telethon.tl import functions, types
@@ -25,7 +26,7 @@ from telemirror.misc import sdnotify
 from telemirror.misc.links import private_message_link
 from telemirror.misc.lrucache import LRUCache
 from telemirror.misc.message_groups import iter_message_groups
-from telemirror.misc.telegram_client import build_telegram_client
+from telemirror.misc.telegram_client import build_telegram_client, connect_with_timeout
 from telemirror.misc.topics import topic_id_of
 from telemirror.mixins import CopyEventMessage, UpdateEntitiesParams
 from telemirror.storage import Database, MirrorMessage
@@ -67,13 +68,6 @@ def _resolve_logger(logger: Optional[Union[str, logging.Logger]]) -> logging.Log
     return logging.getLogger(__name__)
 
 
-def _consume_task_result(task: asyncio.Task) -> None:
-    """Retrieve a done task's result so asyncio doesn't log
-    'Task exception was never retrieved' for a fire-and-forget task."""
-    if not task.cancelled():
-        task.exception()
-
-
 class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     def __init__(
         self: "EventProcessor",
@@ -103,6 +97,36 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         # Public t.me/<username> → Telethon peer id, resolved once per process.
         # Only successful resolutions are stored; a miss may become resolvable later.
         self._username_id_cache: LRUCache[str, int] = LRUCache(capacity=256)
+        # (source_chat_id, source_message_id) -> futures resolved once a
+        # new_message/new_album fan-out for that message finishes. A list, not
+        # a single future: a redelivered/duplicate update for the same message
+        # id would otherwise overwrite an older, still in-flight registration,
+        # letting a waiter miss it entirely. delete_message/edit_message await
+        # every in-flight entry before reading the DB, so a source message
+        # deleted/edited right after posting can't race a still-in-progress
+        # fan-out into an orphaned/unedited copy.
+        self._fanout_inflight: Dict[Tuple[int, int], List[asyncio.Future]] = {}
+
+    @asynccontextmanager
+    async def _track_fanout(
+        self: "EventProcessor", keys: List[Tuple[int, int]]
+    ) -> AsyncIterator[None]:
+        done_future: asyncio.Future = asyncio.get_running_loop().create_future()
+        for key in keys:
+            self._fanout_inflight.setdefault(key, []).append(done_future)
+        try:
+            yield
+        finally:
+            for key in keys:
+                bucket = self._fanout_inflight.get(key)
+                if bucket is not None:
+                    try:
+                        bucket.remove(done_future)
+                    except ValueError:
+                        pass
+                    if not bucket:
+                        self._fanout_inflight.pop(key, None)
+            done_future.set_result(None)
 
     @property
     def logger(self: "EventProcessor") -> logging.Logger:
@@ -148,7 +172,16 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             channel_id = utils.get_peer_id(entity)
             self._username_id_cache[key] = channel_id
             return channel_id
-        except Exception:
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+            self._logger.warning(
+                f"[Link rewrite]: flood-wait resolving @{username} ({e}); "
+                "link left unresolved"
+            )
+            return None
+        except Exception as e:
+            self._logger.debug(
+                f"[Link rewrite]: couldn't resolve @{username}: {type(e).__name__}: {e}"
+            )
             return None
 
     async def _try_rewrite_tg_link(
@@ -858,8 +891,14 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         return flush_inserted
 
-    @__handle_exceptions
     async def new_message(
+        self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
+    ):
+        async with self._track_fanout([(chat_id, message.id)]):
+            await self._new_message_impl(chat_id, message, message_link)
+
+    @__handle_exceptions
+    async def _new_message_impl(
         self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
     ):
         strict_media_mode.set(self._strict_media_errors)
@@ -937,6 +976,15 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     # rows before this propagates (same as the send handlers)
                     await flush_inserted()
                     raise
+                except Exception as e:
+                    # A bug in one target's filter chain must not abort delivery
+                    # to the remaining targets in this fan-out.
+                    self._logger.error(
+                        f"[New message]: filter chain failed for chat#{outgoing_chat}, "
+                        f"skipping this target. {type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+                    continue
 
                 if filter_action is FilterAction.DISCARD:
                     self._logger.info(
@@ -1087,8 +1135,14 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         await flush_inserted()
 
-    @__handle_exceptions
     async def new_album(
+        self: "EventProcessor", chat_id: int, album: EventAlbumMessage, album_link: str
+    ) -> None:
+        async with self._track_fanout([(chat_id, m.id) for m in album]):
+            await self._new_album_impl(chat_id, album, album_link)
+
+    @__handle_exceptions
+    async def _new_album_impl(
         self: "EventProcessor", chat_id: int, album: EventAlbumMessage, album_link: str
     ) -> None:
         strict_media_mode.set(self._strict_media_errors)
@@ -1162,6 +1216,15 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     # rows before this propagates (same as the send handlers)
                     await flush_inserted()
                     raise
+                except Exception as e:
+                    # A bug in one target's filter chain must not abort delivery
+                    # to the remaining targets in this fan-out.
+                    self._logger.error(
+                        f"[New album]: filter chain failed for chat#{outgoing_chat}, "
+                        f"skipping this target. {type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
+                    continue
 
                 if filter_action is FilterAction.DISCARD:
                     self._logger.info(
@@ -1371,6 +1434,15 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     async def edit_message(
         self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
     ):
+        # Same race as delete_message: a source message edited almost
+        # immediately after posting can race a still in-progress
+        # new_message/new_album fan-out for it — wait for that fan-out to
+        # finish before reading the DB, so every target it actually reached
+        # gets the edit, not just the ones tracked so far.
+        pending = self._fanout_inflight.get((chat_id, message.id))
+        if pending:
+            await asyncio.gather(*pending)
+
         outgoing_messages = await self._database.get_messages(message.id, chat_id)
         if not outgoing_messages:
             self._logger.warning(
@@ -1407,16 +1479,18 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     filter_action, filtered_message = await config.filters.process(
                         self.copy_message(message), events.MessageEdited.Event
                     )
-                except (
-                    errors.FloodWaitError,
-                    errors.FloodPremiumWaitError,
-                    MediaDownloadError,
-                ):
+                except Exception as e:
                     # Same "don't abort the rest of the fan-out" reasoning as
-                    # the send below — see the comment there.
+                    # the send below — see the comment there. Unlike
+                    # new_message/new_album, FloodWaitError/MediaDownloadError
+                    # aren't re-raised here: edit_message has no past_mode
+                    # retry wrapper to catch them, so logging and moving on
+                    # to the next target is already the right behavior for
+                    # every exception type.
                     self._logger.error(
                         f"Error while filtering edited message for "
-                        f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}."
+                        f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}. "
+                        f"{type(e).__name__}: {e}"
                     )
                     continue
 
@@ -1438,8 +1512,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     not isinstance(filtered_message.media, types.MessageMediaDocument)
                     or not isinstance(filtered_message.media.document, types.Document)
                     or not any(
-                        isinstance(attr, types.DocumentAttributeAudio)
-                        and attr.voice is True
+                        (isinstance(attr, types.DocumentAttributeAudio) and attr.voice is True)
+                        or isinstance(attr, types.DocumentAttributeSticker)
                         for attr in filtered_message.media.document.attributes
                     )
                 )
@@ -1533,6 +1607,18 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     async def delete_message(
         self: "EventProcessor", chat_id: int, message_ids: List[int]
     ) -> None:
+        # A source message deleted almost immediately after posting can race
+        # a still in-progress new_message/new_album fan-out for it — wait for
+        # any such fan-out to finish before reading the DB, so we see every
+        # target it actually reached instead of only the ones tracked so far.
+        pending = {
+            future
+            for mid in message_ids
+            for future in self._fanout_inflight.get((chat_id, mid), [])
+        }
+        if pending:
+            await asyncio.gather(*pending)
+
         deleting_messages = await self._database.get_messages_batch(
             message_ids, chat_id
         )
@@ -2005,40 +2091,7 @@ class Mirroring:
     async def __connect_client(self: "Mirroring", client: TelegramClient) -> None:
         watchdog_task: Optional[asyncio.Task] = None
         try:
-            if not client.is_connected():
-                # Avoid `client.connect` hang forever:
-                # https://github.com/LonamiWebs/Telethon/issues/1536
-                # https://github.com/LonamiWebs/Telethon/issues/4119
-                # `connect()` may report success before the transport is ready,
-                # and may also never return — so the whole wait is bounded.
-                connection_task = asyncio.create_task(client.connect())
-                loop = asyncio.get_running_loop()
-                deadline = loop.time() + self.CONNECT_TIMEOUT_SEC
-
-                while not connection_task.done() and not client.is_connected():
-                    if loop.time() >= deadline:
-                        break
-                    await asyncio.sleep(0.05)
-
-                if client.is_connected():
-                    # Connected — don't block on the task settling; just make sure
-                    # its eventual result/exception is consumed.
-                    if not connection_task.done():
-                        connection_task.add_done_callback(_consume_task_result)
-                else:
-                    try:
-                        # Not connected: either surface connect() errors or fail
-                        # on the remaining budget instead of spinning forever.
-                        await asyncio.wait_for(
-                            connection_task,
-                            timeout=max(0.0, deadline - loop.time()),
-                        )
-                    except asyncio.TimeoutError as e:
-                        connection_task.cancel()
-                        raise RuntimeError(
-                            "Timeout error while connecting to Telegram server, "
-                            "try restart or get a new session key (run login.py)"
-                        ) from e
+            await connect_with_timeout(client, self.CONNECT_TIMEOUT_SEC)
 
             me = await client.get_me()
             if me is None:

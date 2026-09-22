@@ -1,9 +1,11 @@
+import asyncio
 import logging
 from typing import Optional
 
 from telemirror.mirroring import Telemirror
 from telemirror.misc.log_setup import setup_stdout_logger
-from telemirror.storage import InMemoryDatabase, PostgresDatabase
+from telemirror.misc.signals import cancel_on_sigterm
+from telemirror.storage import InMemoryDatabase, PostgresDatabase, warn_memory_db_limits
 
 
 async def serve_health_endpoint(host: str, port: int) -> None:
@@ -42,18 +44,28 @@ async def run_telemirror(
     broadcast_channel: Optional[int] = None,
     tech_channel: Optional[int] = None,
 ):
-    await serve_health_endpoint(host=host, port=port)
-
     if use_memory_db:
-        database = InMemoryDatabase()
-        if broadcast_channel:
-            logger.warning(
-                "USE_MEMORY_DB=true with BROADCAST_CHANNEL: InMemoryDatabase holds at most 100 "
-                "entries — broadcast sync may re-send already-mirrored messages on restart "
-                "if channel history exceeds 100 messages. Use PostgreSQL for reliable sync."
-            )
-    else:
-        database = await PostgresDatabase(connection_string=db_uri)
+        warn_memory_db_limits(logger)
+
+    db_awaitable = (
+        InMemoryDatabase() if use_memory_db else PostgresDatabase(connection_string=db_uri)
+    )
+    # return_exceptions=True: with the default False, gather() propagates the
+    # first exception without cancelling the other awaitable, which keeps
+    # running in the background — if the DB side succeeds after the health
+    # side already raised, the opened connection pool would never be
+    # assigned anywhere and so never closed. Handle both outcomes ourselves
+    # so a successfully-opened database is always closed before we re-raise.
+    health_result, db_result = await asyncio.gather(
+        serve_health_endpoint(host=host, port=port), db_awaitable,
+        return_exceptions=True,
+    )
+    if isinstance(db_result, BaseException):
+        raise db_result
+    database = db_result
+    if isinstance(health_result, BaseException):
+        await database.close()
+        raise health_result
 
     telemirror = Telemirror(
         api_id=api_id,
@@ -68,8 +80,11 @@ async def run_telemirror(
         broadcast_channel=broadcast_channel,
         tech_channel=tech_channel,
     )
+    cancel_on_sigterm()
     try:
         await telemirror.run()
+    except asyncio.CancelledError:
+        pass
     finally:
         await database.close()
 

@@ -68,17 +68,18 @@ directions:
           keywords: !!set
             ? "stopword"     # treat keyword as word
             ? "r'badword.*'" # treat keyword as regex expr
-      - UrlMessageFilter:
-          blacklist: !!set
-            ? t.me
-      - KeywordReplaceFilter:
-          keywords:
-            "google.com": "bing.com"       # treat keyword as word
-            "r'google\\.com.*'": "bing.com" # treat keyword as regex expr
+      # - UrlMessageFilter:      # rewrites message text/entities; requires mode: copy.
+      #     blacklist: !!set
+      #       ? t.me
+      # - KeywordReplaceFilter:  # rewrites message text/entities; requires mode: copy.
+      #     keywords:
+      #       "google.com": "bing.com"       # treat keyword as word
+      #       "r'google\\.com.*'": "bing.com" # treat keyword as regex expr
       # - AllowWithKeywordsFilter:   # pass ONLY messages that contain at least one keyword
       #     keywords: !!set
       #       ? "allowed_word"
-      # - WatermarkRemovalFilter:      # strip the source's watermark and/or stamp your own (Linux/Docker only)
+      # - WatermarkRemovalFilter:      # strip the source's watermark and/or stamp your own
+      #                                # (Linux/Docker only); requires mode: copy.
       #     remove_watermark: true     # detect + inpaint the source's mark (needs template_path)
       #     stamp_watermark: true      # overlay telemirror/watermark/my_watermark.png
       #     template_path: "/data/watermarks/channel_wm.png"

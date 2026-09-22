@@ -7,9 +7,16 @@ from config import (
     PastModeConfig,
     _channel_id,
     _parse_chat_topic,
+    _validate_forward_filters,
     _validate_mode,
 )
-from telemirror.messagefilters import EmptyMessageFilter
+from telemirror.messagefilters import (
+    CompositeMessageFilter,
+    EmptyMessageFilter,
+    KeywordReplaceFilter,
+    SkipWithKeywordsFilter,
+    WatermarkRemovalFilter,
+)
 
 
 @pytest.mark.parametrize("unset", [None, "", "0", "  ", " 0 "])
@@ -72,6 +79,33 @@ def test_validate_mode_rejects_bad_value_with_context():
     silently mixing mirroring.py's `== "forward"`/`== "copy"` branches."""
     with pytest.raises(ValueError, match="src->dst"):
         _validate_mode("Copy", "src->dst")
+
+
+def test_validate_forward_filters_allows_decision_only_filter():
+    _validate_forward_filters(SkipWithKeywordsFilter(keywords={"x"}), "forward", "src->dst")
+    _validate_forward_filters(EmptyMessageFilter(), "forward", "src->dst")
+
+
+def test_validate_forward_filters_ignores_copy_mode():
+    # mode: copy can carry any filter, content-mutating or not.
+    _validate_forward_filters(KeywordReplaceFilter(keywords={"a": "b"}), "copy", "src->dst")
+
+
+def test_validate_forward_filters_rejects_content_mutating_filter():
+    with pytest.raises(ValueError, match="src->dst"):
+        _validate_forward_filters(
+            KeywordReplaceFilter(keywords={"a": "b"}), "forward", "src->dst"
+        )
+    with pytest.raises(ValueError, match="WatermarkRemovalFilter"):
+        _validate_forward_filters(WatermarkRemovalFilter(), "forward", "src->dst")
+
+
+def test_validate_forward_filters_checks_inside_composite():
+    composite = CompositeMessageFilter(
+        [SkipWithKeywordsFilter(keywords={"x"}), KeywordReplaceFilter(keywords={"a": "b"})]
+    )
+    with pytest.raises(ValueError, match="KeywordReplaceFilter"):
+        _validate_forward_filters(composite, "forward", "src->dst")
 
 
 def test_direction_config_defaults():

@@ -46,8 +46,15 @@ from telemirror.mirroring import EventProcessor
 from telemirror.misc.links import private_message_link
 from telemirror.misc.log_setup import setup_stdout_logger
 from telemirror.misc.message_groups import iter_message_groups
-from telemirror.misc.telegram_client import build_telegram_client
-from telemirror.storage import Database, InMemoryDatabase, MirrorMessage, PostgresDatabase
+from telemirror.misc.signals import cancel_on_sigterm
+from telemirror.misc.telegram_client import build_telegram_client, connect_with_timeout
+from telemirror.storage import (
+    Database,
+    InMemoryDatabase,
+    MirrorMessage,
+    PostgresDatabase,
+    warn_memory_db_limits,
+)
 
 _LOG_EVERY = 25  # log progress every N messages/albums
 
@@ -298,7 +305,15 @@ async def _replay_direction(
     async def process_album(album: List) -> None:
         nonlocal processed, messages_done
         link = private_message_link(source_id, album[0].id)
-        await processor.new_album(source_id, album, link)
+        try:
+            await processor.new_album(source_id, album, link)
+        except MediaDownloadError as e:
+            # The whole album failed together (no partial per-config send happens
+            # before this propagates) — if retries are exhausted, give up on the
+            # WHOLE album, not just the one item that failed, so earlier siblings
+            # aren't silently excluded by a checkpoint landing between them.
+            e.message_id = album[-1].id
+            raise
         await database.set_past_mode_checkpoint(source_id, target_id, album[-1].id)
         processed += 1
         messages_done += len(album)
@@ -562,6 +577,9 @@ async def _run(logger: logging.Logger) -> None:
         "to replay."
     )
 
+    if USE_MEMORY_DB:
+        warn_memory_db_limits(logger)
+
     database: Database = (
         InMemoryDatabase() if USE_MEMORY_DB else await PostgresDatabase(connection_string=DB_URL)
     )
@@ -583,7 +601,7 @@ async def _run(logger: logging.Logger) -> None:
     logger.info(
         f"On a dropped connection: up to {_CONN_RETRIES} attempts, {_RETRY_DELAY}s apart"
     )
-    await client.connect()
+    await connect_with_timeout(client)
 
     me = await client.get_me()
     if me is None:
@@ -591,6 +609,7 @@ async def _run(logger: logging.Logger) -> None:
     at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
     logger.info(f"Logged in as {utils.get_display_name(me)}{at_username}")
 
+    cancel_on_sigterm()
     try:
         # Overall progress: the sum of source totals as the denominator (one
         # full pass per pair, so a source with N pairs is counted N times).
@@ -627,6 +646,12 @@ async def _run(logger: logging.Logger) -> None:
             )
             full = f"{header}\n\n{pair_lines}"
             await client.send_message(TECH_CHANNEL, full if len(full) <= 4096 else header)
+    except asyncio.CancelledError:
+        logger.warning(
+            "SIGTERM received, stopping the replay (resumable — already-mirrored "
+            "messages are deduped by the DB, so resuming won't re-send them even "
+            "if the checkpoint for the in-progress item wasn't reached yet)"
+        )
     finally:
         await client.disconnect()
         await database.close()

@@ -118,6 +118,10 @@ class CompositeMessageFilter(MessageFilter):
     def restricted_content_allowed(self) -> bool:
         return self._is_restricted_content_allowed
 
+    @property
+    def filters(self) -> List[MessageFilter]:
+        return self._filters
+
     async def process(
         self, entity: EventEntity, event_type: Type[EventLike]
     ) -> FilterResult[EventEntity]:

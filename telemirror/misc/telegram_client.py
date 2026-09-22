@@ -1,7 +1,57 @@
+import asyncio
 from typing import Optional
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+
+
+def _consume_task_result(task: "asyncio.Task") -> None:
+    """Retrieve a done task's result so asyncio doesn't log
+    'Task exception was never retrieved' for a fire-and-forget task."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def connect_with_timeout(client: TelegramClient, timeout_sec: float = 30.0) -> None:
+    """Bounded wait for `client.connect()`.
+
+    Avoids `client.connect` hanging forever:
+    https://github.com/LonamiWebs/Telethon/issues/1536
+    https://github.com/LonamiWebs/Telethon/issues/4119
+    `connect()` may report success before the transport is ready, and may
+    also never return — so the whole wait is bounded.
+    """
+    if client.is_connected():
+        return
+
+    connection_task = asyncio.create_task(client.connect())
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_sec
+
+    while not connection_task.done() and not client.is_connected():
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(0.05)
+
+    if client.is_connected():
+        # Connected — don't block on the task settling; just make sure
+        # its eventual result/exception is consumed.
+        if not connection_task.done():
+            connection_task.add_done_callback(_consume_task_result)
+    else:
+        try:
+            # Not connected: either surface connect() errors or fail
+            # on the remaining budget instead of spinning forever.
+            await asyncio.wait_for(
+                connection_task,
+                timeout=max(0.0, deadline - loop.time()),
+            )
+        except asyncio.TimeoutError as e:
+            connection_task.cancel()
+            raise RuntimeError(
+                "Timeout error while connecting to Telegram server, "
+                "try restart or get a new session key (run login.py)"
+            ) from e
 
 
 def build_telegram_client(

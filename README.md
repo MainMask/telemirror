@@ -115,15 +115,12 @@
         disable_edit: false
         disable_delete: false
         mode: forward
-        # Overwrite global filters
+        # Overwrite global filters. mode: forward always sends the pristine
+        # original, so only decision-only filters (skip/allow, no content
+        # mutation) are valid here — a filter that rewrites text/media
+        # (UrlMessageFilter, KeywordReplaceFilter, WatermarkRemovalFilter, ...)
+        # requires mode: copy, and fails config loading if paired with forward.
         filters:
-          - UrlMessageFilter:
-              blacklist: !!set
-                ? t.me
-          - KeywordReplaceFilter:
-              keywords:
-                "google.com": "bing.com"    # treat keyword as word
-                "r'google\\.com.*'": "bing.com" # treat keyword as regex expr
           - SkipWithKeywordsFilter:
               keywords: !!set
                 ? "stopword"     # treat keyword as word
@@ -286,7 +283,7 @@ The following environment variables (and their YAML equivalents) extend the base
 | `SEND_DELAY` | `0.5` | Delay (seconds) between sends for live mirroring directions. |
 | `PAST_MODE` | — | Replay past messages on startup (env-mode only). Values: `last_n=N`, `full_history`, `since_date=YYYY-MM-DDTHH:MM:SS`. |
 
-> ⚠️ `USE_MEMORY_DB=true` is incompatible with `BROADCAST_CHANNEL` if the broadcast channel has more than 100 messages — use PostgreSQL for reliable broadcast sync.
+> ⚠️ `USE_MEMORY_DB=true` holds at most 100 tracked messages for the whole process (not per channel). Beyond that, LRU eviction can silently break dedup, delete, and edit-reply lookups for older messages, not just `BROADCAST_CHANNEL` resync on restart — use PostgreSQL for a 24/7 deployment.
 
 ## Replaying past messages (`past_mode.py`)
 
