@@ -149,3 +149,25 @@ def test_cancel_and_await_does_not_log_a_plain_cancellation(caplog):
         run(scenario())
 
     assert not caplog.records
+
+
+def test_cancel_and_await_absorbs_a_second_cancellation_of_its_caller():
+    """A second SIGTERM (signals.py's persistent handler calls task.cancel()
+    on every one received) landing while __connect_client's finally block is
+    inside `await cancel_and_await(watchdog_task)` must not skip the
+    remaining cleanup after it (sdnotify STOPPING / client.disconnect() in
+    mirroring.py) — same contract the old plain try/except around a bare
+    `await watchdog_task` gave for free."""
+    async def _hangs():
+        await asyncio.Event().wait()
+
+    async def scenario():
+        task = asyncio.ensure_future(_hangs())
+        await asyncio.sleep(0)  # let it start
+        # Simulate a second SIGTERM: cancel the CALLING task itself while
+        # it's about to be suspended inside cancel_and_await's own await.
+        asyncio.get_running_loop().call_soon(asyncio.current_task().cancel)
+        await cancel_and_await(task)  # must not raise/propagate that cancellation
+        return "cleanup ran"
+
+    assert run(scenario()) == "cleanup ran"

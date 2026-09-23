@@ -93,6 +93,11 @@ class WatermarkRemovalFilter(MessageFilter):
         # Re-send one processed upload to all fan-out targets (keyed by source id).
         self._cache = ReuploadCache()
 
+    @property
+    def channels(self) -> Optional[set[int]]:
+        """Source channel ids this instance is scoped to (`None` = every channel)."""
+        return self._channels
+
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]
     ) -> FilterResult[EventMessage]:

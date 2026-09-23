@@ -134,12 +134,14 @@ class _FloodOnceEditClient:
         self.edited.append(entity)
 
 
-def test_edit_message_retries_a_sibling_config_when_the_first_floods_on_send():
+def test_edit_message_gives_up_on_remaining_siblings_when_send_floods():
     """Same legacy/orphaned-row setup as the discard case above, but the
     first candidate's actual client.edit_message() call floods instead of
-    its filter discarding — edit_message must still try the next sibling
-    config rather than giving up on the whole row (see _config_for_topic's
-    docstring)."""
+    its filter discarding. Unlike a discard, a flood must NOT try the next
+    sibling config: flood_sleep_threshold=300 means only a long wait reaches
+    this handler, and Telegram's edit flood limit isn't scoped per sibling
+    target, so an immediate retry on the same client would almost certainly
+    burn another request into the same active flood window."""
     db = run(InMemoryDatabase())
     run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))  # no topic recorded -> no exact match
     client = _FloodOnceEditClient()
@@ -168,7 +170,8 @@ def test_edit_message_retries_a_sibling_config_when_the_first_floods_on_send():
 
     run(proc.edit_message(SOURCE, msg, "link"))  # must not raise
 
-    assert client.edited == [TARGET_A]  # landed via the second config
+    assert client.edited == []  # gave up after the flood, second config never tried
+    assert client._calls == 1
 
 
 def _doc_media(file_reference: bytes) -> types.MessageMediaDocument:
@@ -203,12 +206,12 @@ class _StaleThenFloodEditClient:
         return self._fresh_message
 
 
-def test_edit_message_retries_a_sibling_config_when_the_refresh_retry_floods():
+def test_edit_message_gives_up_on_remaining_siblings_when_the_refresh_retry_floods():
     """Same legacy/orphaned-row, two-sibling-config setup as the send-time
     flood case above, but the flood happens on the RETRY after a
-    FileReferenceExpiredError refresh, not the primary attempt — that nested
-    retry must fall back to the next sibling config too, not just log and
-    give up on the whole row."""
+    FileReferenceExpiredError refresh, not the primary attempt. Same
+    give-up-immediately reasoning applies: the nested retry must not fall
+    back to the next sibling config either."""
     db = run(InMemoryDatabase())
     run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))  # no topic recorded -> no exact match
 
@@ -240,10 +243,10 @@ def test_edit_message_retries_a_sibling_config_when_the_refresh_retry_floods():
 
     run(proc.edit_message(SOURCE, msg, "link"))  # must not raise
 
-    # 1st config: stale reference, then refreshed retry floods. 2nd config:
-    # succeeds outright (message.media was already refreshed in place).
-    assert len(client.edit_attempts) == 3
-    assert client.edit_attempts == [TARGET_A, TARGET_A, TARGET_A]
+    # 1st config only: stale reference, then refreshed retry floods and gives
+    # up — the 2nd config's edit_message is never called.
+    assert len(client.edit_attempts) == 2
+    assert client.edit_attempts == [TARGET_A, TARGET_A]
 
 
 class _AlwaysDiscardsFilter:

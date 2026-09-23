@@ -1587,14 +1587,14 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             except (
                                 errors.FloodWaitError, errors.FloodPremiumWaitError,
                             ) as e:
-                                # Same sibling-config fallback as the primary
-                                # _do_edit() attempt's flood handler below.
+                                # Same give-up-on-this-message reasoning as the
+                                # primary _do_edit() attempt's flood handler below.
                                 self._logger.warning(
                                     f"FloodWait while editing message "
                                     f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id} "
                                     f"after file_reference refresh. {type(e).__name__}: {e}"
                                 )
-                                continue
+                                break
                             except Exception as e:
                                 self._logger.error(
                                     f"Error while editing message "
@@ -1608,17 +1608,21 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 # _sync_broadcast_channel's catch-up loop, neither of which has
                 # a retry wrapper for it — propagating would only abort the
                 # edit for every other, un-flooded outgoing_message in this
-                # same loop, with no compensating benefit. It's still worth
-                # trying a sibling config, when one exists (see
-                # _config_for_topic's docstring), before giving up on this
-                # outgoing_message entirely.
+                # same loop, with no compensating benefit. A sibling config
+                # (see _config_for_topic's docstring), when one exists, is NOT
+                # worth trying here: flood_sleep_threshold=300 means only
+                # waits long enough to reach this handler do, and Telegram's
+                # edit flood limit isn't scoped per sibling target — an
+                # immediate retry on the same client would almost certainly
+                # burn another request into the same active flood window.
+                # Give up on this outgoing_message entirely instead.
                 except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
                     self._logger.warning(
                         f"FloodWait while editing message "
                         f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}. "
                         f"{type(e).__name__}: {e}"
                     )
-                    continue
+                    break
                 except Exception as e:
                     self._logger.error(
                         f"Error while editing message "

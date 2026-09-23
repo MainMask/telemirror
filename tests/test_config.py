@@ -116,7 +116,7 @@ def test_validate_watermark_filter_order_rejects_restrict_before_watermark():
         [RestrictSavingContentBypassFilter(), WatermarkRemovalFilter()]
     )
     with pytest.raises(ValueError, match="src->dst"):
-        _validate_watermark_filter_order(composite, "src->dst")
+        _validate_watermark_filter_order(composite, 1, "src->dst")
 
 
 def test_validate_watermark_filter_order_rejects_document_filename_before_watermark():
@@ -127,7 +127,7 @@ def test_validate_watermark_filter_order_rejects_document_filename_before_waterm
         [DocumentFilenameFilter(), WatermarkRemovalFilter()]
     )
     with pytest.raises(ValueError, match="src->dst"):
-        _validate_watermark_filter_order(composite, "src->dst")
+        _validate_watermark_filter_order(composite, 1, "src->dst")
 
 
 def test_validate_watermark_filter_order_names_the_first_offending_filter():
@@ -137,33 +137,70 @@ def test_validate_watermark_filter_order_names_the_first_offending_filter():
         WatermarkRemovalFilter(),
     ])
     with pytest.raises(ValueError, match="RestrictSavingContentBypassFilter"):
-        _validate_watermark_filter_order(composite, "src->dst")
+        _validate_watermark_filter_order(composite, 1, "src->dst")
 
 
 def test_validate_watermark_filter_order_rejects_consuming_filter_between_two_watermark_instances():
     """channels= lets WatermarkRemovalFilter appear more than once in one
     chain (different watermark config per channel group) — a consuming
-    filter placed between two instances must still be caught, not just one
-    placed before the first."""
+    filter placed between two instances must still be caught for a source
+    the SECOND instance actually applies to, not just one placed before the
+    first."""
     composite = CompositeMessageFilter([
         WatermarkRemovalFilter(channels=[1]),
         RestrictSavingContentBypassFilter(),
         WatermarkRemovalFilter(channels=[2]),
     ])
     with pytest.raises(ValueError, match="src->dst"):
-        _validate_watermark_filter_order(composite, "src->dst")
+        _validate_watermark_filter_order(composite, 2, "src->dst")
+
+
+def test_validate_watermark_filter_order_allows_a_source_outside_the_later_instances_scope():
+    """The same chain as above is NOT a hazard for source 1: its watermarking
+    already completed via the FIRST instance (channels=[1]) before the
+    consuming filter ran, and the second, channels=[2]-scoped instance never
+    processes source 1's messages at all — so the consuming filter sitting
+    before it is irrelevant for this source."""
+    composite = CompositeMessageFilter([
+        WatermarkRemovalFilter(channels=[1]),
+        RestrictSavingContentBypassFilter(),
+        WatermarkRemovalFilter(channels=[2]),
+    ])
+    _validate_watermark_filter_order(composite, 1, "src->dst")
 
 
 def test_validate_watermark_filter_order_allows_watermark_before_restrict():
     composite = CompositeMessageFilter(
         [WatermarkRemovalFilter(), RestrictSavingContentBypassFilter()]
     )
-    _validate_watermark_filter_order(composite, "src->dst")
+    _validate_watermark_filter_order(composite, 1, "src->dst")
 
 
 def test_validate_watermark_filter_order_allows_watermark_alone():
-    _validate_watermark_filter_order(WatermarkRemovalFilter(), "src->dst")
-    _validate_watermark_filter_order(EmptyMessageFilter(), "src->dst")
+    _validate_watermark_filter_order(WatermarkRemovalFilter(), 1, "src->dst")
+    _validate_watermark_filter_order(EmptyMessageFilter(), 1, "src->dst")
+
+
+def test_validate_watermark_filter_order_rejects_in_scope_source_after_consuming_filter():
+    """A channel-scoped WatermarkRemovalFilter is still a real hazard for a
+    source it actually processes."""
+    composite = CompositeMessageFilter(
+        [RestrictSavingContentBypassFilter(), WatermarkRemovalFilter(channels=[1])]
+    )
+    with pytest.raises(ValueError, match="src->dst"):
+        _validate_watermark_filter_order(composite, 1, "src->dst")
+
+
+def test_validate_watermark_filter_order_allows_out_of_scope_source_after_consuming_filter():
+    """A multi-source direction reuses the same filter list for every source
+    (see config.py's build loop) — a channel-scoped WatermarkRemovalFilter
+    that never processes THIS source is a no-op for it at runtime
+    (watermarkfilter.py's `_process_message`), so a consuming filter before
+    it is not a hazard for this source, regardless of filter order."""
+    composite = CompositeMessageFilter(
+        [RestrictSavingContentBypassFilter(), WatermarkRemovalFilter(channels=[1])]
+    )
+    _validate_watermark_filter_order(composite, 2, "src->dst")
 
 
 def test_direction_config_defaults():

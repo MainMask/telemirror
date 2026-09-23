@@ -17,19 +17,22 @@ def _consume_task_result(task: "asyncio.Task") -> None:
 
 async def cancel_and_await(task: "asyncio.Task") -> None:
     """Cancel `task` and wait for it to actually settle before moving on.
-    Swallows its own CancelledError; any other exception it settles with
-    (e.g. an unrelated failure that happened to land in the same window we
-    decided to cancel it, making `.cancel()` a no-op) is logged rather than
-    silently dropped — the caller only needs to know the task is no longer
-    running, not its outcome, but a real bug in it shouldn't vanish without
-    a trace."""
+    Swallows CancelledError surfacing from this await — whether it's `task`
+    itself settling as cancelled, or the calling coroutine being cancelled
+    again while suspended here (e.g. a second SIGTERM landing mid-shutdown):
+    either way the caller's own cleanup after this call must still run, same
+    as this collapsed before. Any other exception `task` settles with (e.g.
+    an unrelated failure that happened to land in the same window we decided
+    to cancel it, making `.cancel()` a no-op) is logged rather than silently
+    dropped — the caller only needs to know the task is no longer running,
+    not its outcome, but a real bug in it shouldn't vanish without a trace."""
     task.cancel()
-    results = await asyncio.gather(task, return_exceptions=True)
-    exc = results[0]
-    if exc is not None and not isinstance(exc, asyncio.CancelledError):
-        logger.warning(
-            "cancel_and_await: task raised %s: %s", type(exc).__name__, exc
-        )
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning("cancel_and_await: task raised %s: %s", type(e).__name__, e)
 
 
 async def connect_with_timeout(client: TelegramClient, timeout_sec: float = 30.0) -> None:

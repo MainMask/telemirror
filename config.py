@@ -82,18 +82,29 @@ def _validate_forward_filters(filters: MessageFilter, mode: str, context: str) -
 _MEDIA_CONSUMING_FILTERS = (RestrictSavingContentBypassFilter, DocumentFilenameFilter)
 
 
-def _validate_watermark_filter_order(filters: MessageFilter, context: str) -> None:
+def _validate_watermark_filter_order(
+    filters: MessageFilter, source: int, context: str
+) -> None:
     """WatermarkRemovalFilter can't watermark media an earlier filter already
     re-uploaded (no raw bytes left) — see watermarkfilter.py's runtime WARNING.
     Fail fast at load time if the YAML lists a re-uploading filter
     (RestrictSavingContentBypassFilter, DocumentFilenameFilter) before any
-    WatermarkRemovalFilter, including between two channel-scoped instances."""
+    WatermarkRemovalFilter, including between two channel-scoped instances —
+    but only when that WatermarkRemovalFilter actually processes `source`
+    (its `channels` scoping, see watermarkfilter.py): a direction with
+    multiple `from:` sources reuses the same filter list for each of them,
+    and a channel-scoped instance that never touches `source` is not a real
+    hazard for it, regardless of ordering."""
     flat = filters.filters if isinstance(filters, CompositeMessageFilter) else [filters]
     seen_consuming = None
     for f in flat:
         if isinstance(f, _MEDIA_CONSUMING_FILTERS) and seen_consuming is None:
             seen_consuming = type(f).__name__
-        elif isinstance(f, WatermarkRemovalFilter) and seen_consuming is not None:
+        elif (
+            isinstance(f, WatermarkRemovalFilter)
+            and seen_consuming is not None
+            and (f.channels is None or source in f.channels)
+        ):
             raise ValueError(
                 f"{context}: {seen_consuming} must not run before "
                 f"WatermarkRemovalFilter — the watermark filter would silently "
@@ -328,7 +339,7 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
                     _direction_filters, _direction_mode, f"{source}->{target}"
                 )
                 _validate_watermark_filter_order(
-                    _direction_filters, f"{source}->{target}"
+                    _direction_filters, source, f"{source}->{target}"
                 )
 
                 CHAT_MAPPING.setdefault(source, {}).setdefault(target, []).append(
