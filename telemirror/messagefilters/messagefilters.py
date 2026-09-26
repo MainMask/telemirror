@@ -226,7 +226,7 @@ class UrlMessageFilter(UpdateEntitiesParams, MessageFilter):
         return True
 
 
-class ForwardFormatFilter(ChannelName, MessageLink, MessageFilter):
+class ForwardFormatFilter(ChannelName, MessageLink, UpdateEntitiesParams, MessageFilter):
     """Filter that adds a forwarding formatting (markdown supported):
 
     Example:
@@ -354,9 +354,14 @@ class ForwardFormatFilter(ChannelName, MessageLink, MessageFilter):
                 utils.add_surrogate(message.message or "")
             ) - len(self.MESSAGE_PLACEHOLDER)
 
-            for entity in pre_formatted_entities:
-                if entity.offset > message_offset:
-                    entity.offset += message_placeholder_length_diff
+            # Shift entities after the placeholder and resize the ones that
+            # contain it (e.g. `**{message_text}**`) to the substituted body.
+            self.update_entities_params(
+                pre_formatted_entities,
+                message_offset,
+                message_offset + len(self.MESSAGE_PLACEHOLDER),
+                message_placeholder_length_diff,
+            )
 
             if message.entities:
                 message.entities.extend(pre_formatted_entities)

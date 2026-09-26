@@ -57,3 +57,37 @@ def test_astral_emoji_in_header_keeps_body_entities_aligned():
     _, out = run(f.process(msg, events.NewMessage.Event))
     assert out.message == "🚀 Crypto\nhi there"
     assert entity_text(out, out.entities[0]) == "hi"
+
+
+@pytest.mark.parametrize(
+    "fmt, body, expected",
+    [
+        # header entity exactly wrapping the placeholder
+        ("**{message_text}**\n\nfrom x", "hello world", "hello world"),
+        # header entity starting before the placeholder and containing it
+        ("__Note: {message_text}__", "a body longer than the placeholder", "Note: a body longer than the placeholder"),
+        # and a body shorter than the placeholder
+        ("__Note: {message_text}__", "hi", "Note: hi"),
+    ],
+)
+def test_header_entity_wrapping_the_body_is_resized(fmt, body, expected):
+    """A format entity that contains ``{message_text}`` must stretch/shrink
+    with the substituted body, not keep the placeholder's 14-unit length
+    (Pass 21: ``**{message_text}**`` bolded ``'hello world\\n\\nf'``)."""
+    from tests.conftest import entity_text
+
+    msg = make_message(body)
+    _, out = run(ForwardFormatFilter(fmt).process(msg, events.NewMessage.Event))
+    assert [entity_text(out, e) for e in out.entities] == [expected]
+
+
+def test_header_entity_after_the_body_still_shifts():
+    from tests.conftest import entity_text
+
+    msg = make_message("🚀 hello")
+    _, out = run(
+        ForwardFormatFilter("{message_text}\n\n**Forwarded** from x").process(
+            msg, events.NewMessage.Event
+        )
+    )
+    assert [entity_text(out, e) for e in out.entities] == ["Forwarded"]

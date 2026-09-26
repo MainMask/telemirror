@@ -1539,18 +1539,42 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     filtered_message=filtered_message,
                     edit_media_allowed=edit_media_allowed,
                 ):
-                    await self._client.edit_message(
-                        entity=outgoing_message.mirror_channel,
-                        message=outgoing_message.mirror_id,
-                        text=filtered_message.message,
-                        # `[]`, never `None`: a None would make edit_message
-                        # run the raw text through the client's markdown parse_mode.
-                        formatting_entities=filtered_message.entities or [],
-                        file=filtered_message.media if edit_media_allowed else None,
-                        link_preview=isinstance(
-                            filtered_message.media, types.MessageMediaWebPage
-                        ),
-                    )
+                    async def _edit(text, entities):
+                        await self._client.edit_message(
+                            entity=outgoing_message.mirror_channel,
+                            message=outgoing_message.mirror_id,
+                            text=text,
+                            # `[]`, never `None`: a None would make edit_message
+                            # run the raw text through the client's markdown parse_mode.
+                            formatting_entities=entities or [],
+                            file=filtered_message.media if edit_media_allowed else None,
+                            link_preview=isinstance(
+                                filtered_message.media, types.MessageMediaWebPage
+                            ),
+                        )
+
+                    try:
+                        await _edit(filtered_message.message, filtered_message.entities)
+                    except errors.MediaCaptionTooLongError:
+                        # The new caption doesn't fit. Keep whatever caption
+                        # the mirror holds now — empty for one sent via the
+                        # caption-split fallback (its text reply isn't
+                        # tracked, so it can't be updated), or its previous
+                        # caption if the source only now outgrew the limit —
+                        # so a media change still reaches it and nothing is
+                        # wiped.
+                        current = await self._client.get_messages(
+                            outgoing_message.mirror_channel,
+                            ids=outgoing_message.mirror_id,
+                        )
+                        if current is None:
+                            raise
+                        self._logger.warning(
+                            f"[Edit message]: caption too long for "
+                            f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id} "
+                            f"— keeping the mirror's current caption, text not updated"
+                        )
+                        await _edit(current.message or "", current.entities or [])
 
                 try:
                     await _do_edit()

@@ -56,7 +56,7 @@
             "required": false
         },
         "PAST_MODE": {
-            "description": "(Optional) Replay history on startup: last_n=N | full_history | since_date=YYYY-MM-DDTHH:MM:SS",
+            "description": "(Optional) History to replay when past_mode.py is run (main.py never replays): last_n=N | full_history | since_date=YYYY-MM-DDTHH:MM:SS",
             "required": false
         },
         "BROADCAST_CHANNEL": {

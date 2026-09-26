@@ -281,7 +281,7 @@ The following environment variables (and their YAML equivalents) extend the base
 | `BROADCAST_SEND_DELAY` | `0.5` | Delay (seconds) between sends during broadcast sync. |
 | `TECH_CHANNEL` | — | Channel ID that receives WARNING+ log alerts and incoming DM notifications. |
 | `SEND_DELAY` | `0.5` | Delay (seconds) between sends for live mirroring directions. |
-| `PAST_MODE` | — | Replay past messages on startup (env-mode only). Values: `last_n=N`, `full_history`, `since_date=YYYY-MM-DDTHH:MM:SS`. |
+| `PAST_MODE` | — | History to replay when `past_mode.py` is run (env-mode only; `main.py` never replays). Values: `last_n=N`, `full_history`, `since_date=YYYY-MM-DDTHH:MM:SS`. |
 
 > ⚠️ `USE_MEMORY_DB=true` holds at most 100 tracked messages for the whole process (not per channel). Beyond that, LRU eviction can silently break dedup, delete, and edit-reply lookups for older messages, not just `BROADCAST_CHANNEL` resync on restart — use PostgreSQL for a 24/7 deployment.
 

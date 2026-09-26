@@ -3,6 +3,8 @@ params and a timeout scaled to the clip length (existing filter tests mock the
 whole call, so nothing else exercises the command build)."""
 
 import asyncio
+import shutil
+import subprocess
 
 import pytest
 from telethon.tl import types
@@ -199,3 +201,54 @@ def test_mismatched_limit_logs_a_warning_instead_of_silently_ignoring_it(
 
     assert first is second  # still the same, process-wide semaphore
     assert any("ignored" in r.message for r in caplog.records)
+
+
+# ── odd frame dimensions (Pass 21) ──────────────────────────────────────────
+# libx264 with yuv420p refuses an odd width/height ("width not divisible by
+# 2"), so such a video used to be mirrored without the stamp. Real ffmpeg here:
+# the failure lives in the encoder, which the command-capturing stubs above
+# can't see.
+
+_needs_ffmpeg = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe not installed",
+)
+
+
+def _odd_clip(tmp_path) -> str:
+    path = str(tmp_path / "odd.mp4")
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "testsrc=size=853x481:rate=10", "-t", "1",
+         "-c:v", "libx264", "-pix_fmt", "yuv444p", path],
+        check=True,
+    )
+    return path
+
+
+def _dims(path: str) -> str:
+    return subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+@_needs_ffmpeg
+def test_stamp_handles_odd_frame_dimensions(tmp_path):
+    out = str(tmp_path / "out.mp4")
+    config = WatermarkConfig(remove_watermark=False)
+
+    assert stamp_watermark_on_video(_odd_clip(tmp_path), config, out) is True
+    assert _dims(out) == "852,480"
+
+
+@_needs_ffmpeg
+def test_delogo_handles_odd_frame_dimensions(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        processor, "_detect_watermark", lambda frame, config: (10, 10, 50, 20)
+    )
+    out = str(tmp_path / "out.mp4")
+
+    assert remove_watermark_from_video(_odd_clip(tmp_path), WatermarkConfig(), out) is True
+    assert _dims(out) == "852,480"

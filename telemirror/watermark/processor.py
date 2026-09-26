@@ -24,6 +24,11 @@ _X264_PRESETS = frozenset((
 
 logger = logging.getLogger(__name__)
 
+# libx264 (yuv420p) rejects an odd frame width/height; cropping the stray
+# edge pixel keeps every re-encode valid without resampling (a no-op on an
+# even frame).
+_EVEN_CROP = "crop=trunc(iw/2)*2:trunc(ih/2)*2"
+
 _template_cache: dict[
     str, Optional[tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]]
 ] = {}
@@ -272,7 +277,7 @@ def remove_watermark_from_video(
     w = min(fw - x - 1, w + 2 * d)
     h = min(fh - y - 1, h + 2 * d)
 
-    delogo = f"delogo=x={x}:y={y}:w={w}:h={h}"
+    delogo = f"delogo=x={x}:y={y}:w={w}:h={h},{_EVEN_CROP}"
     duration = total / fps if fps > 0 else 0.0
     cmd = ["ffmpeg", "-y", "-i", video_path, "-vf", delogo, "-c:a", "copy", output_path]
     proc = subprocess.run(
@@ -374,7 +379,7 @@ def stamp_watermark_on_video(
     filter_complex = (
         f"[1:v]scale={wm_w}:{wm_h},format=rgba,"
         f"colorchannelmixer=aa={config.stamp_opacity}[wm];"
-        f"[0:v][wm]overlay={x}:{y}"
+        f"[0:v][wm]overlay={x}:{y},{_EVEN_CROP}"
     )
     cmd = [
         "ffmpeg", "-y",

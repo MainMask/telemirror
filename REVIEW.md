@@ -2771,3 +2771,145 @@ follow-ups each fixed one form and missed another. The 20 000-case scratch
 run and both real configs were re-probed: clean.
 
 Full suite 474 → 492, `ruff` and `mypy .` green.
+
+# Pass 21 — whole-project review; one live bug, four P3, sticker hardening
+
+Requested by the project owner: a whole-project code review per `CLAUDE.md`,
+with every suspected bug re-verified (intended vs. real) before a verdict,
+then "fix everything in the best way". Baseline at `8497e7d`: 492 tests,
+`pyflakes`, `ruff`, `mypy` green. Each fix below has a regression test
+confirmed to fail on the pre-fix code.
+
+## Fixed
+
+- **P2, live** `watermark/processor.py`: a video with an odd width or height
+  was never stamped — libx264 with `-pix_fmt yuv420p` refuses it ("width not
+  divisible by 2"), so `stamp_watermark_on_video` returned False and the video
+  was mirrored unstamped with an ERROR in the tech channel. Repro: a real
+  853×481 clip. The delogo path (`remove_watermark_from_video`) failed the
+  same way. Both filtergraphs now end in
+  `crop=trunc(iw/2)*2:trunc(ih/2)*2`: no resampling, a no-op on an even frame,
+  and it drops the stray edge pixel of an odd one. Tests:
+  `tests/test_watermark_video_encode.py::test_stamp_handles_odd_frame_dimensions`,
+  `::test_delogo_handles_odd_frame_dimensions` (real ffmpeg, skipped without it).
+- **P3** `past_mode.py::_edit_links_pass` compared the rewritten text with the
+  *source*, not with the mirror. Every mirror whose link was already resolved
+  at send time (the common case: history is replayed in order) got an
+  identical edit on every run. Each one cost an edit request with no
+  `send_delay` after the resulting `MessageNotModifiedError`, plus a WARNING.
+  Repro: `new_message` for 7, then for 10 (linking to 7); the pass then
+  re-sent 10's exact content. The pass now fetches each batch's mirrors (one
+  `get_messages` per ≤100) and edits only a mirror whose text/entities
+  differ. Deleted mirrors are skipped. A mirror sent through the caption-split
+  fallback (media with an empty caption, text >1024 UTF-16 units) is skipped
+  too: its caption can't hold the text. The cheap "does rewriting change any link at all" pre-check
+  is kept, so messages with only foreign links cost no mirror fetch. Tests:
+  `tests/test_past_mode.py::test_edit_links_pass_skips_mirror_that_already_has_the_link`,
+  `::test_edit_links_pass_skips_split_caption_mirror`.
+- **P3, latent** Same pass: the edit carried the raw source text and bypassed
+  the direction's filters, so it reverted text filters. Repro:
+  `KeywordReplaceFilter({"see": "look"})` — the mirror got "look", and the pass
+  edited it back to "see". The edit is now built like `new_message` builds the
+  mirror: rewrite links, then `cfg.filters.process(..., NewMessage.Event)`, with
+  `media` dropped first. Only text is edited, and every re-uploading filter is
+  a no-op without media, so nothing is downloaded. DISCARD skips the mirror.
+  Neither live config has a text filter. Tests:
+  `::test_edit_links_pass_keeps_text_filter_output`,
+  `::test_edit_links_pass_respects_a_discarding_filter`.
+- **P3, latent** `ForwardFormatFilter`: a header entity that contains
+  `{message_text}` kept the placeholder's 14-unit length. `**{message_text}**`
+  bolded `'hello world\n\nf'`, and `__Note: {message_text}__` cut a long body
+  short. The filter now uses the shared `UpdateEntitiesParams` mixin, which
+  shifts entities after the placeholder and resizes the ones containing it.
+  Unused in live configs. Tests:
+  `tests/test_forward_format_filter.py::test_header_entity_wrapping_the_body_is_resized`
+  (3 cases), `::test_header_entity_after_the_body_still_shifts`.
+- **P3** `mirroring.py::edit_message`: a mirror sent through the caption-split
+  fallback (source caption >1024) failed every edit of its source with
+  `MediaCaptionTooLongError` → an ERROR in the tech channel, and a media change
+  in that edit was lost. `_do_edit` now re-reads the mirror and retries once
+  with the caption the mirror already holds (empty for a split mirror), so the
+  media still updates, and logs a WARNING that the text wasn't updated. Both call sites (primary and
+  file_reference-refresh retry) get it. Test:
+  `tests/test_edit_message_caption_split.py`.
+
+## Hardening — media-like documents
+
+The next two can't be confirmed offline: they depend on the shape of
+Telegram's sticker documents. Both fixes are correct whichever shape
+Telegram uses.
+
+- `WatermarkRemovalFilter`: a video sticker (webm with alpha that carries
+  `DocumentAttributeVideo`) was re-encoded to H.264/MP4, which has no alpha,
+  and still declared a `video/webm` sticker (reproduced locally with a real
+  VP9-alpha webm). Documents with `DocumentAttributeSticker` now pass through.
+  Separately, a stamped video is now declared `video/mp4` and gets a `.mp4`
+  filename (on copied attributes), because ffmpeg always writes MP4. A
+  .webm/.mkv source used to keep its old container label. Tests:
+  `tests/test_watermark_stamp_only.py::test_video_sticker_is_not_stamped`,
+  `::test_stamped_webm_is_declared_as_mp4`.
+- `DocumentFilenameFilter`'s docstring promised that stickers, voice notes
+  and GIFs pass through "having no filename". Telegram does attach one to
+  some of them (e.g. `sticker.webp`), and each such document was downloaded
+  and re-uploaded under a renamed file. The filter now decides by kind
+  (`_is_media_like`: sticker, animated/GIF, voice, round video), in both the
+  raw and the already-uploaded branch. **Behavior change:** GIFs and stickers
+  are no longer renamed or re-uploaded. Tests:
+  `tests/test_document_filename_filter.py::test_media_like_documents_pass_through_untouched`,
+  `::test_media_like_already_uploaded_documents_keep_their_name` (4 kinds each),
+  `::test_regular_document_is_still_renamed`.
+
+## Re-verified, intended — no change
+
+- `setup_mirrors.step_build_config`'s non-forum `#1 → #1` branch: it doesn't
+  occur in either config (pass 20).
+- A live FloodWait aborts the rest of one message's fan-out: a documented
+  trade-off (`mirroring.py` invariants).
+- A re-uploaded photo is an `InputFile` named `photo.jpg`. `utils.is_image`
+  accepts it, so it is sent as a photo, not a document.
+- Filter order Watermark → RestrictSaving → DocumentFilename: the in-place
+  rename of a shared cached `InputMediaUploadedDocument` is idempotent (fuzzed
+  in pass 20 follow-up 4).
+- `clear_channels.py` / `sync_pins.py` cover `CHAT_MAPPING` only (courses via
+  `YAML_CONFIG_ENV`). Raised with the owner, who kept it as is.
+
+Full suite 492 → 514, `pyflakes`, `ruff` and `mypy .` green.
+
+## Pass 21 self-review — three bugs in this pass's own diff, one doc fix
+
+A second whole-project review, requested by the owner before commit, re-read
+this pass's diff line by line and the files the first read only skimmed
+(`README.md`, `app.json`, `Procfile`, `pyproject.toml`, CI, dependabot).
+Each finding was reproduced with a test that fails before its fix.
+
+- **P2, regression from this pass (fixed).** The `edit_message`
+  caption-too-long fallback always retried with an empty caption. That is
+  right for a split mirror, but a mirror sent with its whole (≤1024) caption,
+  whose source caption was later edited past the limit, lost its caption
+  entirely (before this pass it just kept the old one). The fallback now
+  re-reads the mirror (`get_messages`, only on this rare error path) and keeps
+  its current caption and entities. Test:
+  `tests/test_edit_message_caption_split.py::test_unsplit_mirror_keeps_its_caption_when_the_source_outgrows_the_limit`.
+- **P3, from this pass (fixed).** `_edit_links_pass` skipped every media
+  mirror whose text is >1024, but a Premium mirror account sends such a
+  caption whole, so its links would never be fixed. Only an *empty*-caption
+  media mirror (a split one) is skipped now. Test:
+  `tests/test_past_mode.py::test_edit_links_pass_fixes_long_caption_sent_whole`.
+- **P3, latent, from this pass (fixed).** `_edit_links_pass` ran every mirror
+  through the pair's *first* copy-mode direction's filters. Two topic
+  directions of one pair with different `filters:` got each other's chain.
+  Each mirror now uses its own direction (`EventProcessor._config_for_topic`
+  on the row's `source_topic_id`/`mirror_topic_id`), for `fallback_link_url`
+  as well. Both live configs share one filter chain, so it never fired. Test:
+  `tests/test_past_mode.py::test_edit_links_pass_uses_each_mirrors_own_direction_filters`.
+- **Docs (fixed).** `README.md`'s variable table and `app.json` said
+  `PAST_MODE` replays history "on startup". `main.py` (and `Procfile`'s
+  `web: python main.py`) never reads it: only `past_mode.py` replays. Both
+  texts now say so.
+
+Re-verified, no change: the crop filter, the MP4 declaration, and the
+media-like skips were re-read against GIF (`.gif.mp4` keeps its name), static
+sticker, and stamped-GIF-then-rename paths. The `ForwardFormatFilter` mixin
+switch leaves an entity that ends exactly at the placeholder untouched.
+
+Full suite 514 → 517, `pyflakes`, `ruff` and `mypy .` green.

@@ -256,3 +256,42 @@ def test_channels_list_includes_source(monkeypatch):
     _, res = _run({}, _photo_message(_Client()), channels=[CHAT_ID])
     assert calls == {"remove": 1, "stamp": 1}
     assert res.media == "HANDLE"
+
+
+# ── stickers / container (Pass 21) ───────────────────────────────────────────
+
+def test_video_sticker_is_not_stamped(monkeypatch):
+    """A video sticker is a webm with alpha carrying DocumentAttributeVideo;
+    re-encoding it to H.264 (no alpha) while still declaring it a
+    `video/webm` sticker would break it — pass it through untouched."""
+    calls = _video_spies(monkeypatch)
+    msg = _video_message(_Client())
+    msg.media.document.mime_type = "video/webm"
+    msg.media.document.attributes = [
+        types.DocumentAttributeVideo(duration=3, w=512, h=512),
+        types.DocumentAttributeSticker(alt="😀", stickerset=types.InputStickerSetEmpty()),
+        types.DocumentAttributeFilename(file_name="sticker.webm"),
+    ]
+    original = msg.media
+    _, res = _run({}, msg)
+    assert calls == {"remove": 0, "stamp": 0}
+    assert res.media is original
+
+
+def test_stamped_webm_is_declared_as_mp4(monkeypatch):
+    """ffmpeg always writes the stamped video as MP4 (H.264) — the re-upload
+    must say so instead of inheriting the source's webm/mkv container, and
+    must not mutate the source document's own attributes."""
+    _video_spies(monkeypatch)
+    msg = _video_message(_Client())
+    msg.media.document.mime_type = "video/webm"
+    src_name = types.DocumentAttributeFilename(file_name="clip.final.webm")
+    msg.media.document.attributes = [
+        types.DocumentAttributeVideo(duration=3, w=640, h=360), src_name,
+    ]
+    _, res = _run({}, msg)
+    assert res.media.mime_type == "video/mp4"
+    names = [a.file_name for a in res.media.attributes
+             if isinstance(a, types.DocumentAttributeFilename)]
+    assert names == ["clip.final.mp4"]
+    assert src_name.file_name == "clip.final.webm"

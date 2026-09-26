@@ -119,7 +119,11 @@ class WatermarkRemovalFilter(MessageFilter):
         elif isinstance(message.media, types.MessageMediaDocument):
             doc = message.media.document
             video_attr = None
-            if isinstance(doc, types.Document):
+            # A video sticker is a webm with alpha that also carries
+            # DocumentAttributeVideo — never re-encode it (H.264 has no alpha).
+            if isinstance(doc, types.Document) and not any(
+                isinstance(a, types.DocumentAttributeSticker) for a in doc.attributes
+            ):
                 video_attr = next(
                     (
                         a
@@ -273,8 +277,19 @@ class WatermarkRemovalFilter(MessageFilter):
                 # into a plain video. Re-declare the source doc's attributes
                 # explicitly instead (same pattern as
                 # RestrictSavingContentBypassFilter._process_document).
+                # ffmpeg always writes MP4 here, so a webm/mkv source's
+                # container must not be declared: mime and filename extension
+                # are rewritten (on copies — the source doc stays untouched).
+                attributes = [
+                    types.DocumentAttributeFilename(
+                        file_name=os.path.splitext(a.file_name)[0] + ".mp4"
+                    )
+                    if isinstance(a, types.DocumentAttributeFilename)
+                    else a
+                    for a in doc.attributes
+                ]
                 return types.InputMediaUploadedDocument(
-                    file=handle, mime_type=doc.mime_type, attributes=doc.attributes
+                    file=handle, mime_type="video/mp4", attributes=attributes
                 )
             return None
         finally:

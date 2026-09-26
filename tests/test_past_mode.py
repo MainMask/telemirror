@@ -516,11 +516,22 @@ def test_replay_mixed_strategies_warns(monkeypatch, caplog):
 # --- _edit_links_pass ----------------------------------------------------
 
 class _EditFakeClient:
-    def __init__(self, src_messages):
+    """Serves source messages for SRC and the mirrors' current content for
+    TGT. A mirror not given in ``mirrors`` holds stale text (not yet fixed),
+    so the pass has something to edit."""
+
+    def __init__(self, src_messages, mirrors=None):
         self._src = {m.id: m for m in src_messages}
+        self._mirrors = mirrors or {}
         self.edits = []
 
     async def get_messages(self, entity, ids=None, limit=None, **kw):
+        if ids is not None and entity == TGT:
+            return [
+                self._mirrors.get(i)
+                or types.Message(id=i, peer_id=types.PeerChannel(2), message="stale")
+                for i in ids
+            ]
         if ids is not None:
             return [self._src.get(i) for i in ids]
         return _Total(len(self._src))
@@ -568,7 +579,7 @@ class _BatchRecordingClient(_EditFakeClient):
         self.batch_sizes = []
 
     async def get_messages(self, entity, ids=None, limit=None, **kw):
-        if ids is not None:
+        if ids is not None and entity != TGT:  # source batches only
             self.batch_sizes.append(len(ids))
         return await super().get_messages(entity, ids=ids, limit=limit, **kw)
 
@@ -677,3 +688,126 @@ def test_edit_links_pass_resolves_topic_scoped_mirror():
     entity, message_id, _text, ents = client.edits[0]
     assert (entity, message_id) == (TGT, 910)
     assert ents[0].url == private_message_link(TGT, 907)
+
+
+# --- _edit_links_pass: compares with the mirror, keeps text filters (Pass 21)
+
+def _linking_source(points_to=7, text="see"):
+    src_peer = -SRC - 1000000000000
+    return types.Message(
+        id=10,
+        peer_id=types.PeerChannel(1),
+        message=text,
+        entities=[types.MessageEntityTextUrl(
+            offset=0, length=3, url=f"https://t.me/c/{src_peer}/{points_to}"
+        )],
+    )
+
+
+def _pass_db():
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([
+        MirrorMessage(10, SRC, 910, TGT),
+        MirrorMessage(7, SRC, 907, TGT),
+    ]))
+    return db
+
+
+def _edit_pass(client, db, filters=None):
+    cfg = _cfg(PastModeConfig(full_history=True, send_delay=0))
+    if filters is not None:
+        cfg = DirectionConfig(
+            disable_delete=False, disable_edit=False, filters=filters,
+            past_mode=cfg.past_mode,
+        )
+    run(past_mode._edit_links_pass(client, db, {(SRC, TGT): [cfg]}, _LOG))
+
+
+def test_edit_links_pass_skips_mirror_that_already_has_the_link():
+    """The link was resolved when the mirror was sent (the referenced message
+    was mirrored earlier): re-sending the identical edit only draws a
+    MessageNotModifiedError and burns an edit request on every run."""
+    from telemirror.misc.links import private_message_link
+
+    already = types.Message(
+        id=910, peer_id=types.PeerChannel(2), message="see",
+        entities=[types.MessageEntityTextUrl(
+            offset=0, length=3, url=private_message_link(TGT, 907)
+        )],
+    )
+    client = _EditFakeClient([_linking_source()], mirrors={910: already})
+    _edit_pass(client, _pass_db())
+    assert client.edits == []
+
+
+def test_edit_links_pass_keeps_text_filter_output():
+    """The edit is built through the direction's filter chain, same as
+    new_message — a KeywordReplaceFilter's replacement isn't reverted to
+    the raw source text."""
+    from telemirror.messagefilters import KeywordReplaceFilter
+
+    client = _EditFakeClient([_linking_source()])
+    _edit_pass(client, _pass_db(), filters=KeywordReplaceFilter({"see": "look"}))
+    assert [(m, t) for _e, m, t, _ents in client.edits] == [(910, "look")]
+
+
+def test_edit_links_pass_respects_a_discarding_filter():
+    from telemirror.messagefilters import SkipWithKeywordsFilter
+
+    client = _EditFakeClient([_linking_source()])
+    _edit_pass(client, _pass_db(), filters=SkipWithKeywordsFilter({"see"}))
+    assert client.edits == []
+
+
+def test_edit_links_pass_skips_split_caption_mirror():
+    """A >1024 caption was split at send time (media with an empty caption +
+    an untracked text reply); the caption can't take the full text back."""
+    long_src = _linking_source(text="see" + "x" * 1100)
+    split_mirror = types.Message(
+        id=910, peer_id=types.PeerChannel(2), message="",
+        media=types.MessageMediaPhoto(photo=types.PhotoEmpty(id=1)),
+    )
+    client = _EditFakeClient([long_src], mirrors={910: split_mirror})
+    _edit_pass(client, _pass_db())
+    assert client.edits == []
+
+
+def test_edit_links_pass_fixes_long_caption_sent_whole():
+    """A Premium mirror account sends a >1024 caption whole (no split): its
+    stale link must still be fixed — only an *empty*-caption media mirror
+    is a split one."""
+    long_src = _linking_source(text="see" + "x" * 1100)
+    whole_mirror = types.Message(
+        id=910, peer_id=types.PeerChannel(2), message="see" + "x" * 1100,
+        media=types.MessageMediaPhoto(photo=types.PhotoEmpty(id=1)),
+    )
+    client = _EditFakeClient([long_src], mirrors={910: whole_mirror})
+    _edit_pass(client, _pass_db())
+    assert [m for _e, m, _t, _ents in client.edits] == [910]
+
+
+def test_edit_links_pass_uses_each_mirrors_own_direction_filters():
+    """Two topic directions of one pair with different filter chains: each
+    mirror's edit goes through the chain of the direction that produced it
+    (matched by its source/mirror topic), not the pair's first one."""
+    from telemirror.messagefilters import KeywordReplaceFilter
+
+    pm = PastModeConfig(full_history=True, send_delay=0)
+    topic5 = DirectionConfig(
+        disable_delete=False, disable_edit=False,
+        filters=KeywordReplaceFilter({"see": "look"}),
+        from_topic_id=5, to_topic_id=50, past_mode=pm,
+        fallback_link_url="https://t.me/Fallback",
+    )
+    topic6 = DirectionConfig(
+        disable_delete=False, disable_edit=False, filters=EmptyMessageFilter(),
+        from_topic_id=6, to_topic_id=60, past_mode=pm,
+        fallback_link_url="https://t.me/Fallback",
+    )
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([
+        MirrorMessage(10, SRC, 910, TGT, mirror_topic_id=60, source_topic_id=6),
+    ]))
+    client = _EditFakeClient([_linking_source(points_to=999)])
+    run(past_mode._edit_links_pass(client, db, {(SRC, TGT): [topic5, topic6]}, _LOG))
+    assert [(m, t) for _e, m, t, _ents in client.edits] == [(910, "see")]

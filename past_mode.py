@@ -38,10 +38,10 @@ except Exception:
     print("Failed reading .env")
     raise
 
-from telethon import TelegramClient, errors, utils
+from telethon import TelegramClient, errors, events, utils
 from telethon.tl import types
 
-from telemirror.messagefilters import MediaDownloadError
+from telemirror.messagefilters import FilterAction, MediaDownloadError
 from telemirror.mirroring import EventProcessor
 from telemirror.misc.links import private_message_link
 from telemirror.misc.log_setup import setup_stdout_logger
@@ -447,12 +447,14 @@ async def _edit_links_pass(
 ) -> None:
     """Second pass: fixes cross-channel links in already-sent messages."""
     for (source_id, target_id), cfgs in pairs.items():
-        # Work here is pair-wide (binding_id is keyed by channel pair); take the
-        # pair's first copy-mode topic — fallback_link_url/send_delay are the
-        # same across the pair's topics.
-        cfg = next((c for c in cfgs if c.mode == "copy"), None)
-        if cfg is None:
+        # Work here is pair-wide (binding_id is keyed by channel pair); the
+        # pair's first copy-mode topic drives send_delay. Each mirror's own
+        # filters/fallback_link_url come from the direction that produced it
+        # (matched by its topics, see below).
+        copy_cfgs = [c for c in cfgs if c.mode == "copy"]
+        if not copy_cfgs:
             continue
+        cfg = copy_cfgs[0]
         assert cfg.past_mode is not None, "pairs values are pre-filtered to past_mode-configured cfgs"
 
         prefix = f"[EditPass] {source_id}→{target_id}"
@@ -490,6 +492,8 @@ async def _edit_links_pass(
                 logger.warning(f"{prefix}: failed to fetch message batch: {e}")
                 break
 
+            # (mirror, text, entities) the mirror should now carry.
+            planned: List[Tuple[MirrorMessage, str, list]] = []
             for src_msg in src_batch:
                 if not src_msg or not src_msg.entities:
                     continue
@@ -508,17 +512,18 @@ async def _edit_links_pass(
                 # mirror of this src_msg — same reasoning as `new_message`/
                 # `new_album`'s per-event cache in mirroring.py.
                 link_cache: dict = {}
-                # Baseline for the text/url-changed check below — identical
-                # for every mirror of this src_msg, so computed once here
-                # rather than re-derived from a fresh copy_message() per
-                # mirror (which would also deep-copy .media, unused in this
-                # path, on every iteration).
+                # Baseline for the "does this pass touch any link at all"
+                # check below — identical for every mirror of this src_msg.
                 entities_before = deepcopy(src_msg.entities)
                 text_before = src_msg.message
                 for mirror in mirror_map[src_msg.id]:
+                    mirror_cfg = EventProcessor._config_for_topic(
+                        copy_cfgs, mirror.source_topic_id, mirror.mirror_topic_id,
+                        lambda c: False,
+                    ) or cfg
                     msg_copy = processor.copy_message(src_msg)
                     await processor._rewrite_links(
-                        msg_copy, source_id, target_id, cfg.fallback_link_url,
+                        msg_copy, source_id, target_id, mirror_cfg.fallback_link_url,
                         link_cache=link_cache, to_topic_id=mirror.mirror_topic_id,
                     )
 
@@ -530,24 +535,82 @@ async def _edit_links_pass(
                         )
                     )
                     if not text_changed and not url_changed:
-                        continue
+                        continue  # no link this pass rewrites
 
+                    # Same order as new_message: rewrite links, then the
+                    # direction's filters — so text filters (KeywordReplace,
+                    # UrlMessage, ForwardFormat) aren't reverted by this edit.
+                    # Media is dropped first: only text is edited here, and
+                    # every re-uploading filter is a no-op without media.
+                    msg_copy.media = None
                     try:
-                        await client.edit_message(
-                            entity=target_id,
-                            message=mirror.mirror_id,
-                            text=msg_copy.message,
-                            formatting_entities=msg_copy.entities,
+                        action, filtered = await mirror_cfg.filters.process(
+                            msg_copy, events.NewMessage.Event
                         )
-                        edited += 1
-                        logger.info(f"{prefix}: fixed link in {mirror.original_id}→{mirror.mirror_id}")
-                        if cfg.past_mode.send_delay:
-                            await asyncio.sleep(cfg.past_mode.send_delay)
                     except Exception as e:
                         logger.warning(
-                            f"{prefix}: error editing {mirror.mirror_id}: "
+                            f"{prefix}: filter chain failed for {mirror.mirror_id}: "
                             f"{type(e).__name__}: {e}"
                         )
+                        continue
+                    if action is FilterAction.DISCARD:
+                        continue
+                    # A single message in → a single message back (see
+                    # EventProcessor.edit_message).
+                    assert not isinstance(filtered, list)
+                    planned.append(
+                        (mirror, filtered.message or "", filtered.entities or [])
+                    )
+
+            if not planned:
+                continue
+
+            # Compare with what each mirror carries now: one that already has
+            # the rewritten link (resolved at send time, or fixed by an
+            # earlier run) needs no edit — it would only draw a
+            # MessageNotModifiedError and burn an edit request.
+            try:
+                current_batch = await client.get_messages(
+                    target_id, ids=[m.mirror_id for m, _t, _e in planned]
+                )
+            except Exception as e:
+                logger.warning(f"{prefix}: failed to fetch mirror batch: {e}")
+                continue
+            current = {m.id: m for m in current_batch if m}
+
+            for mirror, text, entities in planned:
+                cur = current.get(mirror.mirror_id)
+                if cur is None:
+                    continue  # mirror deleted
+                if (cur.message or "") == text and list(cur.entities or []) == entities:
+                    continue
+                if (
+                    cur.media is not None
+                    and not isinstance(cur.media, types.MessageMediaWebPage)
+                    and not cur.message
+                    and len(utils.add_surrogate(text)) > 1024
+                ):
+                    # Sent via the caption-split fallback (empty caption + an
+                    # untracked text reply): the caption can't hold this text.
+                    # A long caption sent whole (Premium account) is edited.
+                    continue
+
+                try:
+                    await client.edit_message(
+                        entity=target_id,
+                        message=mirror.mirror_id,
+                        text=text,
+                        formatting_entities=entities,
+                    )
+                    edited += 1
+                    logger.info(f"{prefix}: fixed link in {mirror.original_id}→{mirror.mirror_id}")
+                    if cfg.past_mode.send_delay:
+                        await asyncio.sleep(cfg.past_mode.send_delay)
+                except Exception as e:
+                    logger.warning(
+                        f"{prefix}: error editing {mirror.mirror_id}: "
+                        f"{type(e).__name__}: {e}"
+                    )
 
         if edited:
             logger.info(f"{prefix}: fixed {edited} message(s)")

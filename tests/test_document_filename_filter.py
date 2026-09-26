@@ -152,3 +152,81 @@ def test_flood_during_rename_reupload_propagates():
     f = DocumentFilenameFilter(suffix="@CitadelClan")
     with pytest.raises(errors.FloodWaitError):
         run(f._process_message(_doc_message(_FloodClient()), events.NewMessage.Event))
+
+
+# ── media-like documents pass through (Pass 21) ─────────────────────────────
+# The class docstring promises voice notes, stickers and GIFs pass through.
+# Telegram does attach a DocumentAttributeFilename to some of them (e.g.
+# "sticker.webp"), so the filter must decide by kind, not by the filename's
+# presence — otherwise every sticker was downloaded and re-uploaded renamed.
+
+_MEDIA_LIKE = {
+    "sticker": [
+        types.DocumentAttributeSticker(alt="😀", stickerset=types.InputStickerSetEmpty()),
+        types.DocumentAttributeFilename(file_name="sticker.webp"),
+    ],
+    "voice": [
+        types.DocumentAttributeAudio(duration=3, voice=True),
+        types.DocumentAttributeFilename(file_name="voice.ogg"),
+    ],
+    "round": [
+        types.DocumentAttributeVideo(duration=3, w=240, h=240, round_message=True),
+        types.DocumentAttributeFilename(file_name="round.mp4"),
+    ],
+    "gif": [
+        types.DocumentAttributeVideo(duration=3, w=480, h=270),
+        types.DocumentAttributeAnimated(),
+        types.DocumentAttributeFilename(file_name="animation.mp4"),
+    ],
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_MEDIA_LIKE))
+def test_media_like_documents_pass_through_untouched(kind):
+    client = _WorkingClient()
+    msg = _doc_message(client)
+    msg.media.document.attributes = list(_MEDIA_LIKE[kind])
+    original = msg.media
+
+    action, res = run(
+        DocumentFilenameFilter(suffix="@CitadelClan")._process_message(
+            msg, events.NewMessage.Event
+        )
+    )
+    assert action is FilterAction.CONTINUE
+    assert res.media is original
+    assert client.download_calls == 0
+
+
+@pytest.mark.parametrize("kind", sorted(_MEDIA_LIKE))
+def test_media_like_already_uploaded_documents_keep_their_name(kind):
+    """Same rule for the in-place patch of an upstream re-upload
+    (RestrictSavingContentBypassFilter's InputMediaUploadedDocument)."""
+    attrs = [
+        types.DocumentAttributeFilename(file_name=a.file_name)
+        if isinstance(a, types.DocumentAttributeFilename) else a
+        for a in _MEDIA_LIKE[kind]
+    ]
+    msg = make_message(
+        media=types.InputMediaUploadedDocument(
+            file="h", mime_type="x/y", attributes=attrs
+        )
+    )
+    before = [getattr(a, "file_name", None) for a in attrs]
+    run(DocumentFilenameFilter(suffix="@CitadelClan")._process_message(
+        msg, events.NewMessage.Event
+    ))
+    assert [getattr(a, "file_name", None) for a in msg.media.attributes] == before
+
+
+def test_regular_document_is_still_renamed():
+    client = _WorkingClient()
+    _, res = run(
+        DocumentFilenameFilter(suffix="@CitadelClan")._process_message(
+            _doc_message(client), events.NewMessage.Event
+        )
+    )
+    assert isinstance(res.media, types.InputMediaUploadedDocument)
+    names = [a.file_name for a in res.media.attributes
+             if isinstance(a, types.DocumentAttributeFilename)]
+    assert names == ["lecture - @CitadelClan.pdf"]

@@ -21,12 +21,26 @@ from .base import FilterAction, FilterResult, MessageFilter
 logger = logging.getLogger(__name__)
 
 
+def _is_media_like(attributes) -> bool:
+    """Stickers, voice notes, round videos and GIFs: media the user never sees
+    a file name for. Telegram still attaches a ``DocumentAttributeFilename``
+    to some of them (e.g. ``sticker.webp``), so this decides by kind, not by
+    whether a filename is present."""
+    return any(
+        isinstance(a, (types.DocumentAttributeSticker, types.DocumentAttributeAnimated))
+        or (isinstance(a, types.DocumentAttributeAudio) and a.voice)
+        or (isinstance(a, types.DocumentAttributeVideo) and a.round_message)
+        for a in attributes
+    )
+
+
 class DocumentFilenameFilter(MessageFilter):
     """Rewrites the filename of mirrored documents.
 
     Appends ``suffix`` and removes unwanted substrings (case-insensitive).
     Only documents that carry a ``DocumentAttributeFilename`` are affected;
-    voice notes, photos, stickers and GIFs have no filename and pass through.
+    photos have none, and stickers, voice notes, round videos and GIFs pass
+    through even when Telegram gives them one.
 
     Place after `RestrictSavingContentBypassFilter`: for a `noforwards` source
     that filter already re-uploads the file, so this one only patches the
@@ -89,6 +103,8 @@ class DocumentFilenameFilter(MessageFilter):
         # Already re-uploaded upstream (e.g. RestrictSavingContentBypassFilter):
         # patch the filename attribute in place, no download.
         if isinstance(media, types.InputMediaUploadedDocument):
+            if _is_media_like(media.attributes):
+                return FilterResult(FilterAction.CONTINUE, message)
             for attr in media.attributes:
                 if isinstance(attr, types.DocumentAttributeFilename):
                     attr.file_name = self._rename(attr.file_name)
@@ -101,7 +117,7 @@ class DocumentFilenameFilter(MessageFilter):
 
         doc = media.document
         old_name = filename_of(doc)
-        if old_name is None:
+        if old_name is None or _is_media_like(doc.attributes):
             return FilterResult(FilterAction.CONTINUE, message)
 
         new_name = self._rename(old_name)
