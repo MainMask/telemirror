@@ -88,7 +88,7 @@
     # (Optional) Global filters, will be applied in order
     filters:
       - ForwardFormatFilter: # Filter name under ./telemirror/messagefilters
-          format: ""           # Filters arguments
+          format: "{message_text}" # Filters arguments
       - EmptyMessageFilter
       - UrlMessageFilter:
           blacklist: !!set

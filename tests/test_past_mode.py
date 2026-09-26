@@ -524,6 +524,7 @@ class _EditFakeClient:
         self._src = {m.id: m for m in src_messages}
         self._mirrors = mirrors or {}
         self.edits = []
+        self.edit_kwargs = []
 
     async def get_messages(self, entity, ids=None, limit=None, **kw):
         if ids is not None and entity == TGT:
@@ -538,6 +539,7 @@ class _EditFakeClient:
 
     async def edit_message(self, entity, message, text, formatting_entities=None, **kw):
         self.edits.append((entity, message, text, formatting_entities))
+        self.edit_kwargs.append(kw)
 
 
 def test_edit_links_pass_rewrites_cross_message_link(monkeypatch):
@@ -784,6 +786,20 @@ def test_edit_links_pass_fixes_long_caption_sent_whole():
     client = _EditFakeClient([long_src], mirrors={910: whole_mirror})
     _edit_pass(client, _pass_db())
     assert [m for _e, m, _t, _ents in client.edits] == [910]
+
+
+@pytest.mark.parametrize("has_preview", [False, True])
+def test_edit_links_pass_keeps_the_mirrors_link_preview_state(has_preview):
+    """Telethon's edit_message defaults to link_preview=True: without an
+    explicit value the edit would add a preview to a mirror that has none."""
+    mirror = types.Message(
+        id=910, peer_id=types.PeerChannel(2), message="stale",
+        media=types.MessageMediaWebPage(webpage=types.WebPageEmpty(id=1))
+        if has_preview else None,
+    )
+    client = _EditFakeClient([_linking_source()], mirrors={910: mirror})
+    _edit_pass(client, _pass_db())
+    assert [kw.get("link_preview") for kw in client.edit_kwargs] == [has_preview]
 
 
 def test_edit_links_pass_uses_each_mirrors_own_direction_filters():

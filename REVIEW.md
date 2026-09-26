@@ -3146,3 +3146,179 @@ Full suite 544 → 549, `pyflakes`, `ruff` and `mypy .` green.
   (failed before the fix).
 
 Full suite 549 → 550, `pyflakes`, `ruff` and `mypy .` green.
+
+# Pass 23 — whole-project review; edit pass added link previews
+
+Requested by the project owner: a whole-project code review per `CLAUDE.md`,
+every suspected bug re-verified before a verdict, then "fix everything". The
+owner chose to fix only the confirmed bug below. Baseline at `11f8a2c`: 550
+tests, `pyflakes`, `ruff`, `mypy` green.
+
+## Fixed
+
+- **P3, visible** `past_mode.py::_edit_links_pass` called
+  `client.edit_message` without `link_preview`. Telethon 1.44 defaults it to
+  `True`, so every link-fix edit sent `EditMessageRequest(no_webpage=False)`,
+  and a mirror sent without a preview (the source had none) got one after the
+  pass, e.g. a `fallback_link_url` channel card. The live
+  `EventProcessor.edit_message` already passes it explicitly. Repro: the
+  request captured from a real `TelegramClient` had `no_webpage=False` for a
+  preview-less source and mirror. The edit now keeps the mirror's own state
+  (`link_preview=isinstance(cur.media, MessageMediaWebPage)`, `cur` being
+  the mirror already fetched for the not-modified check). Test:
+  `tests/test_past_mode.py::test_edit_links_pass_keeps_the_mirrors_link_preview_state`
+  (both cases fail before the fix).
+
+## Needs a live check — no change
+
+- Telethon 1.44's `edit_message` has no `invert_media` parameter, so every
+  mirror edit (live `edit_message` and `_edit_links_pass`) sends the request
+  without that flag. If the server resets it, a post with its preview/caption
+  above the content would flip after an edit. The request is confirmed; the
+  server's reaction can't be checked offline. A fix would need a vendored edit
+  in `telemirror/_patch/sending.py`.
+
+## Re-verified, intended — no change
+
+- A split-caption mirror (captionless media + untracked text reply) whose
+  source caption is later edited to ≤1024 gets the caption on the media while
+  the old reply stays. This follows from the untracked tail (see `_do_edit`).
+- `_sync_broadcast_channel` drops `broadcast_sync` rows even when Telegram
+  refused the delete, so the delete isn't retried. Deletes are best-effort
+  project-wide; the live path has no retry either.
+- `_username_id_cache` stores successful resolutions only: deliberate (see the
+  comment in `EventProcessor.__init__`).
+- `alert.py` treats `TECH_CHANNEL=0` as set, while `config.py` treats it as
+  unset. Not reachable with the live `.env`.
+- `PostgresDatabase._async__init__` leaves the pool open if table creation
+  fails; the process exits right after.
+- No channel is both a source and a recipient in either config, so
+  `restrict_saving.py` can't set `noforwards` on a source (which would block
+  the broadcast directions' `EmptyMessageFilter`).
+
+Full suite 550 → 552, `pyflakes`, `ruff` and `mypy .` green.
+
+## Pass 23, second review — README example, cross-config links
+
+A second whole-project review, requested by the owner, took angles the first
+read covered less: the docs and example configs loaded through the real
+`config.py`, both live config files, filter/link-rewrite interplay across the
+two configs, and test isolation. The owner left the fix choice to the reviewer.
+
+- **P3, docs (fixed).** README's "mirroring config overview" YAML didn't load:
+  `ForwardFormatFilter: format: ""` is rejected at construction since the
+  earlier P2 fix (`format must contain {message_text}`). Repro: the block
+  loaded as `YAML_CONFIG_ENV` raised that `ValueError`. Now
+  `format: "{message_text}"`. New `tests/test_readme_examples.py` loads every
+  README YAML example that has `directions:` through `config.py` in a
+  subprocess (failed before the fix).
+- **P3, cross-config links — known limitation, not fixed.** `main.py`
+  loads only `mirror.config.yml`, the course replay only
+  `citadel_courses.config.yml`, and both write to one database. A link to a
+  post that the *other* process mirrored finds no `CHAT_MAPPING` entry and is
+  left untouched, so the mirror shows the donor's private link instead of
+  `fallback_link_url`. Repro on `EventProcessor`: a course-only mapping kept
+  `t.me/c/<live donor>/5`, a merged one gave the fallback. A fix keyed on
+  `binding_id` rows was tried and reverted (see the session-diff review
+  below); whether donor posts carry such cross-set links can't be told offline.
+
+## Needs an owner check — no change
+
+- Links are rewritten before the filters. If a username in the
+  `SkipWithUrlFilter` blacklist (`frmtribune`, `godolympbot`, `managerfrm`,
+  `mngrfrm`, `openfrm`, `svyazfromonacobot`) is itself a mirrored donor, its
+  `t.me/<name>/<id>` links become mirror links and the blacklist never sees
+  them. Resolving the names needs the shared session, so it wasn't run; a
+  read-only one-off check was handed to the owner (not committed).
+
+Checked, no issue: `mirror.config.yml-example` and `.env-example`'s
+`YAML_CONFIG_ENV` load; the course config loads (74 directions, all
+`past_mode`), neither config holds a literal `\n` that `config.py` would
+rewrite; `deploy/README.md` matches the units; `setup-swap.sh` doesn't
+duplicate the fstab line; the suite passes without `.env` (as in CI).
+
+Full suite 552 → 556, `pyflakes`, `ruff` and `mypy .` green (see below).
+
+## Pass 23 session-diff review — the cross-config link fix reopened the blacklist bypass
+
+A review of every change made in this pass, requested by the owner.
+
+- **P2-class, regression from this pass (reverted).** The second-review fix
+  gave `fallback_link_url` to a link whose channel isn't in this process's
+  `CHAT_MAPPING` but whose post has `binding_id` rows. It assumed blacklisted
+  channels were never mirrored. That doesn't hold: `1acfa23` dropped 57 sources
+  from the configs, and `clear_channels` deletes rows by mirror channel, so a
+  retired donor's rows stay. A blacklisted retired donor then got the fallback,
+  and `SkipWithUrlFilter` never saw its link — the Pass 22 fifth-review bypass
+  again. Repro on the live filter chain: HEAD `t.me/openfrm/12 -> DISCARDED`,
+  the fix `t.me/CitadelClan -> SENT`. Reachability in production is unknown
+  (the local DB is empty), but the blacklist is the owner's priority (Pass 22),
+  so the change was reverted rather than narrowed; `mirroring.py` equals HEAD.
+  Test:
+  `tests/test_tg_message_link_forms.py::test_blacklisted_channel_outside_the_config_stays_blocked`
+  (failed on the fix). The 0.25 ms lookup measurement only applied to the
+  reverted change.
+- **Nit (fixed).** `tests/test_readme_examples.py`'s assert message indexed
+  the last stderr line, which raised `IndexError` on an empty stderr; it now
+  shows `stderr[-500:]`.
+
+Re-verified, no change: `_edit_links_pass`'s `link_preview` (a captioned media
+mirror is unaffected; a `WebPageEmpty` preview is kept); the README example
+test is isolated in a subprocess.
+
+Full suite 556 → 555 (two reverted-change cases replaced by one regression
+test), `pyflakes`, `ruff` and `mypy .` green, also without `.env`.
+
+## Pass 23, third review — album edits/deletes inside the album-event delay
+
+A third whole-project review, requested by the owner, took angles the earlier
+reads hadn't: filters on album edits, media kinds (stickers, round videos,
+GIFs, photos sent as files), and concurrent update dispatch.
+
+## Fixed
+
+- **P3, narrow window** Telethon dispatches `events.Album` only
+  `_HACK_DELAY` (1.01 s here) after the album's last item, while
+  `MessageEdited`/`MessageDeleted` are dispatched at once, and `_track_fanout`
+  registers an album only when `new_album` starts. An edit or delete in that
+  window found no rows and no in-flight fan-out and was dropped; the album was
+  then mirrored with the old caption (or left after its source was deleted).
+  Repro with that timing on the real `EventProcessor`:
+  `No target messages to edit`, album sent as `['old caption', '']`, edits
+  `[]`. Single messages have no such window. Fix in `mirroring.py`: the delay
+  is one constant (`_ALBUM_EVENT_DELAY_SEC`, also passed to
+  `set_album_event_timeout`). An edit that finds no rows, of an album item
+  posted in the last `_ALBUM_EDIT_RACE_WINDOW_SEC` (30 s), waits
+  `_ALBUM_EVENT_GRACE_SEC` (1.51 s) once, then waits for the in-flight fan-out
+  and re-reads. A delete that finds no rows does the same when some direction
+  of the chat has `disable_delete` off (`MessageDeleted` has no `grouped_id`
+  or date); the live donors (`disable_delete: true`) never wait, the broadcast
+  directions do. The two inline in-flight waits became `_await_fanouts`.
+  Cost: no API calls; only on those no-row paths, one sleep in that update's
+  own task (handlers run concurrently) and one indexed DB read. Old items
+  (e.g. `_sync_broadcast_channel` catch-up edits) never wait. With the real
+  constants the repro's edit reaches the mirror. Tests:
+  `tests/test_album_event_delay_race.py` (the edit and delete cases failed
+  before the fix; two more assert that no wait happens for an old item or a
+  delete-disabled chat). No existing test hits the wait (checked with
+  `--durations`).
+
+## Deferred (P3, latent)
+
+- `ForwardFormatFilter` on an album with no captions puts the header on item 0;
+  an edit of that item is skipped as an "empty album item", so the edit sends
+  an empty caption and the header is lost. Repro: sent `['\n\nvia Donor', '']`,
+  edit of item 1 → `''`. Neither config uses the filter.
+
+## Re-verified, no change
+
+- Stickers and video stickers aren't stamped; a stamped round video stays
+  square (even-crop of a square); a GIF keeps `DocumentAttributeAnimated`; a
+  photo sent as a file isn't stamped (the filter covers photos and videos).
+- Telethon runs with `sequential_updates=False` (a task per update);
+  `ReuploadCache` single-flights shared media, and past_mode's strict media
+  mode doesn't leak into live tasks.
+- Two concurrent copies of the same update would both pass the DB dedup, but
+  Telethon applies each pts once, so it isn't a practical path.
+
+Full suite 555 → 559, `pyflakes`, `ruff` and `mypy .` green, also without `.env`.

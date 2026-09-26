@@ -601,6 +601,9 @@ async def _edit_links_pass(
                         message=mirror.mirror_id,
                         text=text,
                         formatting_entities=entities,
+                        # Keep the mirror's own preview state: Telethon's
+                        # default (True) would add one to a mirror without it.
+                        link_preview=isinstance(cur.media, types.MessageMediaWebPage),
                     )
                     edited += 1
                     logger.info(f"{prefix}: fixed link in {mirror.original_id}→{mirror.mirror_id}")

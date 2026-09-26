@@ -61,6 +61,16 @@ _TAIL_SEND_FLOOD_RETRY_LIMIT = 20
 # loop recover from a flood that clears quickly.
 _TAIL_SEND_MAX_SINGLE_WAIT_SEC = 60
 
+# Telethon dispatches `events.Album` only this long after the album's last item
+# (see `set_album_event_timeout`), while an edit/delete of an item is dispatched
+# at once. An edit/delete that finds nothing in that window waits this long, once,
+# for the album fan-out to start (after that, `_fanout_inflight` covers it).
+_ALBUM_EVENT_DELAY_SEC = 1.01
+_ALBUM_EVENT_GRACE_SEC = _ALBUM_EVENT_DELAY_SEC + 0.5
+# Only an edit of an item posted this recently can be in that window; older ones
+# (e.g. `_sync_broadcast_channel` catch-up edits) never wait. Allows clock skew.
+_ALBUM_EDIT_RACE_WINDOW_SEC = 30
+
 # Returned by an `on_caption_too_long` hook passed to
 # `_send_with_reference_refresh` to say "already fully handled (including
 # config.send_delay) — the caller should just move on to the next target,
@@ -136,6 +146,19 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     if not bucket:
                         self._fanout_inflight.pop(key, None)
             done_future.set_result(None)
+
+    async def _await_fanouts(
+        self: "EventProcessor", chat_id: int, message_ids: List[int]
+    ) -> None:
+        """Wait for every in-flight new_message/new_album fan-out of these
+        source messages (see `_fanout_inflight`)."""
+        pending = {
+            future
+            for mid in message_ids
+            for future in self._fanout_inflight.get((chat_id, mid), [])
+        }
+        if pending:
+            await asyncio.gather(*pending)
 
     @property
     def logger(self: "EventProcessor") -> logging.Logger:
@@ -1485,11 +1508,18 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         # new_message/new_album fan-out for it — wait for that fan-out to
         # finish before reading the DB, so every target it actually reached
         # gets the edit, not just the ones tracked so far.
-        pending = self._fanout_inflight.get((chat_id, message.id))
-        if pending:
-            await asyncio.gather(*pending)
-
+        await self._await_fanouts(chat_id, [message.id])
         outgoing_messages = await self._database.get_messages(message.id, chat_id)
+        if (
+            not outgoing_messages
+            and message.grouped_id
+            and message.date is not None
+            and time.time() - message.date.timestamp() < _ALBUM_EDIT_RACE_WINDOW_SEC
+        ):
+            # The album event may not be dispatched yet: see _ALBUM_EVENT_DELAY_SEC.
+            await asyncio.sleep(_ALBUM_EVENT_GRACE_SEC)
+            await self._await_fanouts(chat_id, [message.id])
+            outgoing_messages = await self._database.get_messages(message.id, chat_id)
         if not outgoing_messages:
             self._logger.warning(
                 f"[Edit message]: No target messages to edit for {message_link}"
@@ -1774,17 +1804,22 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         # a still in-progress new_message/new_album fan-out for it — wait for
         # any such fan-out to finish before reading the DB, so we see every
         # target it actually reached instead of only the ones tracked so far.
-        pending = {
-            future
-            for mid in message_ids
-            for future in self._fanout_inflight.get((chat_id, mid), [])
-        }
-        if pending:
-            await asyncio.gather(*pending)
-
+        await self._await_fanouts(chat_id, message_ids)
         deleting_messages = await self._database.get_messages_batch(
             message_ids, chat_id
         )
+        if not deleting_messages and any(
+            not c.disable_delete
+            for cfgs in self._chat_mapping.get(chat_id, {}).values()
+            for c in cfgs
+        ):
+            # Maybe an album whose event isn't dispatched yet (see
+            # _ALBUM_EVENT_DELAY_SEC); MessageDeleted carries no grouped_id to tell.
+            await asyncio.sleep(_ALBUM_EVENT_GRACE_SEC)
+            await self._await_fanouts(chat_id, message_ids)
+            deleting_messages = await self._database.get_messages_batch(
+                message_ids, chat_id
+            )
         if not deleting_messages:
             self._logger.warning(
                 f"[Delete message]: No target messages to delete for chat#{chat_id}"
@@ -2427,7 +2462,7 @@ class Telemirror:
             broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup. Defaults to None.
             tech_channel (`int`, optional): Technical monitoring channel ID. Defaults to None.
         """
-        set_album_event_timeout(delay_sec=1.01)
+        set_album_event_timeout(delay_sec=_ALBUM_EVENT_DELAY_SEC)
 
         # Preparation for splitting receiver and sender. connection_retries=1000
         # keeps auto-reconnecting through a long outage instead of exiting; the

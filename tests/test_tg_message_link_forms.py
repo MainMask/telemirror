@@ -185,3 +185,30 @@ def test_username_resolution_failure_kinds(failure, expected):
     run(proc._rewrite_links(msg, SOURCE, TARGET, FALLBACK, {}, None))
 
     assert msg.entities[0].url == expected
+
+
+def test_blacklisted_channel_outside_the_config_stays_blocked():
+    """A retired donor (dropped from the config, its binding_id rows left
+    behind) that is blacklisted: its link must stay untouched so
+    SkipWithUrlFilter drops the post. Giving it the fallback because the post
+    has mirror rows (a reverted Pass 23 change) sent the promo post."""
+    old_raw = 3000000007
+    old = utils.get_peer_id(types.PeerChannel(old_raw))
+
+    class _RetiredClient:
+        async def get_entity(self, username):
+            return types.PeerChannel(old_raw)
+
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(12, old, 777, -1003000000008)))
+    proc = _processor(db)
+    proc._client = _RetiredClient()
+    url = "https://t.me/openfrm/12"
+    msg = make_message(
+        "promo", entities=[types.MessageEntityTextUrl(offset=0, length=5, url=url)]
+    )
+    run(proc._rewrite_links(msg, SOURCE, TARGET, FALLBACK, {}, None))
+
+    assert msg.entities[0].url == url
+    action, _ = run(SkipWithUrlFilter({"t.me/openfrm"}).process(msg, None))
+    assert action is FilterAction.DISCARD
