@@ -27,8 +27,9 @@ Full read ×2. Tests: 126 green, `pyflakes` + `ruff` clean.
   this aborts the rest of the fan-out for that message — a deliberate trade-off.
 - `_sync_broadcast_channel` is idempotent: a restart on an already-synced channel
   does ~0 re-sends; only message ids are held in memory, never the history.
-- `_sync_broadcast_channel` seeds `broadcast_sync` from `messages` when the table
-  is empty, so it doesn't re-mirror the whole channel history.
+- `_sync_broadcast_channel` no longer seeds an empty `broadcast_sync` from
+  `messages` (pass 20): every post goes through `new_message`, whose per-target
+  `already_mirrored` dedup skips targets that still hold a mirror.
 - `edit_message` edits each mirror once (first matching config); forward mode and
   `disable_edit` are skipped.
 - `delete_message`: `disable_delete` is honored per-channel; the DB rows for the
@@ -209,9 +210,9 @@ P1/P2 found. Added a test for `_edit_links_pass` (was uncovered).
   (which re-reads the already-advanced checkpoint).
 - A partial/failed (non-flood) `new_album` in past_mode STILL advances the
   checkpoint (`__handle_exceptions` swallows it) — the same trade-off as live.
-- `_integrity_check`: `checkpoint < max(original_id of mirrors)` → the checkpoint
-  is rolled forward to `max_mirrored` (gaps between them are skipped on resume —
-  logged explicitly).
+- `_integrity_check` never rolls the checkpoint forward (pass 20): rows past it
+  can come from the live mirror, and already-mirrored messages are skipped per
+  target by `new_message`'s own dedup.
 - `last_n` without a checkpoint → buffer into memory (newest first), reverse;
   with a checkpoint → stream with `min_id`, `iter_total = last_n - mirrors_done`.
 - Service messages (`iter_message_groups` drops non-`Message` items) produce no
@@ -2446,3 +2447,165 @@ finding, not a bug: the logger str/None → `Logger` resolution snippet
 when narrowing the type. Fixed by extracting a module-level
 `_resolve_logger(logger) -> logging.Logger` helper, used by both. Full
 suite (338), `ruff`, and `mypy .` re-verified green after the fix.
+
+# Pass 20 — whole-project review, two bugs + three P3 fixed
+
+Requested by the project owner: a whole-project code review per `CLAUDE.md`,
+with every suspected bug re-verified (intended vs. real) before a verdict,
+then "fix everything". Baseline at `0ddb56a`: 433 tests, `ruff`, `mypy` green.
+Each fix below has a regression test confirmed to fail on the pre-fix code.
+
+## Fixed
+
+- **P2** `past_mode.py::_integrity_check` rolled the checkpoint forward to the
+  highest mirrored `original_id` of the pair. Rows past the checkpoint also
+  come from the live mirror (`main.py`) running between two past_mode runs:
+  a backfill interrupted at 50, then a live post 9000 mirrored, made the next
+  resume jump to 9000 and silently skip 51..8999 (only a stdout WARNING).
+  This also contradicted README ("re-running resumes from where it left
+  off") and pass 16's #9 (past_mode as the manual recovery path for live
+  gaps — it jumped over them). The roll-forward is redundant with
+  `new_message`/`new_album`'s per-target `already_mirrored` dedup, so it was
+  removed. Cost: a resume now also walks already-mirrored messages past the
+  checkpoint — one `get_messages` DB lookup each, ~1 `iter_messages` request
+  per 100, and the `pm.send_delay` sleep (0.5s default) in
+  `process_single`/`process_album`, which dominates (~17 min per 2 000
+  live-mirrored posts). `telemirror-past-courses.service` is unaffected (0
+  channel pairs shared with `mirror.config.yml`). Tests:
+  `tests/test_past_mode.py::test_integrity_keeps_checkpoint_below_max_mirrored`
+  (replaces `..._rolls_back_stale_checkpoint`),
+  `::test_integrity_does_not_skip_history_after_live_mirror_ran`.
+- **P2** `skylon_set/clear_channels.py::_reset_db_state` wiped `binding_id` and
+  checkpoints but not `broadcast_sync`, so after clearing broadcast targets
+  every admin post stayed marked synced and the next startup sync sent
+  nothing back. Owner's choice: reset `broadcast_sync` for `BROADCAST_CHANNEL`
+  when any cleared channel is one of its targets (reusing
+  `get_broadcast_sync`/`delete_broadcast_sync`, no `Database` change), **and**
+  drop `_sync_broadcast_channel`'s seed-from-`binding_id` step — with the seed,
+  a partial clear would re-mark a post synced as soon as any untouched target
+  still held it. `Database.get_all_messages_for_channel` (+ both
+  implementations) was only used by that seed and was removed as orphaned by
+  this change; its prefix-exactness test now covers
+  `get_messages_for_channel_pair`, which shares the same key-prefix logic.
+  Tests: `tests/test_broadcast_sync.py::test_empty_broadcast_sync_is_not_seeded_from_existing_mirrors`,
+  `::test_cleared_target_gets_broadcast_posts_back_other_target_is_skipped`
+  (real `EventProcessor`), `tests/test_clear_channels.py::test_reset_db_state_resets_broadcast_sync_only_for_broadcast_targets`.
+- **P3** `config.py`: `build_filters` for a direction's own `filters:` ran
+  inside the source × target loop, so each pair got its own filter instance
+  (and `ReuploadCache` — the same media downloaded/re-encoded per target).
+  Built once per direction now; `_media.py::ReuploadCache` docstring aligned.
+  Not triggered by the deployed configs (no direction-level `filters:`).
+  Test: `tests/test_config.py::test_direction_level_filters_are_built_once_per_direction`
+  (subprocess — `config.py` builds `CHAT_MAPPING` at import).
+- **P3** `mirroring.py::EventProcessor.edit_message`: a FloodWait from the
+  filter chain still fell through to the next sibling config immediately —
+  the same account-wide-flood reasoning `0ddb56a` applied to the edit send.
+  Now logs and gives up on that mirror message. Test:
+  `tests/test_edit_delete_flood_propagates.py::test_edit_message_flood_from_filters_process_skips_sibling_configs`.
+- **P3** `telemirror/health.py`: `ActiveState=failed` (and, via the "not
+  active twice in a row" rule, a second wording of it) was re-alerted every
+  10 minutes while the unit stayed failed, on top of `OnFailure=`'s alert.
+  Owner's choice: alert only on the transition into `failed`; `failed` now
+  counts as settled for the stuck-unit rule. Test:
+  `tests/test_health.py::test_failed_state_alerts_only_once`.
+
+## Re-verified, intended — no change
+
+- `DocumentFilenameFilter` mutating a cached re-upload handle's filename
+  attribute in place: `_rename` is idempotent and media is deep-copied per
+  target.
+- `edit_message`'s `fetch_fresh_media(…, message.id)` returning a single
+  media: the return shape mirrors `ids`.
+- Watchdog fail streak (3) vs. `WatchdogSec=600`, and the `/tmp` cron's
+  `-mmin +180` vs. real encode budgets.
+
+Full suite 433 → 440, `ruff` and `mypy .` green.
+
+## Pass 20 self-review — one regression from this pass found and fixed, plus a compose DSN fix
+
+A second whole-project review, requested by the owner before commit, covered
+this pass's own diff line by line, plus the files the first read only skimmed
+(`Dockerfile`, `docker-compose.yaml`, CI, `install.sh`, `setup-swap.sh`,
+`setup_mirrors.py`'s config writers).
+
+- **P2, regression introduced by this pass (fixed).** Dropping the
+  `broadcast_sync` seed left `EventProcessor._already_mirrored_skip` as the
+  only guard against a repeat send, and its legacy fallback kept
+  `(channel, None, None)` rows in a **set**: N untagged rows collapsed into one
+  key that could justify skipping only one config per channel. The broadcast
+  channel shipped on 2026-09-11 but `mirror_topic_id` only on 2026-09-17, so
+  posts from that window have one untagged row per topic of every forum
+  target. When `clear_channels.py` reset `broadcast_sync` while a forum
+  broadcast target was not cleared (its purge failed), the next startup sync
+  re-sent those posts into every topic of that forum but one. Reproduced
+  (2 legacy rows, topic configs 10 and 20 → a repeat send to topic 20).
+  Fixed by counting instead of collapsing: `already_mirrored` is a
+  `collections.Counter` in `new_message`/`new_album`, and each untagged row
+  covers exactly one config (N rows → up to N skips). Exact-key matches stay
+  non-consuming, as before. This also closes the same shape in live
+  redelivery and past_mode dedup. Tests:
+  `tests/test_broadcast_sync.py::test_empty_sync_does_not_duplicate_into_uncleared_forum_with_legacy_rows`
+  (fails before the fix), and
+  `tests/test_fanout_shared_helpers.py::test_already_mirrored_skip_two_legacy_rows_cover_two_configs`.
+  The existing helper tests now pass a `Counter`, with unchanged expectations.
+- **P3 (fixed).** `docker-compose.yaml` set a raw
+  `DATABASE_URL: postgres://${DB_USER}:${DB_PASS}@postgres/${DB_NAME}`, which
+  bypassed `config.build_dsn`'s percent-encoding. Confirmed with psycopg's
+  `conninfo_to_dict`: password `p@ss/w#rd` parses as `password='p'`,
+  `host='ss'`. It now sets `DB_HOST: postgres`, which overrides the `.env`
+  value, so `build_dsn` assembles the DSN. Production (systemd + `.env` with
+  `DB_*`) is unaffected.
+
+Re-verified, no change: the `#1 → #1` directions in both configs are forum
+General topics (every such recipient also has other topics); the non-forum
+supergroup branch of `setup_mirrors.step_build_config` doesn't occur in
+either config. `_append_directions_text` is guarded (`directions:` must be
+the last top-level key, `.bak` copy).
+
+Full suite 440 → 442, `ruff` and `mypy .` green.
+
+## Pass 20 follow-up — vendored `_patch` read in full, two `parse_mode` bugs fixed
+
+A further review pass on an unchanged tree read the one production module never
+read end to end: the vendored `telemirror/_patch/sending.py` (synced with
+Telethon 1.40, installed 1.44), traced against how `mirroring.py` calls it.
+Both findings were reproduced on a real `TelegramClient` with the outgoing
+request intercepted (no network).
+
+- **P2 (fixed)** `EventProcessor._send_tail_text` sent a split caption tail
+  with `formatting_entities=entities`, which is `None` when the >1024-char
+  caption of a single message had no formatting. The patched `send_message`
+  then runs a string through the client's `parse_mode` — `"markdown"`, set
+  project-wide by `build_telegram_client`. Repro: `"snake__case_var and
+  **2**x [a](b)"` was sent as `"snake__case_var and 2x a"` with a Bold entity
+  and a hidden link to `b`. This is not intended: the code deliberately sends
+  raw text plus explicit entities to avoid double-parsing (Telethon #3065,
+  `new_album`), and the patch passes `parse_mode=None` "to force using even
+  empty formatting_entities". Albums were unaffected (entities always `[]`).
+  Fixed with `formatting_entities=entities or []`. Test:
+  `tests/test_caption_too_long_split.py::test_tail_text_without_entities_is_not_markdown_parsed`
+  — the existing split tests stub `send_message` and could not see this.
+- **P3 (fixed)** `EventHandlers.on_private_message` sent the sanitised but
+  sender-controlled display name to TECH_CHANNEL through the same markdown
+  parse. A sender named `[Support](https://evil.example)` rendered as
+  "Support" with a hidden link. `TelegramLogHandler._do_send` has the same
+  class of problem: log text is never authored as markdown, so `__`/`**`/`[..](..)`
+  in exception messages or paths were mangled. Both now pass
+  `parse_mode=None`, as `telemirror/alert.py` already did. `past_mode.py`'s
+  final summary is left as is: it uses backticks deliberately. Tests:
+  `tests/test_on_private_message.py::test_sender_name_is_not_markdown_parsed`,
+  `tests/test_log_handler.py::test_do_send_disables_markdown_parsing`. The
+  fakes' `send_message` now accept `**kw`.
+
+Re-verified, no change:
+- the watermark / restrict-saving `InputFile` handles (`photo.jpg`) resolve to
+  `InputMediaUploadedPhoto` in both the single-message and album paths
+  (`utils.is_image` on the file name);
+- `InputMediaUploadedDocument` in an album goes through `UploadMediaRequest`
+  with its attributes intact;
+- album captions are never parsed (a list of per-item entity lists is always
+  truthy);
+- no divergence between the 1.40-synced patch and installed Telethon 1.44 in
+  any code path used here.
+
+Full suite 442 → 445, `ruff` and `mypy .` green.

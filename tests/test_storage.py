@@ -92,11 +92,11 @@ def test_capacity_evicts_oldest_mapping():
     assert run(db.get_messages(9, SRC))[0].mirror_id == 90  # newest kept
 
 
-def test_get_all_messages_for_channel_is_prefix_exact_not_substring():
+def test_get_messages_for_channel_pair_is_prefix_exact_not_substring():
     db = run(InMemoryDatabase())
     run(db.insert(_mm(5, 55, ochan=100)))
     run(db.insert(_mm(5, 66, ochan=1000)))
-    got = run(db.get_all_messages_for_channel(100))
+    got = run(db.get_messages_for_channel_pair(100, DST_A))
     assert [m.mirror_id for m in got] == [55]
 
 

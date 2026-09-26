@@ -97,3 +97,12 @@ def test_main_exits_zero_and_skips_alert_when_no_problems(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         health.main()
     assert exc_info.value.code == 0
+
+
+def test_failed_state_alerts_only_once(monkeypatch, tmp_path):
+    """OnFailure= already alerts on entering `failed`; health must not repeat
+    the same ActiveState=failed alert on every 10-minute tick after that."""
+    _wire(monkeypatch, tmp_path,
+          {"NRestarts": "2", "ActiveState": "failed"},
+          prev={"nrestarts": 2, "active": "failed"})
+    assert health.check() == []

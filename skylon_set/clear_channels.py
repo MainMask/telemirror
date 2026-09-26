@@ -20,7 +20,7 @@ from typing import Dict, Optional, Set
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
-    from config import CHAT_MAPPING, DB_URL, LOG_LEVEL, USE_MEMORY_DB
+    from config import BROADCAST_CHANNEL, CHAT_MAPPING, DB_URL, LOG_LEVEL, USE_MEMORY_DB
 except Exception:
     print("Failed reading .env")
     raise
@@ -101,7 +101,10 @@ async def _reset_db_state(
     dry_run: bool,
     logger: logging.Logger,
 ) -> None:
-    """Resets past_mode checkpoints and binding_id rows for the cleared target channels."""
+    """Resets past_mode checkpoints and binding_id rows for the cleared target
+    channels — and the broadcast channel's `broadcast_sync` state when any of
+    them is a broadcast target, or the next startup sync would treat every
+    admin post as already delivered and never send it back."""
     pairs = [
         (src, tgt)
         for src, tgt_map in CHAT_MAPPING.items()
@@ -109,11 +112,16 @@ async def _reset_db_state(
         if tgt in cleared_targets
     ]
     target_ids = list(cleared_targets)
+    bc = BROADCAST_CHANNEL
+    reset_broadcast = bc is not None and any(
+        tgt in cleared_targets for tgt in CHAT_MAPPING.get(bc, {})
+    )
 
     if dry_run:
         logger.info(
             f"(dry-run) Would reset {len(pairs)} checkpoint(s) and clear "
             f"binding_id for {len(target_ids)} channel(s)"
+            + (f", and broadcast_sync for {bc}" if reset_broadcast else "")
         )
         return
 
@@ -128,6 +136,12 @@ async def _reset_db_state(
         for tgt in target_ids:
             await db.delete_bindings_for_mirror(tgt)
             logger.info(f"[binding_id] cleared: {tgt}")
+        if reset_broadcast and bc is not None:
+            # Every post is re-run through new_message on the next start; its
+            # per-target dedup re-sends only to the targets cleared here.
+            synced = await db.get_broadcast_sync(bc)
+            await db.delete_broadcast_sync(bc, list(synced))
+            logger.info(f"[broadcast_sync] reset: {bc}")
     finally:
         await db.close()
 

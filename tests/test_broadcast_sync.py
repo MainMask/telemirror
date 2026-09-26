@@ -87,16 +87,57 @@ def test_first_sync_sends_all_and_records():
     assert set(run(db.get_broadcast_sync(BC))) == {1, 2, 3}
 
 
-def test_empty_broadcast_sync_is_seeded_from_existing_mirrors():
-    # First run after `broadcast_sync` was added: messages already mirrored by
-    # the old sync must not be re-sent.
+def test_empty_broadcast_sync_is_not_seeded_from_existing_mirrors():
+    # An empty `broadcast_sync` (e.g. reset by clear_channels) routes every
+    # post through new_message, whose own per-target dedup skips targets that
+    # still hold a mirror — seeding from `binding_id` here would instead mark
+    # a post synced as soon as ANY target still has it, so a partially
+    # cleared recipient would never get it back.
     db = run(InMemoryDatabase())
     run(
         db.insert_batch(
             [MirrorMessage(mid, BC, mid + 500, -1002222222222) for mid in (1, 2)]
         )
     )
-    assert _sync(db, [_msg(1), _msg(2), _msg(3)]) == [("new", 3)]
+    assert _sync(db, [_msg(1), _msg(2), _msg(3)]) == [
+        ("new", 1), ("new", 2), ("new", 3),
+    ]
+
+
+def test_cleared_target_gets_broadcast_posts_back_other_target_is_skipped(monkeypatch):
+    """clear_channels wiped target B (binding_id + broadcast_sync), target A
+    was left alone: the next startup sync re-sends to B only."""
+    import telemirror.mirroring as mirroring
+    from config import DirectionConfig
+    from telemirror.messagefilters import EmptyMessageFilter
+    from telemirror.mirroring import EventProcessor
+
+    tgt_a, tgt_b = -1002000000001, -1002000000002
+    db = run(InMemoryDatabase(max_capacity=1000))
+    run(db.insert_batch([MirrorMessage(mid, BC, mid + 500, tgt_a) for mid in (1, 2)]))
+
+    sent = []
+
+    async def fake_send_message(client, entity, message, **kw):
+        sent.append((entity, message.id))
+        return types.Message(id=900 + len(sent), peer_id=types.PeerChannel(1), message="x")
+
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    cfg = DirectionConfig(
+        disable_delete=False, disable_edit=False, filters=EmptyMessageFilter()
+    )
+    m, client = _mirroring(db, [_msg(1), _msg(2)])
+    m._processor = EventProcessor(
+        chat_mapping={BC: {tgt_a: [cfg], tgt_b: [cfg]}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test"),
+    )
+    run(m._sync_broadcast_channel(client))
+
+    assert sent == [(tgt_b, 1), (tgt_b, 2)]
+    assert set(run(db.get_broadcast_sync(BC))) == {1, 2}
 
 
 def test_restart_is_a_noop():
@@ -182,3 +223,45 @@ def test_handlers_registered_before_broadcast_sync(monkeypatch):
     )
     run(m._Mirroring__connect_client(client))
     assert order == ["handlers", "broadcast_sync"]
+
+
+def test_empty_sync_does_not_duplicate_into_uncleared_forum_with_legacy_rows(monkeypatch):
+    """Posts sent to a forum before `mirror_topic_id` existed left one untagged
+    `(channel, None, None)` row per topic. With `broadcast_sync` reset (by
+    clear_channels) but this forum NOT cleared, each untagged row must count
+    toward one topic config's skip — collapsing them into one key re-sent the
+    post into every topic but one."""
+    import telemirror.mirroring as mirroring
+    from config import DirectionConfig
+    from telemirror.messagefilters import EmptyMessageFilter
+    from telemirror.mirroring import EventProcessor
+
+    forum = -1002000000009
+    db = run(InMemoryDatabase(max_capacity=1000))
+    run(db.insert_batch([MirrorMessage(1, BC, 501, forum), MirrorMessage(1, BC, 502, forum)]))
+
+    sent = []
+
+    async def fake_send_message(client, entity, message, **kw):
+        sent.append((entity, kw.get("reply_to")))
+        return types.Message(id=900 + len(sent), peer_id=types.PeerChannel(1), message="x")
+
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    cfgs = [
+        DirectionConfig(
+            disable_delete=False, disable_edit=False,
+            filters=EmptyMessageFilter(), to_topic_id=topic,
+        )
+        for topic in (10, 20)
+    ]
+    m, client = _mirroring(db, [_msg(1)])
+    m._processor = EventProcessor(
+        chat_mapping={BC: {forum: cfgs}},
+        database=db,
+        client=object(),
+        logger=logging.getLogger("test"),
+    )
+    run(m._sync_broadcast_channel(client))
+
+    assert sent == []

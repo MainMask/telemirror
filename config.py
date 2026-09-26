@@ -321,6 +321,12 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
     for direction in yaml_config["directions"]:
         sources: list = direction["from"]
         targets: list = direction["to"]
+        # Built once per direction (not per source/target pair), so every pair
+        # shares one filter instance — and its ReuploadCache — the same way
+        # directions without their own `filters:` share `default_filters`.
+        _direction_filters = build_filters(
+            direction.get("filters", None), default_filters
+        )
 
         for source in sources:
             source, source_topic_id = _parse_chat_topic(source)
@@ -331,9 +337,6 @@ if YAML_CONFIG_ENV or os.path.exists(YAML_CONFIG_FILE):
                 _direction_mode = _validate_mode(
                     direction.get("mode", yaml_config.get("mode", "copy")),
                     f"{source}->{target}",
-                )
-                _direction_filters = build_filters(
-                    direction.get("filters", None), default_filters
                 )
                 _validate_forward_filters(
                     _direction_filters, _direction_mode, f"{source}->{target}"

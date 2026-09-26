@@ -10,8 +10,8 @@ class FakeClient:
         self.loop = loop
         self.sent = []
 
-    async def send_message(self, channel, msg):
-        self.sent.append((channel, msg))
+    async def send_message(self, channel, msg, **kw):
+        self.sent.append((channel, msg, kw))
 
 
 def test_prune_cooldowns_drops_expired():
@@ -46,5 +46,18 @@ def test_send_task_is_referenced():
 
         loop.run_until_complete(drive())
         assert h._tasks == set()  # done-callback cleaned it up
+    finally:
+        loop.close()
+
+
+def test_do_send_disables_markdown_parsing():
+    """Log text is never authored as markdown: `__`/`**`/`[..](..)` inside an
+    exception message or a path must reach TECH_CHANNEL verbatim."""
+    loop = asyncio.new_event_loop()
+    try:
+        client = FakeClient(loop)
+        h = TelegramLogHandler(client, channel=-100)
+        loop.run_until_complete(h._do_send("__init__ failed: **x** [a](b)"))
+        assert client.sent == [(-100, "__init__ failed: **x** [a](b)", {"parse_mode": None})]
     finally:
         loop.close()

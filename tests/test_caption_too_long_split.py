@@ -354,3 +354,38 @@ def test_new_album_split_measures_caption_in_utf16_not_codepoints(monkeypatch):
     # And the album itself was tracked instead of being silently dropped.
     tracked = run(db.get_messages(1, SOURCE)) + run(db.get_messages(2, SOURCE))
     assert sorted(m.mirror_id for m in tracked) == [921, 922]
+
+
+def test_tail_text_without_entities_is_not_markdown_parsed():
+    """A >1024-char caption with no formatting has `entities is None`; its
+    split-off tail must be sent verbatim, not run through the client's
+    markdown parse_mode (which would turn `**2**` bold and `[a](b)` into a
+    hidden link). Real TelegramClient, request intercepted — no network."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    from telethon.tl import types as tl_types
+
+    captured = []
+
+    class _CapturingClient(TelegramClient):
+        async def get_input_entity(self, peer):
+            return tl_types.InputPeerChannel(1, 0)
+
+        async def __call__(self, request, ordered=False, flood_sleep_threshold=None):
+            captured.append(request)
+            raise RuntimeError("captured")
+
+    client = _CapturingClient(StringSession(), 1, "x")
+    client.parse_mode = "markdown"  # as build_telegram_client sets it
+    proc = EventProcessor(
+        chat_mapping={}, database=None, client=client,
+        logger=logging.getLogger("test.caption_split"),
+    )
+    text = "snake__case_var and **2**x [a](b)"
+    run(proc._send_tail_text(
+        outgoing_chat=TARGET, text=text, entities=None, reply_to_id=5,
+        reply_to_topic_id=None, what="message", context_suffix="",
+    ))
+
+    assert captured[0].message == text
+    assert not captured[0].entities

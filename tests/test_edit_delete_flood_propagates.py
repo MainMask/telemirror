@@ -411,3 +411,53 @@ def test_delete_message_flood_on_one_channel_does_not_abort_the_others():
     assert run(db.get_messages(200, SOURCE)) == []
     # TARGET_A flooded (never actually deleted on Telegram) -> kept for retry.
     assert len(run(db.get_messages(100, SOURCE))) == 1
+
+
+def test_edit_message_flood_from_filters_process_skips_sibling_configs():
+    """A legacy row (no recorded topics) falls back to every candidate config
+    in turn. A FloodWait from the first config's filter chain (e.g. a
+    re-uploading filter's download) must give up on that mirror message, same
+    as a flood from the edit itself — the flood is account-wide, so running
+    the sibling config's filters immediately would just hit it again."""
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))  # no topic columns
+
+    sibling_calls = []
+
+    class _RecordingFilter:
+        async def process(self, entity, event_type):
+            sibling_calls.append(entity.id)
+            return FilterResult(FilterAction.CONTINUE, entity)
+
+    edited = []
+
+    class _RecordingClient:
+        async def edit_message(self, entity, **kw):
+            edited.append(entity)
+
+    proc = EventProcessor(
+        chat_mapping={
+            SOURCE: {
+                TARGET_A: [
+                    DirectionConfig(
+                        disable_delete=False, disable_edit=False,
+                        filters=_AlwaysFloodsFilter(), from_topic_id=5,
+                    ),
+                    DirectionConfig(
+                        disable_delete=False, disable_edit=False,
+                        filters=_RecordingFilter(), from_topic_id=6,
+                    ),
+                ],
+            }
+        },
+        database=db,
+        client=_RecordingClient(),
+        logger=logging.getLogger("test.floodpropagate"),
+    )
+    msg = make_message("hi", channel_id=1000)
+    msg.id = 100
+
+    run(proc.edit_message(SOURCE, msg, "link"))  # must not raise
+
+    assert sibling_calls == []
+    assert edited == []

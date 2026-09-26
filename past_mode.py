@@ -143,7 +143,14 @@ async def _integrity_check(
     target_id: int,
     logger: logging.Logger,
 ) -> tuple[Optional[int], int]:
-    """Checks the checkpoint, returns (corrected checkpoint, mirror count in DB)."""
+    """Checks the checkpoint, returns (checkpoint, mirror count in DB).
+
+    The checkpoint is never rolled forward to the highest mirrored id: rows
+    past it can come from the live mirror (main.py) running between two
+    past_mode runs, and jumping over them would silently skip every
+    unreplayed message in between. Already-mirrored messages past the
+    checkpoint are skipped per target by `EventProcessor`'s own dedup.
+    """
     prefix = f"[PastMode] {source_id}→{target_id}"
     checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)
     if checkpoint is None:
@@ -163,17 +170,6 @@ async def _integrity_check(
             "(possibly every message was filtered out, or a DB issue)"
         )
         return checkpoint, 0
-
-    max_mirrored = max(m.original_id for m in mirrors)
-    if checkpoint < max_mirrored:
-        logger.warning(
-            f"{prefix}: checkpoint={checkpoint} < max_mirrored={max_mirrored}, "
-            f"advancing the checkpoint to {max_mirrored} "
-            f"(messages between {checkpoint} and {max_mirrored} with no mirror "
-            "will be skipped on resume)"
-        )
-        await database.set_past_mode_checkpoint(source_id, target_id, max_mirrored)
-        return max_mirrored, mirror_count
 
     return checkpoint, mirror_count
 

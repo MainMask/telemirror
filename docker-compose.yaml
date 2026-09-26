@@ -24,7 +24,10 @@ services:
     build: .
     restart: unless-stopped
     environment:
-      DATABASE_URL: "postgres://${DB_USER}:${DB_PASS}@postgres/${DB_NAME}"
+      # Not a raw DATABASE_URL: config.build_dsn assembles the DSN from the
+      # .env DB_* values and percent-encodes them (a password with @ : / # ?
+      # would otherwise corrupt the URL).
+      DB_HOST: postgres
     env_file:
       - .env
     volumes:

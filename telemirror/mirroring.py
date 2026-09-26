@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
@@ -447,7 +448,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         link: str,
         outgoing_chat: int,
         config: DirectionConfig,
-        already_mirrored: set,
+        already_mirrored: Counter,
     ) -> bool:
         """True (after logging) if `outgoing_chat` already holds a mirror of
         this source produced by `config` specifically (its own
@@ -458,20 +459,21 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         differ in `from_topic_id`, which `mirror_topic_id` alone couldn't
         tell apart (see `_config_for_topic`). Falls back to a pre-migration
         `(outgoing_chat, None, None)` row, the same idea as
-        `_with_legacy_topic_fallback` but keyed by set membership on a wider
-        tuple rather than a dict lookup, so it isn't reused here. That
-        fallback row is consumed (removed from `already_mirrored`) the first
-        time some config claims it: it's genuinely unknown which config
-        produced it, so it can justify skipping at most one config, not
-        every topic-scoped config sharing this `outgoing_chat`. Shared by
-        new_message and new_album.
+        `_with_legacy_topic_fallback` but counted on a wider tuple rather
+        than a dict lookup, so it isn't reused here. Each such fallback row
+        is consumed (its count decremented) when some config claims it: it's
+        genuinely unknown which config produced it, so one row justifies
+        skipping exactly one config — N untagged rows (e.g. one per topic of a
+        forum mirrored before the topic columns existed) cover up to N
+        configs, not just the first, and never more. Shared by new_message
+        and new_album.
         """
         key = (outgoing_chat, config.from_topic_id, config.to_topic_id)
         legacy_key = (outgoing_chat, None, None)
-        if key not in already_mirrored:
-            if key == legacy_key or legacy_key not in already_mirrored:
+        if already_mirrored[key] <= 0:
+            if key == legacy_key or already_mirrored[legacy_key] <= 0:
                 return False
-            already_mirrored.discard(legacy_key)
+            already_mirrored[legacy_key] -= 1
         self._logger.debug(
             "%s: %s already mirrored to chat#%s, skip", kind_label, link, outgoing_chat
         )
@@ -662,7 +664,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     self._client,
                     entity=outgoing_chat,
                     message=text,
-                    formatting_entities=entities,
+                    # `[]`, never `None`: a None would make send_message run
+                    # the raw text through the client's markdown parse_mode.
+                    formatting_entities=entities or [],
                     reply_to=reply_to_id,
                     reply_to_topic_id=reply_to_topic_id,
                 )
@@ -939,10 +943,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         # Targets that already hold a mirror of this source message in a given
         # topic — skip them so a past_mode retry (or a re-delivered update)
         # can't send a duplicate.
-        already_mirrored = {
+        already_mirrored = Counter(
             (m.mirror_channel, m.source_topic_id, m.mirror_topic_id)
             for m in await self._database.get_messages(message.id, chat_id)
-        }
+        )
 
         flush_inserted = self._make_flush_inserted(inserted, message_link)
 
@@ -1173,12 +1177,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         inserted: List[MirrorMessage] = []
         # Resolve each distinct t.me link once for the whole fan-out.
         link_cache: dict = {}
-        already_mirrored = {
+        already_mirrored = Counter(
             (m.mirror_channel, m.source_topic_id, m.mirror_topic_id)
             for m in await self._database.get_messages(
                 incoming_first_message.id, chat_id
             )
-        }
+        )
 
         flush_inserted = self._make_flush_inserted(inserted, album_link)
 
@@ -1483,14 +1487,23 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     filter_action, filtered_message = await config.filters.process(
                         self.copy_message(message), events.MessageEdited.Event
                     )
+                except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+                    # Same give-up-on-this-message reasoning as the _do_edit()
+                    # flood handler below: the flood is account-wide, so a
+                    # sibling config's filter chain would just hit it again.
+                    self._logger.warning(
+                        f"FloodWait while filtering edited message for "
+                        f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}. "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    break
                 except Exception as e:
                     # Same "don't abort the rest of the fan-out" reasoning as
                     # the send below — see the comment there. Unlike
-                    # new_message/new_album, FloodWaitError/MediaDownloadError
-                    # aren't re-raised here: edit_message has no past_mode
-                    # retry wrapper to catch them, so logging and moving on
-                    # to the next target is already the right behavior for
-                    # every exception type.
+                    # new_message/new_album, MediaDownloadError (and FloodWait,
+                    # above) isn't re-raised here: edit_message has no
+                    # past_mode retry wrapper to catch it, so logging and
+                    # moving on is already the right behavior.
                     self._logger.error(
                         f"Error while filtering edited message for "
                         f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id}. "
@@ -1803,7 +1816,8 @@ class TelegramLogHandler(logging.Handler):
 
     async def _do_send(self, msg: str) -> None:
         try:
-            await self._client.send_message(self._channel, msg)
+            # parse_mode=None: log text is never authored as markdown.
+            await self._client.send_message(self._channel, msg, parse_mode=None)
         except Exception:
             pass  # handler must not raise; Telegram errors silently swallowed
 
@@ -1855,7 +1869,9 @@ class EventHandlers:
             name = " ".join((utils.get_display_name(sender_obj) or "").split())[:100]
             username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "none"
             msg = f"📩 Private message from {name} ({username})"
-            await self._sender.send_message(self._tech_channel, msg)
+            # parse_mode=None: the name is sender-controlled, and markdown
+            # would let it inject formatting or a hidden link.
+            await self._sender.send_message(self._tech_channel, msg, parse_mode=None)
         except Exception as e:
             # Unlike every other handler here, this one doesn't go through
             # EventProcessor.__handle_exceptions — log through the same
@@ -2030,14 +2046,15 @@ class Mirroring:
         Streams `iter_messages` in one pass — only message IDs are held in
         memory, never the full history.
 
-        When `broadcast_sync` is empty (first run after it was added) it is
-        seeded from the `messages` table so previously mirrored posts are not
-        re-sent.
+        When `broadcast_sync` is empty every post goes through `new_message`,
+        whose own per-target dedup (`already_mirrored`) skips targets that
+        still hold a mirror — so a reset table (e.g. by
+        `skylon_set/clear_channels.py`) re-delivers posts only to the targets
+        that lost them.
 
         A message is marked synced regardless of send outcome; a rare failed
         first-time send won't auto-retry — clear the `broadcast_sync` rows for
-        the channel (and its `messages` rows, or they are re-seeded) to force a
-        full re-sync.
+        the channel to force a re-sync.
 
         `broadcast_sync` is keyed by source channel, not by target: a broadcast
         target added later is NOT backfilled by this sync.
@@ -2047,16 +2064,6 @@ class Mirroring:
         self._logger.info(f"[Sync broadcast]: starting sync for channel#{bc}")
 
         synced = await self._database.get_broadcast_sync(bc)  # {msg_id: edit_ts|None}
-        if not synced:
-            # First run after `broadcast_sync` was introduced: seed it from the
-            # messages already mirrored by earlier runs so this sync doesn't
-            # re-send the whole channel history.
-            for original_id in {
-                m.original_id
-                for m in await self._database.get_all_messages_for_channel(bc)
-            }:
-                await self._database.set_broadcast_sync(bc, original_id, None)
-            synced = await self._database.get_broadcast_sync(bc)
         seen: set[int] = set()
         sent = edited = 0
 

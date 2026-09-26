@@ -229,7 +229,8 @@ class ReuploadCache:
     filter *instantiation* in `config.build_filters`, which in practice is
     process-wide whenever directions share the top-level `default_filters`
     (true for every currently deployed config) — only a direction with its
-    own YAML `filters:` override gets an isolated instance. A shared instance
+    own YAML `filters:` override gets an isolated instance, shared across
+    all of that direction's source/target pairs. A shared instance
     means a burst of more than `size` distinct media items across unrelated
     source channels within the TTL window can evict each other's entries.
     Instances live for the process either way.

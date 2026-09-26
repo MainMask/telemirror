@@ -211,3 +211,38 @@ def test_direction_config_defaults():
     assert d.from_topic_id is None
     assert d.send_delay == 0.0
     assert "mode: copy" in repr(d)
+
+
+def test_direction_level_filters_are_built_once_per_direction():
+    """A direction with its own `filters:` must share ONE filter instance across
+    all its source/target pairs — the same way `default_filters` is shared —
+    or each pair gets its own ReuploadCache and the same media is downloaded
+    and re-encoded once per target. Run in a subprocess: config.py builds
+    CHAT_MAPPING at import time, and reloading it here would redefine
+    DirectionConfig under every other test."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    yaml_cfg = (
+        "directions:\n"
+        "  - from: [-1001, -1002]\n"
+        "    to: [-1003, -1004]\n"
+        "    filters:\n"
+        "      - SkipWithKeywordsFilter:\n"
+        "          keywords: [foo]\n"
+    )
+    probe = (
+        "from config import CHAT_MAPPING\n"
+        "ids = {id(c.filters) for t in CHAT_MAPPING.values()"
+        " for cs in t.values() for c in cs}\n"
+        "print(len(ids))\n"
+    )
+    env = {**os.environ, "YAML_CONFIG_ENV": yaml_cfg}
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=Path(__file__).resolve().parent.parent,
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "1"

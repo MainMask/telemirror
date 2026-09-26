@@ -131,3 +131,43 @@ def test_run_only_resets_db_state_for_successfully_cleared_channels(monkeypatch)
     run(clear_channels._run(logging.getLogger("t"), True))
 
     assert reset_calls == [{good: {None}}]
+
+
+@pytest.mark.parametrize("cleared_target, expect_reset", [(-9101, True), (-9102, False)])
+def test_reset_db_state_resets_broadcast_sync_only_for_broadcast_targets(
+    monkeypatch, cleared_target, expect_reset
+):
+    """Wiping a broadcast target's binding_id rows alone leaves every admin post
+    marked synced in broadcast_sync, so the next startup sync would never send
+    them back — reset broadcast_sync too, but only when a cleared channel is
+    actually one of the broadcast channel's targets."""
+    import logging
+
+    from telemirror.storage import InMemoryDatabase, MirrorMessage
+
+    bc, bc_target, other_target = -1009, -9101, -9102
+    mapping = {bc: {bc_target: [_cfg()]}, -1001: {other_target: [_cfg()]}}
+    monkeypatch.setattr(clear_channels, "CHAT_MAPPING", mapping)
+    monkeypatch.setattr(clear_channels, "BROADCAST_CHANNEL", bc)
+    monkeypatch.setattr(clear_channels, "USE_MEMORY_DB", False)
+
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(1, bc, 501, bc_target)))
+    run(db.set_broadcast_sync(bc, 1, None))
+    run(db.set_broadcast_sync(bc, 2, 1700000000))
+
+    async def fake_open(**kw):
+        return db
+
+    class _FakePostgres:
+        def __new__(cls, **kw):
+            return fake_open(**kw)
+
+    monkeypatch.setattr(clear_channels, "PostgresDatabase", _FakePostgres)
+
+    run(clear_channels._reset_db_state(
+        {cleared_target: {None}}, False, logging.getLogger("t")
+    ))
+
+    remaining = run(db.get_broadcast_sync(bc))
+    assert remaining == ({} if expect_reset else {1: None, 2: 1700000000})

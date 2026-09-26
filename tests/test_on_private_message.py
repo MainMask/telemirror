@@ -17,9 +17,11 @@ class FakeClient:
 class FakeSender:
     def __init__(self):
         self.sent = []
+        self.kwargs = []
 
-    async def send_message(self, channel, text):
+    async def send_message(self, channel, text, **kw):
         self.sent.append((channel, text))
+        self.kwargs.append(kw)
 
 
 def _handlers(sender):
@@ -63,7 +65,7 @@ def test_notification_failure_is_logged_not_left_unhandled(caplog):
     logger, never reaching TECH_CHANNEL via TelegramLogHandler)."""
 
     class FailingSender:
-        async def send_message(self, channel, text):
+        async def send_message(self, channel, text, **kw):
             raise RuntimeError("boom")
 
     class ProcessorStub:
@@ -90,3 +92,25 @@ def test_notification_failure_is_logged_not_left_unhandled(caplog):
         "private message" in r.message.lower() and "boom" in r.message
         for r in caplog.records
     )
+
+
+def test_sender_name_is_not_markdown_parsed():
+    """The display name is sender-controlled: sent through the client's
+    markdown parse_mode, `[Support](https://evil.example)` would render in
+    TECH_CHANNEL as "Support" with a hidden link."""
+    sender = FakeSender()
+    h = _handlers(sender)
+    user = types.User(
+        id=1, first_name="[Support](https://evil.example)", last_name=None,
+        username=None,
+    )
+
+    class Event:
+        async def get_sender(self):
+            return user
+
+    run(h.on_private_message(Event()))
+
+    (_, text) = sender.sent[0]
+    assert "[Support](https://evil.example)" in text
+    assert sender.kwargs[0].get("parse_mode", ()) is None

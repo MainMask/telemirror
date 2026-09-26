@@ -135,21 +135,6 @@ class Database(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def get_all_messages_for_channel(
-        self: "Database", original_channel: int
-    ) -> List[MirrorMessage]:
-        """
-        Returns all `MirrorMessage` objects for a given source channel
-
-        Args:
-            original_channel (`int`): Source channel ID
-
-        Returns:
-            List[MirrorMessage]
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     async def get_messages_for_channel_pair(
         self: "Database", original_channel: int, mirror_channel: int
     ) -> List[MirrorMessage]:
@@ -334,17 +319,6 @@ class InMemoryDatabase(Database):
                 self.__storage[key] = kept
             else:
                 self.__storage.pop(key, None)
-
-    async def get_all_messages_for_channel(
-        self: "InMemoryDatabase", original_channel: int
-    ) -> List[MirrorMessage]:
-        prefix = f"{original_channel}:"
-        return [
-            m
-            for key, msgs in self.__storage.items()
-            if key.startswith(prefix)
-            for m in msgs
-        ]
 
     async def get_messages_for_channel_pair(
         self: "InMemoryDatabase", original_channel: int, mirror_channel: int
@@ -609,21 +583,6 @@ class PostgresDatabase(Database):
                     ids,
                 ),
             )
-
-    async def get_all_messages_for_channel(
-        self: "PostgresDatabase", original_channel: int
-    ) -> List[MirrorMessage]:
-        async with self.__pg_cursor() as cursor:
-            cursor.row_factory = class_row(MirrorMessage)
-            await cursor.execute(
-                """
-                SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id
-                FROM binding_id
-                WHERE original_channel = %s
-                """,
-                (original_channel,),
-            )
-            return await cursor.fetchall()
 
     async def get_messages_for_channel_pair(
         self: "PostgresDatabase", original_channel: int, mirror_channel: int

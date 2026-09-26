@@ -41,13 +41,27 @@ def test_integrity_checkpoint_without_mirrors():
     assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (50, 0)
 
 
-def test_integrity_rolls_back_stale_checkpoint():
+def test_integrity_keeps_checkpoint_below_max_mirrored():
     db = run(InMemoryDatabase())
     run(db.set_past_mode_checkpoint(SRC, TGT, 10))
     run(db.insert_batch([MirrorMessage(oid, SRC, oid + 900, TGT) for oid in (5, 42)]))
-    # checkpoint 10 < max mirrored 42 -> rolled forward to 42
-    assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (42, 2)
-    assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 42
+    # checkpoint 10 < max mirrored 42: NOT rolled forward — already-mirrored
+    # messages past the checkpoint are skipped per target by new_message's
+    # own dedup, while anything unmirrored in between still gets replayed.
+    assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (10, 2)
+    assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 10
+
+
+def test_integrity_does_not_skip_history_after_live_mirror_ran():
+    """Backfill interrupted at 50, then main.py mirrored a new post 9000 for
+    the same pair: resuming must continue from 50, not jump to 9000 and
+    silently skip 51..8999."""
+    db = run(InMemoryDatabase(max_capacity=1000))
+    run(db.insert_batch([MirrorMessage(oid, SRC, oid + 1000, TGT) for oid in range(1, 51)]))
+    run(db.set_past_mode_checkpoint(SRC, TGT, 50))
+    run(db.insert(MirrorMessage(9000, SRC, 5000, TGT)))  # live mirror's row
+    assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (50, 51)
+    assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 50
 
 
 def test_integrity_keeps_healthy_checkpoint():

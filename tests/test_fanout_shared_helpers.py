@@ -3,6 +3,7 @@ the fan-out logic new_message and new_album share (extracted to remove the
 ~250-line duplication between them — see REVIEW.md)."""
 
 import logging
+from collections import Counter
 
 from config import DirectionConfig
 from telemirror.mirroring import EventProcessor
@@ -63,7 +64,7 @@ def test_already_mirrored_skip_when_this_config_topic_already_mirrored():
     p = _proc()
     cfg = _cfg(to_topic_id=1)
     skip = p._already_mirrored_skip(
-        "[New message]", "link", TARGET, cfg, already_mirrored={(TARGET, None, 1)}
+        "[New message]", "link", TARGET, cfg, already_mirrored=Counter([(TARGET, None, 1)])
     )
     assert skip is True
 
@@ -75,7 +76,7 @@ def test_already_mirrored_not_skipped_for_a_different_sibling_topic():
     with mirror_topic_id recorded, each config's own topic is now judged
     independently)."""
     p = _proc()
-    already_mirrored = {(TARGET, None, 1)}
+    already_mirrored = Counter([(TARGET, None, 1)])
     assert p._already_mirrored_skip(
         "[New message]", "link", TARGET, _cfg(to_topic_id=1), already_mirrored
     ) is True
@@ -94,7 +95,7 @@ def test_already_mirrored_skip_falls_back_to_legacy_untagged_row():
     p = _proc()
     cfg = _cfg(to_topic_id=5)
     skip = p._already_mirrored_skip(
-        "[New message]", "link", TARGET, cfg, already_mirrored={(TARGET, None, None)}
+        "[New message]", "link", TARGET, cfg, already_mirrored=Counter([(TARGET, None, None)])
     )
     assert skip is True
 
@@ -107,7 +108,7 @@ def test_already_mirrored_skip_disambiguates_via_source_topic_when_destination_c
     p = _proc()
     general = _cfg(to_topic_id=None, from_topic_id=None)
     scoped = _cfg(to_topic_id=None, from_topic_id=20)
-    already_mirrored = {(TARGET, 20, None)}
+    already_mirrored = Counter([(TARGET, 20, None)])
     assert p._already_mirrored_skip(
         "[New message]", "link", TARGET, scoped, already_mirrored
     ) is True
@@ -121,9 +122,9 @@ def test_already_mirrored_skip_legacy_fallback_is_consumed_by_first_config():
     justify skipping at most one config — it's genuinely unknown which
     config produced it, but it can't have been more than one. Once one
     config claims it via the fallback, a different config checking the same
-    already_mirrored set must not also treat it as its own evidence."""
+    already_mirrored counter must not also treat it as its own evidence."""
     p = _proc()
-    already_mirrored = {(TARGET, None, None)}
+    already_mirrored = Counter([(TARGET, None, None)])
     cfg_a = _cfg(to_topic_id=None, from_topic_id=5)
     cfg_b = _cfg(to_topic_id=None, from_topic_id=6)
     assert p._already_mirrored_skip(
@@ -132,6 +133,18 @@ def test_already_mirrored_skip_legacy_fallback_is_consumed_by_first_config():
     assert p._already_mirrored_skip(
         "[New message]", "link", TARGET, cfg_b, already_mirrored
     ) is False
+
+
+def test_already_mirrored_skip_two_legacy_rows_cover_two_configs():
+    """Two untagged legacy rows (e.g. a forum's two topics mirrored before the
+    topic columns existed) justify skipping two configs — and no more."""
+    p = _proc()
+    already_mirrored = Counter([(TARGET, None, None), (TARGET, None, None)])
+    cfgs = [_cfg(to_topic_id=t) for t in (10, 20, 30)]
+    assert [
+        p._already_mirrored_skip("[New message]", "link", TARGET, c, already_mirrored)
+        for c in cfgs
+    ] == [True, True, False]
 
 
 def test_config_for_topic_exact_match_is_authoritative_even_if_disabled():

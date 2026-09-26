@@ -57,15 +57,17 @@ def check() -> list[str]:
         problems.append(
             f"⚠️ {_UNIT}: {delta} restart(s) in this interval (total {nrestarts}) — flapping"
         )
-    if active == "failed":
+    # Only on the transition into 'failed': OnFailure= has already alerted
+    # once, and repeating it on every tick while the unit stays failed is noise.
+    if active == "failed" and prev.get("active") != "failed":
         problems.append(f"⚠️ {_UNIT}: ActiveState=failed")
     # Two consecutive checks stuck outside 'active'/'inactive' = not just a
     # transient restart. 'inactive' is excluded: Restart=always means a crashing
     # unit cycles through activating/failed and essentially never settles into
     # inactive on its own — a stable 'inactive' means systemd stopped it on
     # purpose (the telemirror-past-courses.service Conflicts= switch-over, or an
-    # operator's manual stop), not a stuck unit.
-    _settled = (None, "active", "inactive")
+    # operator's manual stop), not a stuck unit. 'failed' has its own alert above.
+    _settled = (None, "active", "inactive", "failed")
     if active not in _settled and prev.get("active") not in _settled:
         problems.append(f"⚠️ {_UNIT}: not active twice in a row (currently {active})")
 
