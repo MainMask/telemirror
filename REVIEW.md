@@ -2609,3 +2609,34 @@ Re-verified, no change:
   any code path used here.
 
 Full suite 442 → 445, `ruff` and `mypy .` green.
+
+## Pass 20 follow-up 2 — mirrored edits were markdown-parsed
+
+The next review pass swept every send/edit call site outside the vendored patch
+for the same bug class as `_send_tail_text` above: text passed with `None`
+entities goes through the client's markdown `parse_mode`.
+
+- **P2 (fixed)** `EventProcessor.edit_message` edits the mirror through the
+  *unpatched* `client.edit_message(text=…, formatting_entities=filtered_message.entities)`.
+  For a source message with no formatting, `entities` is `None`, and
+  Telethon 1.44 (`telethon/client/messages.py`, `edit_message`: `if
+  formatting_entities is None: text, formatting_entities = await
+  self._parse_message_text(text, parse_mode)`) then parses the text as
+  markdown. Reproduced on a real `EventProcessor` + `TelegramClient`, with
+  the request intercepted: `"snake__case and **2**x [a](b)"` was sent in the
+  `EditMessageRequest` as `"snake__case and 2x a"` with Bold and a hidden
+  link. `disable_edit: false` is set globally in `mirror.config.yml`, so any
+  source edit of an unformatted post containing `**`, `__`, backticks or
+  `[..](..)` corrupted the mirror. It is not intended for the same reason as
+  `_send_tail_text` (raw text + explicit entities, Telethon #3065). New-message
+  sends were never affected: the patched `send_message` doesn't parse a
+  `Message` object. Fixed with `formatting_entities=filtered_message.entities
+  or []`. Test: `tests/test_edit_message_markdown.py::test_edit_without_entities_is_not_markdown_parsed`
+  (fails before the fix).
+
+Re-verified, no change: `past_mode._edit_links_pass` only edits messages that
+carry URL entities (never `None`); `_notify_skipped` sends a plain `t.me/c/…`
+link; the past_mode final summary uses backticks on purpose; `alert.py`,
+`TelegramLogHandler` and `on_private_message` already pass `parse_mode=None`.
+
+Full suite 445 → 446, `ruff` and `mypy .` green.

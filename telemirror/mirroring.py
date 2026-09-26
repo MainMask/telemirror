@@ -1543,7 +1543,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         entity=outgoing_message.mirror_channel,
                         message=outgoing_message.mirror_id,
                         text=filtered_message.message,
-                        formatting_entities=filtered_message.entities,
+                        # `[]`, never `None`: a None would make edit_message
+                        # run the raw text through the client's markdown parse_mode.
+                        formatting_entities=filtered_message.entities or [],
                         file=filtered_message.media if edit_media_allowed else None,
                         link_preview=isinstance(
                             filtered_message.media, types.MessageMediaWebPage
