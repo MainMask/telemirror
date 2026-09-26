@@ -1,5 +1,6 @@
 import re
 from typing import Optional, Set, Type, Union
+from urllib.parse import parse_qsl, urlencode
 
 from telethon import events, types, utils
 
@@ -557,8 +558,10 @@ class SkipWithUrlFilter(MessageFilter):
     MessageEntityUrl (bare URL text), and MessageEntityMention (@username).
     Matching is case-insensitive, scheme-independent, and prefix-based
     (e.g. blacklisting "t.me/channel" also blocks "t.me/channel/42").
-    telegram.me / telegram.dog / www.t.me links and tg://resolve?domain=…
-    deep links are folded into the t.me form, so one t.me entry covers them.
+    Every link form that opens the same chat — telegram.me / telegram.dog /
+    www.t.me hosts, the <name>.t.me subdomain, the t.me/s/<name> web preview
+    and tg://resolve?domain=… deep links (any parameter order) — is folded into
+    the t.me/<name> form, so one t.me entry covers them all.
 
     Args:
         blacklist (Set[str]): URL prefixes to block.
@@ -567,14 +570,18 @@ class SkipWithUrlFilter(MessageFilter):
     @staticmethod
     def _normalize(url: str) -> str:
         norm = re.sub(r"^https?://", "", url, flags=re.IGNORECASE).lower()
-        # tg://resolve?domain=X[&…] and the t.me host aliases reach the same
-        # chat as t.me/X — fold them into one form so a t.me/… entry covers all.
-        tg = re.match(r"tg://resolve\?domain=([^&#]*)(?:&(.*))?$", norm)
-        if tg:
-            norm = f"t.me/{tg[1]}" + (f"?{tg[2]}" if tg[2] else "")
+        # Every form below reaches the same chat as t.me/X — fold them into
+        # one so a t.me/… entry covers all.
+        if norm.startswith("tg://resolve?"):
+            query = parse_qsl(norm[len("tg://resolve?"):].split("#", 1)[0])
+            domain = next((v for k, v in query if k == "domain"), "")
+            rest = [(k, v) for k, v in query if k != "domain"]
+            norm = f"t.me/{domain}" + (f"?{urlencode(rest)}" if rest else "")
         norm = re.sub(
             r"^(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)(?=/|$)", "t.me", norm
         )
+        norm = re.sub(r"^([a-z0-9_]+)\.t\.me(?=/|$)", r"t.me/\1", norm)  # <name>.t.me
+        norm = re.sub(r"^t\.me/s/", "t.me/", norm)  # public channel web preview
         return norm.rstrip("/")
 
     def __init__(self, blacklist: Set[str]) -> None:

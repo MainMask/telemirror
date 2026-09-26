@@ -113,3 +113,28 @@ def test_skip_with_url_filter_matches_telegram_link_aliases(url, expected):
     past a t.me/… blacklist entry."""
     msg = make_message("click", entities=[types.MessageEntityTextUrl(0, 5, url)])
     assert _process(SkipWithUrlFilter({"t.me/godolympbot"}), msg)[0] is expected
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("tg://resolve?start=x&domain=godolympbot", FilterAction.DISCARD),
+        ("tg://resolve?domain=godolympbot#frag", FilterAction.DISCARD),
+        ("https://t.me/s/openfrm", FilterAction.DISCARD),
+        ("https://t.me/s/openfrm/123", FilterAction.DISCARD),
+        ("https://openfrm.t.me", FilterAction.DISCARD),
+        ("https://openfrm.t.me/123", FilterAction.DISCARD),
+        ("https://t.me/iv?url=x&rhash=y", FilterAction.CONTINUE),
+        ("https://x.nott.me/openfrm", FilterAction.CONTINUE),
+        ("https://openfrmx.t.me", FilterAction.CONTINUE),
+        ("tg://resolve?start=x", FilterAction.CONTINUE),
+        ("https://t.me/s/other", FilterAction.CONTINUE),
+    ],
+)
+def test_skip_with_url_filter_folds_all_chat_link_forms(url, expected):
+    """Every link form that opens the same chat as t.me/<name> — tg://resolve
+    with parameters in any order or a fragment, the t.me/s/ web preview, and
+    the <name>.t.me subdomain — must hit a t.me/<name> blacklist entry."""
+    msg = make_message("click", entities=[types.MessageEntityTextUrl(0, 5, url)])
+    f = SkipWithUrlFilter({"t.me/godolympbot", "t.me/openfrm"})
+    assert _process(f, msg)[0] is expected

@@ -2715,3 +2715,28 @@ Fixed:
   The config change takes effect on the next `telemirror.service` restart.
 
 Full suite 447 → 463, `ruff` and `mypy .` green.
+
+## Pass 20 follow-up 5 — SkipWithUrlFilter link normalization completed
+
+The next pass probed the URL normalization added in follow-up 4.
+
+- **P3, regression in follow-up 4 (fixed)** `SkipWithUrlFilter._normalize`
+  folded `tg://resolve?domain=X` only when `domain` was the first parameter and
+  nothing but `&…` followed. `tg://resolve?start=x&domain=godolympbot` and
+  `tg://resolve?domain=godolympbot#frag` still bypassed the blacklist,
+  contradicting the docstring's unqualified claim. The query is now parsed
+  with `urllib.parse.parse_qsl` (order-independent, fragment dropped).
+- **Gaps in the same category (closed)** Two more forms open the same chat as
+  `t.me/<name>` and bypassed a `t.me/<name>` entry: the `t.me/s/<name>[/…]`
+  public-channel web preview and the `<name>.t.me[/…]` username subdomain.
+  Both are now folded into `t.me/<name>[/…]`. The subdomain rule runs after
+  `www.` is stripped and needs `.t.me` directly after one label, so
+  `x.nott.me` and `a.b.t.me` are untouched.
+
+Test: `tests/test_url_filters.py::test_skip_with_url_filter_folds_all_chat_link_forms`
+— 6 DISCARD cases (all failed before the fix) and 5 CONTINUE negatives
+(`t.me/iv?…`, `x.nott.me`, a longer subdomain name, `tg://resolve` without
+`domain`, `t.me/s/other`). Both real configs were probed with every form.
+Configs are unchanged.
+
+Full suite 463 → 474, `ruff` and `mypy .` green.
