@@ -138,3 +138,38 @@ def test_skip_with_url_filter_folds_all_chat_link_forms(url, expected):
     msg = make_message("click", entities=[types.MessageEntityTextUrl(0, 5, url)])
     f = SkipWithUrlFilter({"t.me/godolympbot", "t.me/openfrm"})
     assert _process(f, msg)[0] is expected
+
+
+def _chat_link_forms(name, tail):
+    forms = [
+        f"t.me/{name}{tail}",
+        f"https://t.me/{name}{tail}",
+        f"HTTP://www.t.me/{name}{tail}",
+        f"telegram.me/{name}{tail}",
+        f"https://telegram.dog/{name}{tail}",
+        f"https://t.me/s/{name}{tail}",
+        f"https://{name}.t.me{tail}",
+    ]
+    if tail in ("", "#x"):
+        forms.append(f"tg://resolve?domain={name}{tail}")
+    return forms
+
+
+@pytest.mark.parametrize(
+    "tail", ["", "/", "/42", "/42/", "?start=1", "/7?single", "#x", "/42#x", "?start=1#x"]
+)
+@pytest.mark.parametrize("name", ["godolympbot", "bot_2x"])
+def test_skip_with_url_filter_every_form_normalizes_like_t_me(name, tail):
+    """Property check over every link form that opens the same chat: each must
+    normalize exactly like t.me/<name> with the same tail (query or fragment
+    directly after a subdomain host included), normalization must be
+    idempotent, and a blacklist entry written in an alias form must still
+    match every form without catching a longer name."""
+    normalize = SkipWithUrlFilter._normalize
+    canon = normalize(f"t.me/{name}{tail}")
+    f = SkipWithUrlFilter({f"telegram.me/{name}"})
+    for url in _chat_link_forms(name, tail):
+        assert normalize(url) == canon, url
+        assert normalize(normalize(url)) == normalize(url), url
+        assert f._matches(url), url
+    assert not f._matches(f"https://t.me/{name}x")

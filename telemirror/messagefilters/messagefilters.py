@@ -570,17 +570,18 @@ class SkipWithUrlFilter(MessageFilter):
     @staticmethod
     def _normalize(url: str) -> str:
         norm = re.sub(r"^https?://", "", url, flags=re.IGNORECASE).lower()
+        norm = norm.split("#", 1)[0]  # a fragment never changes the target chat
         # Every form below reaches the same chat as t.me/X — fold them into
         # one so a t.me/… entry covers all.
         if norm.startswith("tg://resolve?"):
-            query = parse_qsl(norm[len("tg://resolve?"):].split("#", 1)[0])
+            query = parse_qsl(norm[len("tg://resolve?"):])
             domain = next((v for k, v in query if k == "domain"), "")
             rest = [(k, v) for k, v in query if k != "domain"]
             norm = f"t.me/{domain}" + (f"?{urlencode(rest)}" if rest else "")
         norm = re.sub(
-            r"^(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)(?=/|$)", "t.me", norm
+            r"^(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)(?=[/?]|$)", "t.me", norm
         )
-        norm = re.sub(r"^([a-z0-9_]+)\.t\.me(?=/|$)", r"t.me/\1", norm)  # <name>.t.me
+        norm = re.sub(r"^([a-z0-9_]+)\.t\.me(?=[/?]|$)", r"t.me/\1", norm)  # <name>.t.me
         norm = re.sub(r"^t\.me/s/", "t.me/", norm)  # public channel web preview
         return norm.rstrip("/")
 

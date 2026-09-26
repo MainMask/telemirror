@@ -2740,3 +2740,34 @@ Test: `tests/test_url_filters.py::test_skip_with_url_filter_folds_all_chat_link_
 Configs are unchanged.
 
 Full suite 463 → 474, `ruff` and `mypy .` green.
+
+## Pass 20 follow-up 6 — `<name>.t.me?…` / fragments; property test added to the suite
+
+The next pass ran a property check over `SkipWithUrlFilter._normalize`:
+20 000 random names × tails, requiring every link form to normalize exactly
+like `t.me/<name>` with the same tail.
+
+- **P3, regression in follow-up 5 (fixed)** The `<name>.t.me` subdomain rule's
+  lookahead `(?=/|$)` did not fold a query directly after the host.
+  `https://godolympbot.t.me?start=ref` — the typical bot-promo form — passed
+  the filter, while `…t.me/?start=ref` and `t.me/godolympbot?start=ref` were
+  dropped, even though the docstring promises the subdomain form is folded.
+  Both host rules now use `(?=[/?]|$)`.
+- **Pre-existing gap (closed)** `_matches` accepts only `==`, `b/` and `b?`,
+  so any link with a `#fragment` right after the name (`t.me/godolympbot#x`)
+  was never matched. `_normalize` now drops the fragment up front (it never
+  changes the target chat), which also replaces the tg:// branch's own
+  fragment handling.
+
+Test: `tests/test_url_filters.py::test_skip_with_url_filter_every_form_normalizes_like_t_me`.
+It is a deterministic property test over 9 tails × 2 names × every form
+(`t.me`, `https`, `HTTP://www.`, `telegram.me`, `telegram.dog`, `t.me/s/`,
+`<name>.t.me`, `tg://resolve`). It checks that each form normalizes like
+`t.me/<name>{tail}`, that normalization is idempotent, and that an alias-form
+blacklist entry matches every form but not a longer name. The `?start=1` / `#x`
+cases failed before the fix. With this test in the suite, a future
+normalization change is checked across every form at once — the previous two
+follow-ups each fixed one form and missed another. The 20 000-case scratch
+run and both real configs were re-probed: clean.
+
+Full suite 474 → 492, `ruff` and `mypy .` green.
