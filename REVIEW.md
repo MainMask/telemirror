@@ -2640,3 +2640,35 @@ link; the past_mode final summary uses backticks on purpose; `alert.py`,
 `TelegramLogHandler` and `on_private_message` already pass `parse_mode=None`.
 
 Full suite 445 → 446, `ruff` and `mypy .` green.
+
+## Pass 20 follow-up 3 — entity-offset fuzzing, one latent KeywordReplaceFilter fix
+
+The next pass on an unchanged tree checked the code that shifts entity offsets
+when text changes. It used property-based fuzzing rather than reading: random
+texts with emoji, surrogate pairs, Cyrillic and nested entities, checked
+against an independent oracle.
+
+- `KeywordReplaceFilter`, 20 000 cases (plain and `r'…'` rules, group
+  references, empty replacements). Invariant: an entity not touched by any
+  match covers the same text afterwards, and no entity goes out of bounds.
+  Clean.
+- `EventProcessor._rewrite_links` (live, copy mode), 8 000 cases mixing
+  mirrored and unmirrored `t.me/c/…` links. The text matches the oracle; URL
+  entities cover the rewritten links; bold entities that are disjoint from a
+  link, or contain it whole, stay correct. Clean. An entity covering *part* of
+  a link is trimmed/resized by `update_entities_params`' documented rules,
+  which is intended.
+
+- **P3, latent (fixed)** `KeywordReplaceFilter._apply_rule` computed the
+  entity shift from `match.expand(replacement)` *before* the case transfer
+  (`.lower()`/`.title()`/`.upper()`), so a case transfer that changes the
+  string length misaligned every later entity. Repro: rule `{"foo":
+  "straße"}` on `"FOO tail"` with Bold over `tail` → `"STRASSE tail"` with
+  Bold over `' tai'`. The final (case-transferred) string is now computed
+  first and the shift is taken from its length. The filter is not used in
+  either live config (only `mirror.config.yml-example`), and Cyrillic case
+  mapping is length-preserving, so it never fired in production. Test:
+  `tests/test_keyword_replace_filter.py::test_case_transfer_that_changes_length_keeps_entities_aligned`
+  (fails before the fix); the fuzz still reports 0 violations.
+
+Full suite 446 → 447, `ruff` and `mypy .` green.

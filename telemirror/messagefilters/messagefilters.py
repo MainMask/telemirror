@@ -468,8 +468,23 @@ class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
         def repl(match: re.Match[str]) -> str:
             nonlocal offset_error
             expanded = match.expand(replacement)
+
+            # Case-transfer only for plain word keywords; an explicit `r'...'`
+            # replacement keeps its configured casing.
+            result = expanded
+            if not is_regex:
+                full_match = match.group()
+                if full_match.islower():
+                    result = expanded.lower()
+                elif full_match.istitle():
+                    result = expanded.title()
+                elif full_match.isupper():
+                    result = expanded.upper()
+
+            # Shift by the final string's length: case transfer can change it
+            # (e.g. "ß".upper() == "SS").
             match_start, match_end = match.span()
-            diff = len(expanded) - (match_end - match_start)
+            diff = len(result) - (match_end - match_start)
             self.update_entities_params(
                 entities,
                 match_start + offset_error,
@@ -477,19 +492,7 @@ class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
                 diff,
             )
             offset_error += diff
-
-            # Case-transfer only for plain word keywords; an explicit `r'...'`
-            # replacement keeps its configured casing.
-            if is_regex:
-                return expanded
-            full_match = match.group()
-            if full_match.islower():
-                return expanded.lower()
-            if full_match.istitle():
-                return expanded.title()
-            if full_match.isupper():
-                return expanded.upper()
-            return expanded
+            return result
 
         return regex.sub(repl, text)
 

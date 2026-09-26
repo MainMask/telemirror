@@ -86,3 +86,13 @@ def test_skip_with_keywords_still_works():
     assert action is FilterAction.DISCARD
     action, _ = _process(f, make_message("this is fine"))
     assert action is FilterAction.CONTINUE
+
+
+def test_case_transfer_that_changes_length_keeps_entities_aligned():
+    # "straße".upper() == "STRASSE": one char longer than the expanded
+    # replacement, so the entity shift must use the case-transferred length.
+    f = KeywordReplaceFilter({"foo": "straße"})
+    msg = make_message("FOO tail", entities=[types.MessageEntityBold(offset=4, length=4)])
+    _, res = _process(f, msg)
+    assert res.message == "STRASSE tail"
+    assert entity_text(res, res.entities[0]) == "tail"
