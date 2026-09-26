@@ -40,3 +40,20 @@ def test_braces_in_channel_name_do_not_break_formatting():
     )
     _, res = run(f._process_message(msg, events.NewMessage.Event))
     assert res.message == "hi\n\nfrom Deals {hot}"
+
+
+def test_astral_emoji_in_header_keeps_body_entities_aligned():
+    """Telegram entity offsets are UTF-16 units: an astral emoji (🚀) in the
+    header before {message_text} is 2 units, not 1 — the body's own entities
+    must still cover their text after the header is prepended."""
+    from telethon.tl import types
+
+    from tests.conftest import entity_text
+
+    msg = make_message("hi there", entities=[types.MessageEntityBold(offset=0, length=2)])
+    f = MappedNameForwardFormat(
+        {msg.chat_id: "🚀 Crypto"}, "{channel_name}\n{message_text}"
+    )
+    _, out = run(f.process(msg, events.NewMessage.Event))
+    assert out.message == "🚀 Crypto\nhi there"
+    assert entity_text(out, out.entities[0]) == "hi"

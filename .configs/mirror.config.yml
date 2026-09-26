@@ -21,7 +21,7 @@ filters:
   - SkipWithKeywordsFilter:
       keywords: !!set
         ? "O Λ И M П"
-        ? "Олимп"
+        ? "r'\\bолимп(?:а|у|ом|е)?\\b'"
         ? "Золотой билет"
         ? "r'@godolympbot'"
         ? "r'@managerfrm'"

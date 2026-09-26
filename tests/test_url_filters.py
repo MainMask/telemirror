@@ -2,6 +2,7 @@
 SkipWithUrlFilter, UrlMessageFilter redaction) — matching logic that runs on
 every message and depends on the previously-fixed UrlMatcher."""
 
+import pytest
 from telethon import events
 from telethon.tl import types
 
@@ -91,3 +92,24 @@ def test_url_message_filter_keeps_whitelisted_url():
         UrlMessageFilter(blacklist=set(), whitelist={"example.com"}), msg
     )
     assert res.message == "go example.com now"
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://telegram.me/godolympbot", FilterAction.DISCARD),
+        ("telegram.dog/GodOlympBot", FilterAction.DISCARD),
+        ("https://www.t.me/godolympbot?start=1", FilterAction.DISCARD),
+        ("tg://resolve?domain=godolympbot&start=x", FilterAction.DISCARD),
+        ("TG://resolve?domain=GodOlympBot", FilterAction.DISCARD),
+        ("https://telegram.me/godolympbotX", FilterAction.CONTINUE),
+        ("tg://resolve?domain=other", FilterAction.CONTINUE),
+        ("https://nottelegram.me/godolympbot", FilterAction.CONTINUE),
+    ],
+)
+def test_skip_with_url_filter_matches_telegram_link_aliases(url, expected):
+    """telegram.me / telegram.dog / www.t.me and tg://resolve deep links reach
+    the same chat as t.me — a hidden link in any of these forms must not slip
+    past a t.me/… blacklist entry."""
+    msg = make_message("click", entities=[types.MessageEntityTextUrl(0, 5, url)])
+    assert _process(SkipWithUrlFilter({"t.me/godolympbot"}), msg)[0] is expected

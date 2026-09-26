@@ -2672,3 +2672,46 @@ against an independent oracle.
   (fails before the fix); the fuzz still reports 0 violations.
 
 Full suite 446 → 447, `ruff` and `mypy .` green.
+
+## Pass 20 follow-up 4 — remaining filters fuzzed; one latent fix, two live filter gaps closed
+
+This pass on an unchanged tree fuzzed or probed the filters not yet covered.
+
+Clean:
+- `DocumentFilenameFilter._rename` with the live settings (`suffix:
+  "@CitadelClan"`, `remove: [@openfrm, openfrm]`), 50 000 generated names: it
+  is idempotent (the cached-handle re-rename depends on this). `openfrm` only
+  survives after the last dot, i.e. in the extension, which is intentionally
+  untouched.
+- `UrlMessageFilter`, 10 000 cases: untouched entities stay aligned and in
+  bounds, and blacklisted URLs are always redacted.
+
+Fixed:
+- **P3, latent** `ForwardFormatFilter._process_message` computed
+  `message_offset` with `str.find` (code points), while Telegram entity
+  offsets are UTF-16 units. Every astral emoji (🚀, 😀) in the header before
+  `{message_text}` shifted all body entities by one. Repro: channel
+  `🚀 Crypto`, format `{channel_name}\n{message_text}` → Bold `hi` covered
+  `'\nh'`. The default format (body first) and `⚜️ Цитадель` (BMP) were
+  unaffected, and the filter is unused in live configs. The offset is now
+  measured with `utils.add_surrogate`. Test:
+  `tests/test_forward_format_filter.py::test_astral_emoji_in_header_keeps_body_entities_aligned`.
+- **Live gap, `SkipWithUrlFilter`** (owner's choice: normalize in code). Hidden
+  links `https://telegram.me/godolympbot` and `tg://resolve?domain=godolympbot`
+  bypassed the `t.me/…` blacklist, though they reach the same chat. `_normalize`
+  now folds `telegram.me` / `telegram.dog` / `www.t.me` hosts and `tg://resolve`
+  deep links into the `t.me/…` form, for blacklist entries and checked URLs
+  alike. Configs are unchanged. Test:
+  `tests/test_url_filters.py::test_skip_with_url_filter_matches_telegram_link_aliases`
+  (8 cases, including negatives such as `nottelegram.me` and a longer username).
+- **Live gap, `SkipWithKeywordsFilter`** (owner's choice: one regex). The
+  whole-word rule `Олимп` missed the case forms (`Олимпа`, `в олимпе`, …). In
+  both `mirror.config.yml` and `citadel_courses.config.yml` it is replaced by
+  `r'\bолимп(?:а|у|ом|е)?\b'`, which covers Олимп/Олимпа/Олимпу/Олимпом/Олимпе
+  in any case but not «олимпиада» / «олимпийский» (a broad `олимп\w*` was
+  rejected for those false positives). YAML loading was verified to keep
+  `\b` literal, and both real configs were probed end to end. Test:
+  `tests/test_keyword_replace_filter.py::test_olimp_rule_catches_case_forms_not_derived_words`.
+  The config change takes effect on the next `telemirror.service` restart.
+
+Full suite 447 → 463, `ruff` and `mypy .` green.

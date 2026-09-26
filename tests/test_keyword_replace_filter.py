@@ -96,3 +96,23 @@ def test_case_transfer_that_changes_length_keeps_entities_aligned():
     _, res = _process(f, msg)
     assert res.message == "STRASSE tail"
     assert entity_text(res, res.entities[0]) == "tail"
+
+
+_OLIMP_RULE = "r'\\bолимп(?:а|у|ом|е)?\\b'"  # as in both live configs
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Заходи в Олимп", FilterAction.DISCARD),
+        ("Участники Олимпа уже тут", FilterAction.DISCARD),
+        ("Встречаемся в олимпе", FilterAction.DISCARD),
+        ("С ОЛИМПОМ на связи", FilterAction.DISCARD),
+        ("Пишите Олимпу", FilterAction.DISCARD),
+        ("Школьная олимпиада", FilterAction.CONTINUE),
+        ("Олимпийский резерв", FilterAction.CONTINUE),
+    ],
+)
+def test_olimp_rule_catches_case_forms_not_derived_words(text, expected):
+    action, _ = _process(SkipWithKeywordsFilter({_OLIMP_RULE}), make_message(text))
+    assert action is expected

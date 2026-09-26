@@ -18,7 +18,7 @@ filters:
     keywords: !!set
       O Λ И M П: null
       r'@svyazfromonacobot': null
-      Олимп: null
+      "r'\\bолимп(?:а|у|ом|е)?\\b'": null
       Золотой билет: null
       r'@managerfrm': null
       r'@mngrfrm': null

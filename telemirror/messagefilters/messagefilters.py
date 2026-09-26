@@ -335,7 +335,11 @@ class ForwardFormatFilter(ChannelName, MessageLink, MessageFilter):
             pre_formatted_message
         )
 
-        message_offset = pre_formatted_text.find(self.MESSAGE_PLACEHOLDER)
+        # In UTF-16 units, like every Telegram entity offset: an astral emoji
+        # (e.g. 🚀) before the placeholder is 2 units, not 1 code point.
+        message_offset = len(utils.add_surrogate(
+            pre_formatted_text[: pre_formatted_text.find(self.MESSAGE_PLACEHOLDER)]
+        ))
 
         if message.entities and message_offset > 0:
             # Move message entities to start of message placeholder
@@ -553,6 +557,8 @@ class SkipWithUrlFilter(MessageFilter):
     MessageEntityUrl (bare URL text), and MessageEntityMention (@username).
     Matching is case-insensitive, scheme-independent, and prefix-based
     (e.g. blacklisting "t.me/channel" also blocks "t.me/channel/42").
+    telegram.me / telegram.dog / www.t.me links and tg://resolve?domain=…
+    deep links are folded into the t.me form, so one t.me entry covers them.
 
     Args:
         blacklist (Set[str]): URL prefixes to block.
@@ -560,7 +566,16 @@ class SkipWithUrlFilter(MessageFilter):
 
     @staticmethod
     def _normalize(url: str) -> str:
-        return re.sub(r"^https?://", "", url).lower().rstrip("/")
+        norm = re.sub(r"^https?://", "", url, flags=re.IGNORECASE).lower()
+        # tg://resolve?domain=X[&…] and the t.me host aliases reach the same
+        # chat as t.me/X — fold them into one form so a t.me/… entry covers all.
+        tg = re.match(r"tg://resolve\?domain=([^&#]*)(?:&(.*))?$", norm)
+        if tg:
+            norm = f"t.me/{tg[1]}" + (f"?{tg[2]}" if tg[2] else "")
+        norm = re.sub(
+            r"^(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)(?=/|$)", "t.me", norm
+        )
+        return norm.rstrip("/")
 
     def __init__(self, blacklist: Set[str]) -> None:
         self._blacklist = {self._normalize(u) for u in blacklist}
