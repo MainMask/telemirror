@@ -20,6 +20,7 @@ from telemirror.hints import EventAlbumMessage, EventLike, EventMessage
 from telemirror.messagefilters import (
     MediaDownloadError,
     fetch_fresh_media,
+    source_media_id,
     strict_media_mode,
 )
 from telemirror.messagefilters.base import FilterAction
@@ -37,10 +38,13 @@ from telemirror.mixins import CopyEventMessage, UpdateEntitiesParams
 from telemirror.storage import Database, MirrorMessage
 
 
-# Matches t.me/c/{peer_id}/{msg_id} (private) and t.me/{username}/{msg_id} (public).
-# Trailing ?query or #fragment allowed; extra path segments (threads) are NOT matched.
+# Matches t.me/c/{peer_id}/{msg_id} (private) and t.me/{username}/{msg_id}
+# (public), optionally with a forum-topic segment before the message id
+# (t.me/c/{peer_id}/{topic_id}/{msg_id}), with or without a scheme, on the
+# t.me / telegram.me / telegram.dog hosts. Trailing ?query or #fragment allowed.
 _TG_MSG_LINK_RE = re.compile(
-    r"https?://t\.me/(?:c/(\d+)|([a-zA-Z][a-zA-Z0-9_]*))/(\d+)(?:[?#][^\s]*)?$",
+    r"(?:https?://)?(?:www\.)?(?:t\.me|telegram\.(?:me|dog))/"
+    r"(?:c/(\d+)|([a-zA-Z][a-zA-Z0-9_]*))/(?:\d+/)?(\d+)(?:[?#][^\s]*)?$",
     re.IGNORECASE,
 )
 
@@ -162,8 +166,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         username: str,
         source_chat_id: int,
         message: EventMessage,
-    ) -> Optional[int]:
-        """Resolve t.me username to Telethon peer ID; fast-path if it's the source channel."""
+    ) -> int:
+        """Resolve t.me username to Telethon peer ID; fast-path if it's the
+        source channel. `get_entity` errors propagate — the caller decides
+        what each kind of failure means for the link."""
         source_chat = getattr(message, "_chat", None)
         source_username = getattr(source_chat, "username", None)
         if source_username and source_username.lower() == username.lower():
@@ -172,22 +178,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         cached = self._username_id_cache.get(key)
         if cached is not None:
             return cached
-        try:
-            entity = await self._client.get_entity(username)
-            channel_id = utils.get_peer_id(entity)
-            self._username_id_cache[key] = channel_id
-            return channel_id
-        except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
-            self._logger.warning(
-                f"[Link rewrite]: flood-wait resolving @{username} ({e}); "
-                "link left unresolved"
-            )
-            return None
-        except Exception as e:
-            self._logger.debug(
-                f"[Link rewrite]: couldn't resolve @{username}: {type(e).__name__}: {e}"
-            )
-            return None
+        entity = await self._client.get_entity(username)
+        channel_id = utils.get_peer_id(entity)
+        self._username_id_cache[key] = channel_id
+        return channel_id
 
     async def _try_rewrite_tg_link(
         self: "EventProcessor",
@@ -237,14 +231,16 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         """Resolve a t.me message URL to its known mirrors, one per
         (target channel, target topic) pair that has an unambiguous one.
 
-        Returns ``None`` when the URL isn't a recognized t.me message link, or
-        the referenced channel has no configured mirror targets at all — in
-        both cases every fan-out target must leave the link untouched
-        regardless of ``fallback_link_url``. Otherwise returns a (possibly
-        empty) ``{(mirror_channel, mirror_topic_id): MirrorMessage}`` map: a
-        target/topic pair missing from it (not mirrored there, a username
-        that failed to resolve, or reached via more than one still-ambiguous
-        mirror — see `_unambiguous_mirror_per_channel`) falls back to
+        Returns ``None`` when the URL isn't a recognized t.me message link,
+        its username doesn't exist, or the referenced channel has no
+        configured mirror targets at all — in each case every fan-out target
+        must leave the link untouched regardless of ``fallback_link_url``.
+        Otherwise returns a (possibly empty)
+        ``{(mirror_channel, mirror_topic_id): MirrorMessage}`` map (empty
+        after a transient username-resolution failure): a target/topic pair
+        missing from it (not mirrored there, or reached via more than one
+        still-ambiguous mirror — see `_unambiguous_mirror_per_channel`)
+        falls back to
         ``fallback_link_url`` for that target instead of guessing another
         target's mirror.
         """
@@ -261,10 +257,47 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             )
         else:
             # t.me/{username}/{msg_id} — public channel
-            referenced_channel_id = await self._resolve_username_to_channel_id(
-                username, source_chat_id, message
-            )
-            if referenced_channel_id is None:
+            try:
+                referenced_channel_id = await self._resolve_username_to_channel_id(
+                    username, source_chat_id, message
+                )
+            except (
+                errors.UsernameNotOccupiedError, errors.UsernameInvalidError, ValueError,
+            ) as e:
+                if isinstance(e, ValueError) and "unsuccessful" in str(e):
+                    # Telethon's collapsed retries of a server error ("Request
+                    # was unsuccessful N time(s)", see download_media_with_retry):
+                    # transient, not a missing username — use the fallback.
+                    self._logger.debug(
+                        f"[Link rewrite]: couldn't resolve @{username}, fallback "
+                        f"link used: {type(e).__name__}: {e}"
+                    )
+                    return {}
+                # The username doesn't exist (typically a deleted/renamed
+                # channel; Telethon's get_entity reports "not occupied" as a
+                # ValueError). Leave the link untouched, like one to a channel
+                # that resolves but isn't mirrored: a fallback here would hide
+                # a blacklisted t.me/<name>/<id> from SkipWithUrlFilter, which
+                # runs after this rewrite.
+                self._logger.debug(
+                    f"[Link rewrite]: @{username} doesn't exist, link left as is: "
+                    f"{type(e).__name__}: {e}"
+                )
+                return None
+            except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+                # Transient: it may well be a mirrored donor — don't show its
+                # link, use the fallback.
+                self._logger.warning(
+                    f"[Link rewrite]: flood-wait resolving @{username} ({e}); "
+                    "fallback link used"
+                )
+                return {}
+            except Exception as e:
+                # Transient too (network/server error): same as flood-wait.
+                self._logger.debug(
+                    f"[Link rewrite]: couldn't resolve @{username}, fallback link "
+                    f"used: {type(e).__name__}: {e}"
+                )
                 return {}
 
         # Find configured targets for the referenced source channel
@@ -1019,6 +1052,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             mirror_channel=outgoing_chat,
                             mirror_topic_id=config.to_topic_id,
                             source_topic_id=config.from_topic_id,
+                            source_media_id=source_media_id(message.media),
                         )
                     )
                     # Persist before the delay: a kill during the sleep must
@@ -1276,6 +1310,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             f"the source won't reach it)"
                         )
                         return
+                    source_media_by_id = {m.id: m.media for m in album}
                     inserted.extend(
                         MirrorMessage(
                             original_id=idxs[message_index],
@@ -1284,6 +1319,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             mirror_channel=outgoing_chat,
                             mirror_topic_id=config.to_topic_id,
                             source_topic_id=config.from_topic_id,
+                            source_media_id=source_media_id(
+                                source_media_by_id.get(idxs[message_index])
+                            ),
                         )
                         for message_index, sent_message in enumerate(sent)
                     )
@@ -1460,6 +1498,24 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         self._logger.info(f"[Edit message]: {message_link}")
 
+        # Resolve each distinct t.me link once for every mirror of this edit.
+        link_cache: dict = {}
+        current_media_id = source_media_id(message.media)
+        # Prevent `MediaPrevInvalidError`: The old media cannot be edited
+        # with anything else (such as stickers or voice notes). Judged on the
+        # source: a re-uploading filter (RestrictSavingContentBypassFilter)
+        # turns the media into an `InputMediaUploadedDocument`, but never
+        # changes its kind, and the mirror's old media is of the same kind.
+        edit_media_allowed = (
+            not isinstance(message.media, types.MessageMediaDocument)
+            or not isinstance(message.media.document, types.Document)
+            or not any(
+                (isinstance(attr, types.DocumentAttributeAudio) and attr.voice is True)
+                or isinstance(attr, types.DocumentAttributeSticker)
+                for attr in message.media.document.attributes
+            )
+        )
+
         for outgoing_message in outgoing_messages:
             configs = self._chat_mapping.get(chat_id, {}).get(
                 outgoing_message.mirror_channel
@@ -1483,9 +1539,29 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 if config.disable_edit is True or config.mode == "forward":
                     continue
 
+                message_copy = self.copy_message(message)
+                if not edit_media_allowed or (
+                    outgoing_message.source_media_id is not None
+                    and outgoing_message.source_media_id == current_media_id
+                ):
+                    # The mirror's media won't be replaced: a voice
+                    # note/sticker can't be, and on a caption-only edit the
+                    # mirror already carries this media (processed when it
+                    # was sent). Without media every re-uploading filter is a
+                    # no-op, so nothing is downloaded, re-stamped or
+                    # re-encoded, and the mirror's media is left as it is.
+                    message_copy.media = None
+
                 try:
+                    # Same order as new_message: rewrite internal t.me links
+                    # before the filters (copy mode only — forward is skipped
+                    # above), or the edit would revert them to the source's.
+                    await self._rewrite_links(
+                        message_copy, chat_id, outgoing_message.mirror_channel,
+                        config.fallback_link_url, link_cache, config.to_topic_id,
+                    )
                     filter_action, filtered_message = await config.filters.process(
-                        self.copy_message(message), events.MessageEdited.Event
+                        message_copy, events.MessageEdited.Event
                     )
                 except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
                     # Same give-up-on-this-message reasoning as the _do_edit()
@@ -1523,22 +1599,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 # back — never the EventAlbumMessage half of FilterResult's type.
                 assert not isinstance(filtered_message, list)
 
-                # Prevent `MediaPrevInvalidError`: The old media cannot be edited
-                # with anything else (such as stickers or voice notes).
-                edit_media_allowed = (
-                    not isinstance(filtered_message.media, types.MessageMediaDocument)
-                    or not isinstance(filtered_message.media.document, types.Document)
-                    or not any(
-                        (isinstance(attr, types.DocumentAttributeAudio) and attr.voice is True)
-                        or isinstance(attr, types.DocumentAttributeSticker)
-                        for attr in filtered_message.media.document.attributes
-                    )
-                )
                 async def _do_edit(
                     outgoing_message=outgoing_message,
                     filtered_message=filtered_message,
-                    edit_media_allowed=edit_media_allowed,
                 ):
+                    sends_file = edit_media_allowed and filtered_message.media is not None
+
                     async def _edit(text, entities):
                         await self._client.edit_message(
                             entity=outgoing_message.mirror_channel,
@@ -1547,7 +1613,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                             # `[]`, never `None`: a None would make edit_message
                             # run the raw text through the client's markdown parse_mode.
                             formatting_entities=entities or [],
-                            file=filtered_message.media if edit_media_allowed else None,
+                            file=filtered_message.media if sends_file else None,
                             link_preview=isinstance(
                                 filtered_message.media, types.MessageMediaWebPage
                             ),
@@ -1563,18 +1629,47 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                         # caption if the source only now outgrew the limit —
                         # so a media change still reaches it and nothing is
                         # wiped.
-                        current = await self._client.get_messages(
-                            outgoing_message.mirror_channel,
-                            ids=outgoing_message.mirror_id,
-                        )
-                        if current is None:
-                            raise
+                        current = None
+                        if sends_file:
+                            current = await self._client.get_messages(
+                                outgoing_message.mirror_channel,
+                                ids=outgoing_message.mirror_id,
+                            )
+                            if current is None:
+                                raise
                         self._logger.warning(
                             f"[Edit message]: caption too long for "
                             f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id} "
                             f"— keeping the mirror's current caption, text not updated"
                         )
+                        if current is None:
+                            # No media change to deliver either: re-sending the
+                            # current caption would change nothing and only
+                            # draw a MessageNotModifiedError.
+                            return
                         await _edit(current.message or "", current.entities or [])
+
+                    # The mirror now carries the new source media: record it so
+                    # the next caption-only edit is recognised as one.
+                    if (
+                        sends_file
+                        and current_media_id is not None
+                        and current_media_id != outgoing_message.source_media_id
+                    ):
+                        try:
+                            await self._database.update_source_media_id(
+                                chat_id,
+                                outgoing_message.original_id,
+                                outgoing_message.mirror_channel,
+                                outgoing_message.mirror_id,
+                                current_media_id,
+                            )
+                        except Exception as e:
+                            self._logger.error(
+                                f"[Edit message]: media of "
+                                f"{outgoing_message.mirror_channel}#{outgoing_message.mirror_id} "
+                                f"replaced but NOT recorded in DB: {type(e).__name__}: {e}"
+                            )
 
                 try:
                     await _do_edit()

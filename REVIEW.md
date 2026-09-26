@@ -2913,3 +2913,236 @@ sticker, and stamped-GIF-then-rename paths. The `ForwardFormatFilter` mixin
 switch leaves an entity that ends exactly at the placeholder untouched.
 
 Full suite 514 → 517, `pyflakes`, `ruff` and `mypy .` green.
+
+# Pass 22 — whole-project review; three edit-path fixes
+
+Requested by the project owner: a whole-project code review per `CLAUDE.md`,
+every suspected bug re-verified (intended vs. real) before a verdict, then
+"fix everything you consider needed, in the best way". Baseline at `a54ad8e`:
+517 tests, `pyflakes`, `ruff`, `mypy` green. Every finding below was
+reproduced with a scratch script against the real code, and each regression
+test fails on the pre-fix code.
+
+## Fixed
+
+- **P2, live** `mirroring.py::edit_message` didn't rewrite internal t.me
+  links. `new_message` runs `_rewrite_links` before the filters; the edit
+  path didn't, so any source edit of a post linking to an already-mirrored
+  post reverted the mirror's `t.me/c/<mirror>/500` to the donor's private
+  `t.me/c/<donor>/5`, and `fallback_link_url` was ignored. Live config has
+  `disable_edit: false`, and `_sync_broadcast_channel`'s catch-up edits use
+  the same path. The edit now rewrites links in the same order as
+  `new_message` (one `link_cache` per edit, the direction's `to_topic_id`),
+  inside the existing filter `try`: a failed lookup skips only that mirror.
+  Tests: `tests/test_edit_message_link_rewrite.py`.
+- **P3** `edit_media_allowed` judged the voice-note/sticker kind on the
+  *filtered* media. For a `noforwards` source
+  `RestrictSavingContentBypassFilter` turns it into an
+  `InputMediaUploadedDocument`, the guard missed it and `file=` was sent,
+  which Telegram rejects (`MediaPrevInvalidError`, per the guard's own
+  contract): the caption edit was lost. The kind is now judged on the source
+  media (filters never change it), and such media is dropped before the
+  filters, so it isn't downloaded at all. Tests:
+  `tests/test_edit_media_allowed_sticker.py::test_noforwards_voice_or_sticker_is_not_reuploaded_into_the_edit`.
+- **P3, cost + degradation** Every caption-only edit re-ran the
+  re-uploading filters on the media once `ReuploadCache`'s 600 s TTL had
+  passed. A photo was re-downloaded and re-stamped at a new random spot. A
+  video within budget was re-encoded (720p/120 s ≈ 73 s CPU by
+  `estimate_stamp_encode_s`, up to the 180 s budget). A renamed document (up
+  to 2 GB) was re-downloaded and re-uploaded. When that processing failed,
+  the stamped mirror photo was replaced by the **unstamped original**. The
+  source doesn't say whether its media changed, so `binding_id` gets a
+  `source_media_id bigint` column (additive `ADD COLUMN IF NOT EXISTS`,
+  applied on the next start; `MirrorMessage` gains a trailing optional
+  field). `new_message`/`new_album` record the source photo/document id per
+  row. `edit_message` drops the media before the filters, and sends no
+  `file=`, when the row's id equals the source's. After a real media
+  replacement the row is updated (new `Database.update_source_media_id`; a
+  DB failure is logged, not raised). Legacy rows (NULL) keep the old
+  behaviour and learn the id on their first media edit. Tests:
+  `tests/test_edit_message_media_unchanged.py` (5),
+  `tests/test_storage.py::test_source_media_id_roundtrips_and_updates_only_its_mirror`.
+  `PostgresDatabase` SQL (migration over an old-schema table, int64 ids,
+  every insert/select, the update, re-init) was run against a throwaway
+  database on the local server, which was then dropped.
+
+## Re-verified, intended — no change
+
+- An edit of a text post with a link preview passes `file=MessageMediaWebPage`:
+  Telethon 1.44 sends `media=None` (request intercepted), no error.
+- `MessageFilter._process_album` stops at `FORCE_SEND`: no filter in the
+  project returns it.
+- `telemirror/alert.py` reads `TECH_CHANNEL` from `.env` only, not from YAML:
+  documented in its docstring (it must not import `config`), and the live
+  `.env` sets it.
+- `setup_mirrors.step_build_config`'s non-forum `#1 → #1` branch: see pass 21.
+
+Full suite 517 → 528, `pyflakes`, `ruff` and `mypy .` green.
+
+## Pass 22 self-review — one regression from this pass, one perf nit, one doc fix
+
+A second whole-project review, requested by the owner before commit, re-read
+this pass's diff with the rest of the project and the files the first read only
+skimmed (`_patch/sending.py`'s `forward_messages`/`send_file`, the deploy
+scripts, `requirements*.txt`). Each finding was confirmed by a repro or a
+measurement.
+
+- **P3, regression from this pass (fixed).** `edit_message`'s
+  `MediaCaptionTooLongError` fallback re-edits the mirror with its own current
+  caption. Once this pass stopped sending `file=` on a caption-only edit, that
+  second request changed nothing: a useless API call, a
+  `MessageNotModifiedError`, and a second WARNING to the tech channel on every
+  edit of a post whose caption is over the limit. When no file is sent, the
+  fallback now logs its WARNING and stops. With a file it still re-edits, so a
+  media change still reaches the mirror. Test:
+  `tests/test_edit_message_caption_split.py::test_too_long_caption_edit_without_media_change_sends_nothing_more`.
+- **P3, perf (fixed).** `update_source_media_id` filtered on
+  `(mirror_channel, mirror_id)`, which has no index. On a 500k-row throwaway
+  database that took 11.0 ms (median of 5) against 1.5 ms when the query is
+  also scoped by `(original_channel, original_id)`
+  (`binding_id_original_idx`). The method now takes the source ids too, and
+  the InMemory version looks up the row's bucket directly instead of scanning
+  every key. The Postgres UPDATE was re-run on a throwaway database (dropped
+  afterwards): only the target row changed, even with the same `mirror_id`
+  elsewhere.
+- **Docs (fixed).** The `binding_id` schema in `PostgresDatabase`'s docstring
+  had no topic columns and no `source_media_id`.
+
+Re-verified, no change:
+- A stamp that failed on the first send isn't retried by later caption edits
+  (the source media id is recorded, so the edit leaves the media alone).
+  Accepted: before this pass, a failing edit could replace a good stamped
+  mirror with the unstamped original.
+- `send_file` parses captions with the markdown `parse_mode` when it gets no
+  `formatting_entities`, but mirroring never reaches that path:
+  `new_album` and the caption split always pass one entity list per item.
+- `install.sh` doesn't install `torch`: documented in `requirements.txt`, and
+  the live config has `remove_watermark: false`.
+- The production venv runs Python 3.12, while CI and `mypy` target 3.13. The
+  whole suite passes on 3.12.
+
+Full suite 528 → 529, `pyflakes`, `ruff` and `mypy .` green.
+
+## Pass 22, third review — t.me message links inside forum topics
+
+A third whole-project review, requested by the owner, re-read the final
+`edit_message`/`storage.py` and took angles no earlier pass covered: dead code
+against `CLAUDE.md`, `since_date` handling, the broadcast directions' filters,
+and the t.me link forms that `_TG_MSG_LINK_RE` accepts.
+
+- **P2, likely live (fixed).** `_TG_MSG_LINK_RE` accepted only
+  `https?://t.me/c/<chat>/<msg>` and `https?://t.me/<username>/<msg>`. Telegram's
+  link to a message inside a forum topic is `t.me/c/<chat>/<topic>/<msg>`
+  (public: `t.me/<username>/<topic>/<msg>`), and the live configs have 183 (+55
+  course) forum-topic directions. Such a link was neither rewritten to the
+  mirror nor replaced by `fallback_link_url`, so the mirror kept the donor's
+  private link. Repro: `t.me/c/<ref>/5` was rewritten, `t.me/c/<ref>/3/5` was
+  left as is. The only trace of intent was a bare code comment ("extra path
+  segments (threads) are NOT matched"). There was no journal entry, and the
+  feature's purpose says otherwise. The same regex also required a scheme,
+  though Telegram linkifies a bare `t.me/c/…` as a `MessageEntityUrl`, and it
+  ignored the `telegram.me` / `telegram.dog` / `www.t.me` hosts
+  (`SkipWithUrlFilter._normalize` already folds those, pass 20). The regex now
+  takes an optional topic segment, an optional scheme and those hosts. Group
+  numbers are unchanged. The fix covers the live path and
+  `past_mode._edit_links_pass`. It can't be confirmed offline whether donor
+  posts actually carry such links. Tests:
+  `tests/test_tg_message_link_forms.py` (8 rewrite/fallback cases fail on the
+  old regex; `t.me/s/…`, `addstickers`, a bare channel link, a foreign host and
+  a four-segment path stay untouched).
+
+Re-verified, no change:
+- A naive `since_date` is read as UTC: Telethon's `_datetime_to_timestamp`
+  assumes UTC when there is no tzinfo, and the server runs in UTC.
+- Synthetic broadcast directions use `EmptyMessageFilter` + copy: documented
+  intent (see the `config.py` sign-off above).
+- Dead code: every function and class in the production code is referenced
+  from production code (`TelegramLogHandler.emit` is called by `logging`).
+
+Full suite 529 → 542, `pyflakes`, `ruff` and `mypy .` green.
+
+## Session-diff review — one regression from this pass, one wrong number
+
+A review of every change made in this pass (including both follow-ups),
+requested by the owner. Each finding was confirmed.
+
+- **P3, regression from the self-review edit (fixed).** In `_do_edit`'s
+  `MediaCaptionTooLongError` fallback, the self-review moved the "caption too
+  long — keeping the mirror's current caption" WARNING above the
+  `current is None` check. When the mirror had been deleted, the tech channel
+  got that false WARNING and then the ERROR. The WARNING again comes after the
+  re-read. The no-file early exit still skips the re-read. Test:
+  `tests/test_edit_message_caption_split.py::test_deleted_mirror_gets_no_keeping_caption_warning`.
+- **Docs (fixed).** The third-review entry said "366 (+110 course) forum-topic
+  directions": that count mixed `from` and `to` lines. Parsed from the YAML,
+  183 of the 199 live directions and 55 of the 74 course directions are forum
+  topics.
+
+Re-verified, no change: the new link regex rejects lookalike hosts
+(`t.me.evil.com`, `evil.com/t.me/…`, `t.mex`, `xt.me`); `executemany` column
+order and `class_row` names match `MirrorMessage`; older code ignores the
+extra column after a rollback; `sends_file` is recomputed after a
+file_reference refresh.
+
+Full suite 542 → 543, `pyflakes`, `ruff` and `mypy .` green.
+
+## Pass 22, fifth review — fallback link hid blacklisted links
+
+A fifth whole-project review, requested by the owner, looked at how features
+interact rather than at single modules.
+
+- **P2, likely live, pre-existing at `a54ad8e` (fixed; owner's choice).**
+  `_rewrite_links` runs before the filters (so `UrlMessageFilter` can't strip
+  links first). A message link whose username failed to resolve (a deleted
+  or renamed channel, `UsernameNotOccupiedError` / `ValueError`) got
+  `fallback_link_url`, so `SkipWithUrlFilter` never saw a blacklisted
+  `t.me/<old-brand>/<id>`. The promo post was mirrored with the link swapped
+  to the fallback, against the config's own "block messages that link to …
+  old-brand channels". Repro on the live filter chain, at HEAD and on this
+  pass: `resolves → discarded`, `gone/invalid → SENT 'promo
+  https://t.me/CitadelClan'`. The behaviour was also inconsistent: a username
+  that resolves to an unmirrored channel was already left untouched. With the
+  owner's choice among three options, an unresolvable username now leaves the
+  link untouched too (`__resolve_tg_link_mirrors` returns `None`; docstring
+  updated). The fallback still covers a mirrored channel's post that has no
+  mirror in the target. Test:
+  `tests/test_tg_message_link_forms.py::test_unresolvable_username_link_is_left_for_the_blacklist`.
+
+Full suite 543 → 544, `pyflakes`, `ruff` and `mypy .` green.
+
+## Pass 22, sixth review — transient username failures use the fallback again
+
+- **P3, side effect of the fifth-review fix (fixed; owner's choice).** That
+  fix left the link untouched on *every* failed username resolution. A
+  transient failure (FloodWait > 300 s, a network/server error) on a live,
+  mirrored public donor therefore showed `t.me/<donor>/<id>` in the mirror,
+  where before it became `fallback_link_url`. Repro:
+  `flood=True: https://t.me/donorname/5`. The cases are split now.
+  `UsernameNotOccupiedError`, `UsernameInvalidError`, and Telethon's
+  `ValueError` for an unknown username mean the username doesn't exist: the
+  link is left untouched, so the blacklist still works. A FloodWait or any
+  other error is treated as transient: the fallback is used.
+  `_resolve_username_to_channel_id` now lets `get_entity` errors propagate,
+  and `__resolve_tg_link_mirrors` classifies them. Residual: a *live*
+  blacklisted channel whose resolution hits a long FloodWait still gets the
+  fallback. That needs two rare events at once. Test:
+  `tests/test_tg_message_link_forms.py::test_username_resolution_failure_kinds`
+  (5 cases; flood and network failed before the fix).
+
+Full suite 544 → 549, `pyflakes`, `ruff` and `mypy .` green.
+
+## Session-diff review 2 — a server outage looked like a missing username
+
+- **P3, from the sixth-review change (fixed).** `__resolve_tg_link_mirrors`
+  treated every `ValueError` from username resolution as "the username
+  doesn't exist" and left the link untouched. Telethon's `_call`
+  (`client/users.py`, `raise_last_call_error` off, the project default) turns
+  exhausted retries of `ServerError` / `RpcCallFailError` / `InterdcCall*`
+  into `ValueError('Request was unsuccessful N time(s)')`. A Telegram server
+  outage therefore left `https://t.me/donorname/5` in the mirror instead of
+  the fallback (repro). That string is now treated as transient, the same way
+  `download_media_with_retry` already classifies it. Test: new case in
+  `tests/test_tg_message_link_forms.py::test_username_resolution_failure_kinds`
+  (failed before the fix).
+
+Full suite 549 → 550, `pyflakes`, `ruff` and `mypy .` green.

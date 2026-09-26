@@ -102,3 +102,98 @@ def test_unsplit_mirror_keeps_its_caption_when_the_source_outgrows_the_limit():
     assert retry["text"] == "old caption"
     assert retry["formatting_entities"] == [types.MessageEntityBold(offset=0, length=3)]
     assert isinstance(retry["file"], types.MessageMediaPhoto)
+
+
+class _TelegramLikeClient:
+    """Rejects a >1024 caption whether or not a file is sent, and answers an
+    edit that changes nothing with MessageNotModifiedError — like Telegram."""
+
+    def __init__(self):
+        self.edits = []
+        self.reads = 0
+
+    async def get_messages(self, entity, ids=None, **kw):
+        self.reads += 1
+        return types.Message(id=5000, peer_id=types.PeerChannel(1), message="")
+
+    async def edit_message(self, **kw):
+        self.edits.append(kw)
+        if len(kw["text"]) > 1024:
+            raise errors.MediaCaptionTooLongError(request=None)
+        if kw["file"] is None and kw["text"] == "":
+            raise errors.MessageNotModifiedError(request=None)
+
+
+def test_too_long_caption_edit_without_media_change_sends_nothing_more(caplog):
+    """Pass 22 self-review: with the source media unchanged (pass 22 sends no
+    `file=`), re-editing the mirror with its own current caption changes
+    nothing — it only drew a MessageNotModifiedError and a second WARNING to
+    the tech channel on every edit of such a post."""
+    client = _TelegramLikeClient()
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET, source_media_id=1)))
+    proc = EventProcessor(
+        chat_mapping={
+            SOURCE: {
+                TARGET: [
+                    DirectionConfig(
+                        disable_delete=False, disable_edit=False,
+                        filters=EmptyMessageFilter(),
+                    )
+                ]
+            }
+        },
+        database=db,
+        client=client,
+        logger=logging.getLogger("test.edit_caption_split"),
+    )
+    msg = make_message("x" * 2000, media=_photo())  # same photo id=1
+    msg.id = 100
+
+    with caplog.at_level(logging.WARNING, logger="test.edit_caption_split"):
+        run(proc.edit_message(SOURCE, msg, "link"))
+
+    assert len(client.edits) == 1
+    assert client.edits[0]["file"] is None
+    assert client.reads == 0
+    assert "caption too long" in caplog.text
+    assert "MessageNotModifiedError" not in caplog.text
+
+
+def test_deleted_mirror_gets_no_keeping_caption_warning(caplog):
+    """Session-diff review: with a media change to deliver, the fallback re-reads
+    the mirror first; a deleted mirror (None) must end in the ERROR alone, not
+    a false "keeping the mirror's current caption" WARNING before it."""
+
+    class _DeletedMirrorClient(_TelegramLikeClient):
+        async def get_messages(self, entity, ids=None, **kw):
+            self.reads += 1
+            return None
+
+    client = _DeletedMirrorClient()
+    db = run(InMemoryDatabase())
+    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET, source_media_id=4)))
+    proc = EventProcessor(
+        chat_mapping={
+            SOURCE: {
+                TARGET: [
+                    DirectionConfig(
+                        disable_delete=False, disable_edit=False,
+                        filters=EmptyMessageFilter(),
+                    )
+                ]
+            }
+        },
+        database=db,
+        client=client,
+        logger=logging.getLogger("test.edit_caption_split"),
+    )
+    msg = make_message("x" * 2000, media=_photo())  # photo id 1 != stored 4
+    msg.id = 100
+
+    with caplog.at_level(logging.WARNING, logger="test.edit_caption_split"):
+        run(proc.edit_message(SOURCE, msg, "link"))
+
+    assert client.reads == 1
+    assert "keeping the mirror's current caption" not in caplog.text
+    assert "Error while editing message" in caplog.text

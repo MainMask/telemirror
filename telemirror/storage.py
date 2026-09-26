@@ -33,6 +33,11 @@ class MirrorMessage(NamedTuple):
             destination topic (e.g. both `to_topic_id=None` for a non-forum
             target) while differing in `from_topic_id` — `mirror_topic_id`
             alone can't tell such rows apart.
+        source_media_id (`int`, optional): Id of the source photo/document
+            this mirror was produced from (`source_media_id` in
+            messagefilters/_media.py), or `None` (no such media, or a row
+            written before this column existed). Lets `edit_message` tell a
+            caption-only edit (same media) from a real media replacement.
     """
 
     original_id: int
@@ -41,6 +46,7 @@ class MirrorMessage(NamedTuple):
     mirror_channel: int
     mirror_topic_id: Optional[int] = None
     source_topic_id: Optional[int] = None
+    source_media_id: Optional[int] = None
 
 
 class Database(ABC):
@@ -139,6 +145,20 @@ class Database(ABC):
         self: "Database", original_channel: int, mirror_channel: int
     ) -> List[MirrorMessage]:
         """Returns all `MirrorMessage` objects for a given source→mirror channel pair."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def update_source_media_id(
+        self: "Database",
+        original_channel: int,
+        original_id: int,
+        mirror_channel: int,
+        mirror_id: int,
+        media_id: int,
+    ) -> None:
+        """Records the source media a mirror now carries, after `edit_message`
+        replaced it. Scoped by the source ids too, so Postgres can use the
+        `(original_channel, original_id)` index."""
         raise NotImplementedError
 
     @abstractmethod
@@ -332,6 +352,21 @@ class InMemoryDatabase(Database):
             if m.mirror_channel == mirror_channel
         ]
 
+    async def update_source_media_id(
+        self: "InMemoryDatabase",
+        original_channel: int,
+        original_id: int,
+        mirror_channel: int,
+        mirror_id: int,
+        media_id: int,
+    ) -> None:
+        msgs = self.__storage.get(
+            self.__build_message_key(original_id, original_channel), []
+        )
+        for i, m in enumerate(msgs):
+            if m.mirror_channel == mirror_channel and m.mirror_id == mirror_id:
+                msgs[i] = m._replace(source_media_id=media_id)
+
     async def get_past_mode_checkpoint(
         self: "InMemoryDatabase", source: int, target: int
     ) -> Optional[int]:
@@ -404,7 +439,10 @@ class PostgresDatabase(Database):
                 original_id bigint not null,
                 original_channel bigint not null,
                 mirror_id bigint not null,
-                mirror_channel bigint not null)
+                mirror_channel bigint not null,
+                mirror_topic_id bigint,
+                source_topic_id bigint,
+                source_media_id bigint)
     ```
 
     Provides two user functions that work with 'binding_id' table:
@@ -454,8 +492,8 @@ class PostgresDatabase(Database):
             await cursor.execute(
                 """
                 INSERT INTO binding_id
-                (original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                (original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id, source_media_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     entity.original_id,
@@ -464,6 +502,7 @@ class PostgresDatabase(Database):
                     entity.mirror_channel,
                     entity.mirror_topic_id,
                     entity.source_topic_id,
+                    entity.source_media_id,
                 ),
             )
 
@@ -479,8 +518,8 @@ class PostgresDatabase(Database):
             await cursor.executemany(
                 """
                 INSERT INTO binding_id
-                (original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                (original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id, source_media_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 entity,
             )
@@ -502,7 +541,7 @@ class PostgresDatabase(Database):
             cursor.row_factory = class_row(MirrorMessage)
             await cursor.execute(
                 """
-                SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id
+                SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id, source_media_id
                 FROM binding_id
                 WHERE original_channel = %s
                 AND original_id = %s
@@ -532,7 +571,7 @@ class PostgresDatabase(Database):
             cursor.row_factory = class_row(MirrorMessage)
             await cursor.execute(
                 """
-                SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id
+                SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id, source_media_id
                 FROM binding_id
                 WHERE original_channel = %s
                 AND original_id = ANY(%s)
@@ -590,12 +629,28 @@ class PostgresDatabase(Database):
         async with self.__pg_cursor() as cursor:
             cursor.row_factory = class_row(MirrorMessage)
             await cursor.execute(
-                "SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id "
+                "SELECT original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id, source_media_id "
                 "FROM binding_id "
                 "WHERE original_channel = %s AND mirror_channel = %s",
                 (original_channel, mirror_channel),
             )
             return await cursor.fetchall()
+
+    async def update_source_media_id(
+        self: "PostgresDatabase",
+        original_channel: int,
+        original_id: int,
+        mirror_channel: int,
+        mirror_id: int,
+        media_id: int,
+    ) -> None:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "UPDATE binding_id SET source_media_id = %s "
+                "WHERE original_channel = %s AND original_id = %s "
+                "AND mirror_channel = %s AND mirror_id = %s",
+                (media_id, original_channel, original_id, mirror_channel, mirror_id),
+            )
 
     async def __create_tables_if_not_exists(self: "PostgresDatabase"):
         """Create tables if not exists"""
@@ -609,11 +664,13 @@ class PostgresDatabase(Database):
                     mirror_id bigint not null,
                     mirror_channel bigint not null,
                     mirror_topic_id bigint,
-                    source_topic_id bigint
+                    source_topic_id bigint,
+                    source_media_id bigint
                 );
 
                 ALTER TABLE binding_id ADD COLUMN IF NOT EXISTS mirror_topic_id bigint;
                 ALTER TABLE binding_id ADD COLUMN IF NOT EXISTS source_topic_id bigint;
+                ALTER TABLE binding_id ADD COLUMN IF NOT EXISTS source_media_id bigint;
 
                 CREATE INDEX IF NOT EXISTS binding_id_original_idx
                 ON binding_id (original_channel, original_id);

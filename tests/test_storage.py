@@ -145,3 +145,14 @@ def test_broadcast_sync_get_returns_copy_and_delete_works():
 
     run(db.delete_broadcast_sync(SRC, [1]))
     assert run(db.get_broadcast_sync(SRC)) == {2: 1700000000}
+
+
+def test_source_media_id_roundtrips_and_updates_only_its_mirror():
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([
+        MirrorMessage(1, SRC, 100, DST_A, source_media_id=5),
+        MirrorMessage(1, SRC, 100, DST_B, source_media_id=5),  # same mirror_id, other channel
+    ]))
+    run(db.update_source_media_id(SRC, 1, DST_A, 100, 6))
+    got = {m.mirror_channel: m.source_media_id for m in run(db.get_messages(1, SRC))}
+    assert got == {DST_A: 6, DST_B: 5}
