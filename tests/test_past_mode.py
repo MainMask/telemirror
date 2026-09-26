@@ -827,3 +827,32 @@ def test_edit_links_pass_uses_each_mirrors_own_direction_filters():
     client = _EditFakeClient([_linking_source(points_to=999)])
     run(past_mode._edit_links_pass(client, db, {(SRC, TGT): [topic5, topic6]}, _LOG))
     assert [(m, t) for _e, m, t, _ents in client.edits] == [(910, "see")]
+
+
+# --- logging ------------------------------------------------------------------
+
+@pytest.fixture
+def _restore_loggers():
+    names = ("past_mode", "telethon", "telemirror")
+    saved = {
+        n: (logging.getLogger(n).level, list(logging.getLogger(n).handlers),
+            logging.getLogger(n).propagate)
+        for n in names
+    }
+    yield
+    for n, (level, handlers, propagate) in saved.items():
+        logger = logging.getLogger(n)
+        logger.setLevel(level)
+        logger.handlers[:] = handlers
+        logger.propagate = propagate
+
+
+def test_configure_logging_covers_telemirror_modules(_restore_loggers):
+    """The filters and media helpers log through `telemirror.*` module
+    loggers; without a handler there their INFO lines were dropped and
+    WARNING+ went out unformatted through logging's last-resort handler."""
+    logging.getLogger("telemirror").handlers[:] = []
+    past_mode._configure_logging("INFO")
+    media_logger = logging.getLogger("telemirror.messagefilters._media")
+    assert media_logger.isEnabledFor(logging.INFO)
+    assert logging.getLogger("telemirror").handlers

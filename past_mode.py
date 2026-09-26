@@ -81,6 +81,9 @@ def _configure_logging(log_level: str) -> logging.Logger:
     # Telethon's reconnection messages go through its own logger — give it the
     # same stdout format so they appear with timestamps alongside our progress logs.
     setup_stdout_logger("telethon", logging.WARNING)
+    # The filters and media helpers log through `telemirror.*` module loggers
+    # (download retries, skipped stamps) — same format and level as ours.
+    setup_stdout_logger("telemirror", log_level)
     return logger
 
 

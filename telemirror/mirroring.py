@@ -78,6 +78,29 @@ _ALBUM_EDIT_RACE_WINDOW_SEC = 30
 _CAPTION_SPLIT_HANDLED = object()
 
 
+# What a re-uploading filter puts into `message.media` (`upload_file` handles,
+# `InputMediaUploaded*`), as opposed to the source's own `MessageMedia*`.
+_FILTER_UPLOAD_TYPES = (
+    types.InputFile,
+    types.InputFileBig,
+    types.InputMediaUploadedPhoto,
+    types.InputMediaUploadedDocument,
+)
+
+
+def _keep_filter_uploads(
+    files: List[types.TypeMessageMedia], fresh: List[types.TypeMessageMedia]
+) -> List[types.TypeMessageMedia]:
+    """`fresh` for the album items that still carry source media, the current
+    item for one a filter already re-uploaded (a stamp, a rename): an upload
+    has no file_reference to go stale, and the source media would undo that
+    filter."""
+    return [
+        old if isinstance(old, _FILTER_UPLOAD_TYPES) else new
+        for old, new in zip(files, fresh, strict=True)
+    ]
+
+
 def _resolve_logger(logger: Optional[Union[str, logging.Logger]]) -> logging.Logger:
     """Normalizes a `str` name / `Logger` / `None` constructor arg into a `Logger`."""
     if isinstance(logger, str):
@@ -870,9 +893,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         def _apply_fresh_album_media(fresh: List[types.TypeMessageMedia]) -> None:
             nonlocal files
-            files = fresh
+            files = _keep_filter_uploads(files, fresh)
             # Also refresh the shared source album: see new_album.
-            fresh_media_by_id = dict(zip(idxs, files, strict=True))
+            fresh_media_by_id = dict(zip(idxs, fresh, strict=True))
             for original_message in album:
                 if original_message.id in fresh_media_by_id:
                     original_message.media = fresh_media_by_id[original_message.id]
@@ -1366,12 +1389,12 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     idxs: List[int] = idxs,
                 ) -> None:
                     nonlocal files
-                    files = fresh
+                    files = _keep_filter_uploads(files, fresh)
                     # Also refresh the shared source album: every remaining
                     # fan-out target for it copies from `album`, and would
                     # otherwise redo this same refetch against the same stale
                     # references once per target.
-                    fresh_media_by_id = dict(zip(idxs, files, strict=True))
+                    fresh_media_by_id = dict(zip(idxs, fresh, strict=True))
                     for original_message in album:
                         if original_message.id in fresh_media_by_id:
                             original_message.media = fresh_media_by_id[
@@ -2193,7 +2216,9 @@ class Mirroring:
 
         Idempotent: a message is (re-)processed only when it is new or its
         ``edit_date`` advanced past what was last synced (`broadcast_sync`
-        table). A restart on an already-synced channel does ~0 API calls.
+        table). A restart on an already-synced channel re-sends/edits ~0
+        messages, but still pages through the whole history (`iter_messages`,
+        ~1 request per 100 messages).
 
         - Sends messages not yet mirrored.
         - Edits mirrors whose source was edited while the bot was offline.

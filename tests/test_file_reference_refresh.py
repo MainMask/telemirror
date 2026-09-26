@@ -18,7 +18,12 @@ from telethon.tl import types
 
 import telemirror.mirroring as mirroring
 from config import DirectionConfig
-from telemirror.messagefilters import EmptyMessageFilter
+from telemirror.messagefilters import (
+    EmptyMessageFilter,
+    FilterAction,
+    FilterResult,
+    MessageFilter,
+)
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase
 from tests.conftest import make_message, run
@@ -565,3 +570,94 @@ def test_new_album_refresh_is_reused_across_fanout_targets(monkeypatch):
     assert client.get_messages_calls == 1
     assert len(run(db.get_messages(1, SOURCE))) == 2
     assert len(run(db.get_messages(2, SOURCE))) == 2
+
+
+class _StampFirstItem(MessageFilter):
+    """Stands in for WatermarkRemovalFilter: re-uploads item 1 (a stamped
+    photo), leaves item 2 as source media (e.g. a video over the length
+    limit, whose file_reference is the one that goes stale)."""
+
+    async def _process_message(self, message, event_type):
+        if message.id == 1:
+            message.media = _STAMPED
+        return FilterResult(FilterAction.CONTINUE, message)
+
+
+_STAMPED = types.InputFile(id=42, parts=1, name="photo.jpg", md5_checksum="")
+
+
+def _stamp_proc(db):
+    fresh_full = [
+        types.Message(id=i, peer_id=types.PeerChannel(1000), media=types.MessageMediaUnsupported())
+        for i in (1, 2)
+    ]
+    cfg = DirectionConfig(
+        disable_delete=False, disable_edit=False, filters=_StampFirstItem()
+    )
+    return EventProcessor(
+        chat_mapping={SOURCE: {TARGET: [cfg]}},
+        database=db,
+        client=_FakeClient(fresh_full),
+        logger=logging.getLogger("test.filereference"),
+    )
+
+
+def test_new_album_refresh_keeps_filter_uploaded_items(monkeypatch):
+    """The refresh replaces only items still carrying source media: an item a
+    filter already re-uploaded (stamp, rename) has no file_reference to go
+    stale, and swapping it for the raw source media would drop the stamp."""
+    db = run(InMemoryDatabase())
+    calls = []
+
+    async def fake_send_file(client, entity, caption, file, **kw):
+        calls.append(list(file))
+        if len(calls) == 1:
+            raise errors.FileReferenceExpiredError(request=None)
+        return [
+            types.Message(id=900 + i, peer_id=types.PeerChannel(1), message="")
+            for i in range(len(file))
+        ]
+
+    monkeypatch.setattr(mirroring, "send_file", fake_send_file)
+
+    album = _album()
+    run(_stamp_proc(db).new_album(SOURCE, album, "link"))
+
+    assert len(calls) == 2
+    assert calls[1][0] is _STAMPED
+    assert isinstance(calls[1][1], types.MessageMediaUnsupported)
+    # The shared source album gets the refreshed source media, never the
+    # stamped upload (later targets run their own filters on it).
+    assert all(isinstance(m.media, types.MessageMediaUnsupported) for m in album)
+
+
+def test_new_album_caption_split_refresh_keeps_filter_uploaded_items(monkeypatch):
+    """Same as above through the caption-split fallback's own refresh."""
+    db = run(InMemoryDatabase())
+    calls = []
+
+    async def fake_send_file(client, entity, caption, file, **kw):
+        calls.append(list(file))
+        if len(calls) == 1:
+            raise errors.MediaCaptionTooLongError(request=None)
+        if len(calls) == 2:
+            raise errors.FileReferenceExpiredError(request=None)
+        return [
+            types.Message(id=900 + i, peer_id=types.PeerChannel(1), message="")
+            for i in range(len(file))
+        ]
+
+    async def fake_send_message(client, entity, message, **kw):
+        return types.Message(id=950, peer_id=types.PeerChannel(1), message="")
+
+    monkeypatch.setattr(mirroring, "send_file", fake_send_file)
+    monkeypatch.setattr(mirroring, "send_message", fake_send_message)
+
+    album = _album()
+    album[0].message = "y" * 1025
+    run(_stamp_proc(db).new_album(SOURCE, album, "link"))
+
+    assert len(calls) == 3
+    assert calls[2][0] is _STAMPED
+    assert isinstance(calls[2][1], types.MessageMediaUnsupported)
+    assert all(isinstance(m.media, types.MessageMediaUnsupported) for m in album)

@@ -3322,3 +3322,154 @@ GIFs, photos sent as files), and concurrent update dispatch.
   Telethon applies each pts once, so it isn't a practical path.
 
 Full suite 555 → 559, `pyflakes`, `ruff` and `mypy .` green, also without `.env`.
+
+# Pass 24 — whole-project review
+
+A full read of every module, deploy unit and script, requested by the owner.
+Each suspected bug was reproduced by a scratchpad script against the real code
+or matched to an earlier sign-off before a verdict.
+
+## Fixed
+
+- **P3** `mirroring.py`, album `FileReferenceExpiredError` refresh (both
+  `new_album`'s and `_send_album_with_caption_split`'s
+  `_apply_fresh_album_media`): the retry replaced *every* item with the
+  refetched source media, including items a filter had already re-uploaded. A
+  photo + over-limit-video album whose video reference went stale was re-sent
+  with the photo unstamped; a document album lost `DocumentFilenameFilter`'s
+  rename the same way. Repro: first send `['InputFile',
+  'MessageMediaUnsupported']`, retry `['MessageMediaUnsupported',
+  'MessageMediaUnsupported']`. New `_keep_filter_uploads` swaps in fresh media
+  only for items that aren't a filter upload (`InputFile`, `InputFileBig`,
+  `InputMediaUploaded*`); the shared source album is still refreshed from the
+  refetched media (never the upload). Single messages and edits are
+  unaffected: an upload can't raise the error. Tests:
+  `tests/test_file_reference_refresh.py::test_new_album_refresh_keeps_filter_uploaded_items`,
+  `::test_new_album_caption_split_refresh_keeps_filter_uploaded_items` (both
+  failed before the fix).
+- **P3** `past_mode.py::_configure_logging` set up only the `past_mode` and
+  `telethon` loggers. Everything the filters and media helpers log through
+  `telemirror.*` module loggers was lost at INFO (download retries, videos
+  sent without a stamp) and went out at WARNING+ unformatted via logging's
+  last-resort handler. Now `telemirror` gets the same stdout handler (`main.py`
+  already had it). Test:
+  `tests/test_past_mode.py::test_configure_logging_covers_telemirror_modules`
+  (failed before the fix).
+- **Doc** `_sync_broadcast_channel` docstring said a restart on a synced
+  channel does "~0 API calls"; it re-sends/edits ~0 but still pages the whole
+  history (~1 request per 100 messages).
+
+## Re-verified, intended — no change
+
+- `TelegramLogHandler` has no 4096-char cap, and `processor.py` logs ffmpeg's
+  full stderr: real ffmpeg failures (missing output dir, `/dev/full`) measured
+  ~3.3k chars, under the limit.
+- An edit passing `file=MessageMediaWebPage`: see pass 21.
+- A caption-split mirror whose source caption later shrinks under 1024 gets
+  the new caption while the old tail reply stays: the tail is untracked by
+  design (see the `mirroring.py` invariants).
+- `alert.py` reads `TECH_CHANNEL` from `.env` only: see pass 21.
+- `config.py`'s `YAML_CONFIG_ENV.replace("\\n", "\n")`: neither config holds a
+  literal `\n`, so it changes nothing today.
+- Extra ruff families (`B`, `PLW`, `ASYNC`): style only (blocking `input()` in
+  interactive scripts, loop-variable rebinding, `global`).
+- The server's `.venv` is Python 3.12.3 while CI, the Dockerfile and
+  `.python-version` target 3.13; this pass ran the suite on 3.12 (CI covers
+  3.13).
+
+Full suite 559 → 562, `pyflakes`, `ruff` and `mypy .` green, also without `.env`.
+
+## Pass 24, second review — faststart for re-encoded videos
+
+A second whole-project review, requested by the owner: this pass's own diff,
+then angles the first read didn't take (ffmpeg/OpenCV on awkward inputs,
+broadcast edit fan-out). No new bug confirmed.
+
+## Fixed
+
+- **P3, hardening** `watermark/processor.py`: the stamped (and delogo'd)
+  video was written with its `moov` index at the end (sample: offset 693 382
+  of 716 470 bytes), while the upload keeps the source's
+  `DocumentAttributeVideo`, `supports_streaming` included — the declared flag
+  didn't match the file. Both ffmpeg commands now pass `-movflags +faststart`.
+  Cost measured on the 1-vCPU host (300 MB MP4, `-c copy`, 5 alternating
+  runs): 1.70 s → 2.46 s on average (+0.76 s, range +0.10…1.16 s), next to an
+  encode budget of up to 180 s. Whether Telegram clients
+  actually failed to stream the old files wasn't checked live. Tests:
+  `tests/test_watermark_video_encode.py::test_stamp_output_is_faststart`,
+  `::test_delogo_output_is_faststart` (real ffmpeg; both failed before).
+
+## Re-verified, intended — no change
+
+- This pass's first-review diff: `_keep_filter_uploads` covers every type a
+  filter puts into `message.media` (cached uploads included); the source album
+  only ever gets refetched media; the `telemirror` logger's
+  `propagate=False` affects nothing in past_mode.
+- WebM sources (VP9/Opus, VP8/Vorbis) stamp into MP4 without error on the
+  host's ffmpeg 6.1.
+- A portrait video with a rotation tag: OpenCV reports the rotated size
+  (720×1280) and ffmpeg auto-rotates, so the stamp size/position match the
+  output (720×1280).
+- A broadcast edit goes to ~199 mirrors with no delay, and a >300 s FloodWait
+  gives up per mirror and moves on: the documented choice in
+  `edit_message`'s flood handler comment; shorter floods are slept by Telethon.
+- `on_private_message` also fires on Telegram's service DMs; it forwards the
+  sender name only, never the text.
+
+Full suite 562 → 564, `pyflakes`, `ruff` and `mypy .` green.
+
+## Pass 24, third review — config data, secrets, General-topic sends
+
+A third whole-project review, requested by the owner. Code unchanged since the
+second review (only the faststart diff, re-read). New angles: the live config
+data itself, secrets, and the forum General topic as a send target. No bug
+confirmed; no code change.
+
+## Needs a live check — no change
+
+- Directions whose target is a forum's General topic (`…#1`: four donor
+  directions in `mirror.config.yml` plus the four broadcast directions
+  `config.py` derives from them) send a new post with `reply_to=1`
+  (`_resolve_reply_target`: no mirrored parent → `reply_to=config.to_topic_id`).
+  Official clients are believed to post to General with no `reply_to` (not
+  checked here); whether
+  Telegram accepts `reply_to=1` there, and whether the post then shows a reply
+  header, can't be verified offline: the logic dates from upstream's "Topic
+  support" (2024), whose examples never target `#1`, and the local
+  `binding_id` is empty (0 rows, pre-migration schema). Check: post in a donor's
+  General topic, look at the mirror.
+
+## Re-verified, no change
+
+- Live config (`CHAT_MAPPING`): 21 sources → 20 targets, 398 copy-mode
+  directions; no duplicate direction, no source that is also a target, no
+  source topic fanned to two target topics or two sources merged into one
+  target topic, no pair mixing a catch-all and a topic-scoped direction.
+- `.env` is mode 600 and was never committed; no session string or token in
+  the git history.
+- The faststart diff: the delogo output's extra pass is wasted when a stamp
+  follows (it re-encodes); the delogo path is off in both configs.
+
+Full suite 564, `pyflakes`, `ruff` and `mypy .` green.
+
+## Pass 24 session-diff review — a test gap and two wrong numbers
+
+A review of this pass's whole diff. No bug in the code.
+
+## Fixed
+
+- **Test gap.** Reverting the caption-split path's shared-album refresh to
+  `zip(idxs, files)` (which would write the stamped upload onto the source
+  album, so later targets lose its `source_media_id`) left every test green.
+  `test_new_album_caption_split_refresh_keeps_filter_uploaded_items` now
+  asserts the source album too; the same mutant fails it.
+- **Wrong number.** The faststart cost came from one warm-cache run
+  (+0.06 s); five alternating runs give +0.76 s per 300 MB (see the second
+  review's entry, corrected above, and the comment in `processor.py`).
+- **Wrong number.** The third review counted four General-topic directions;
+  with the broadcast ones `config.py` derives there are eight (entry
+  corrected, and its unchecked claim about official clients softened).
+- **Nit.** `_moov_before_mdat` read the file without closing it; now
+  `Path.read_bytes()`.
+
+Full suite 564, `pyflakes`, `ruff` and `mypy .` green.

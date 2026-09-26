@@ -5,6 +5,7 @@ whole call, so nothing else exercises the command build)."""
 import asyncio
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 from telethon.tl import types
@@ -252,3 +253,33 @@ def test_delogo_handles_odd_frame_dimensions(tmp_path, monkeypatch):
 
     assert remove_watermark_from_video(_odd_clip(tmp_path), WatermarkConfig(), out) is True
     assert _dims(out) == "852,480"
+
+
+# ── moov before mdat (Pass 24) ──────────────────────────────────────────────
+# The upload keeps the source's DocumentAttributeVideo, supports_streaming
+# included; an MP4 is only streamable with its index (moov) ahead of the media
+# data (mdat), and ffmpeg writes it at the end unless told otherwise.
+
+def _moov_before_mdat(path: str) -> bool:
+    data = Path(path).read_bytes()
+    return 0 <= data.find(b"moov") < data.find(b"mdat")
+
+
+@_needs_ffmpeg
+def test_stamp_output_is_faststart(tmp_path):
+    out = str(tmp_path / "out.mp4")
+    config = WatermarkConfig(remove_watermark=False)
+
+    assert stamp_watermark_on_video(_odd_clip(tmp_path), config, out) is True
+    assert _moov_before_mdat(out)
+
+
+@_needs_ffmpeg
+def test_delogo_output_is_faststart(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        processor, "_detect_watermark", lambda frame, config: (10, 10, 50, 20)
+    )
+    out = str(tmp_path / "out.mp4")
+
+    assert remove_watermark_from_video(_odd_clip(tmp_path), WatermarkConfig(), out) is True
+    assert _moov_before_mdat(out)
