@@ -15,6 +15,8 @@ history replay. Built for bare-metal Ubuntu with systemd (not Docker; a
 | `systemd/telemirror-alert@.service` | `OnFailure=`: tells `TECH_CHANNEL` that a unit gave up |
 | `systemd/telemirror-health.{timer,service}` | every 10 min: alerts if the mirror is flapping or stuck non-active |
 | `systemd/telemirror-restart.{timer,service}` | a clean restart of the mirror once a day (04:00) |
+| `systemd/telemirror-panel.service` | optional Telegram control panel bot (`python -m telemirror.panel`) |
+| `systemd/telemirror-task@.service` | maintenance task started by the panel (`skylon_set.<module>`, stops the live mirror for its duration) |
 | `systemd/journald.conf.d/telemirror.conf` | `SystemMaxUse=500M` — the journal won't fill up `/var` |
 | `cron.d/telemirror-tmp` | hourly cleanup of orphaned `/tmp/tmp*.mp4` files |
 
@@ -105,6 +107,31 @@ journalctl -u telemirror-past-courses.service -f
 - `past_mode.py` keeps checkpoints in the DB — an interruption resumes from
   where it left off. A full reset of history and recipients —
   `skylon_set/clear_channels.py`.
+
+## Control panel (optional)
+
+```bash
+# .env: PANEL_BOT_TOKEN=… and PANEL_ADMIN_IDS=<your Telegram user id>
+systemctl enable --now telemirror-panel.service
+journalctl -u telemirror-panel.service -f
+```
+
+- A separate unit with **no** `Conflicts=` on the mirror: it stays up while the
+  mirror is stopped or crash-looping. It only uses the Bot API, never
+  `SESSION_STRING`.
+- Runs as root like the other units: it calls `systemctl`/`journalctl`, but only
+  for the units listed in `telemirror/panel/settings.py` (no user input in argv).
+- Maintenance runs (`restrict_saving`, `sync_pins`) go through
+  `telemirror-task@<module>.service`: `Conflicts=telemirror.service` stops the
+  mirror, `OnSuccess=`/`OnFailure=` start it again (a failure also alerts). The
+  panel writes the arguments to `/run/telemirror-panel/<module>.env` right before
+  the start; a manual `systemctl start telemirror-task@…` without that file fails
+  on purpose.
+- Config saves validate the candidate by importing `config.py` in a child
+  process (cv2 included) — hence `MemoryMax=600M` on the panel unit.
+- Check on first deploy: `systemctl show telemirror.service --timestamp=unix -p
+  ActiveEnterTimestamp` prints `@<unix>` (the panel's "unapplied changes" hint
+  relies on it; systemd ≥ 251).
 
 ## Memory and monitoring
 

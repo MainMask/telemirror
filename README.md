@@ -309,4 +309,34 @@ Progress is checkpointed after each message: if interrupted, re-running resumes 
 | `skylon_set/clear_channels.py` | Purges all messages in recipient channels/topics, then resets the `past_mode_checkpoint` and `binding_id` rows for the cleared targets (plus the broadcast channel's `broadcast_sync` state when a cleared target receives broadcasts, so the next start re-delivers the admin posts to it). Supports `--dry-run`. |
 | `skylon_set/sync_pins.py` | Mirrors donor pinned messages onto their recipient mirrors using the `binding_id` table (needs PostgreSQL + a prior `past_mode.py` run). Reconcile mode by default (also unpins what the donor unpinned, only among mirror-managed pins); `--additive` disables unpinning, `--dry-run` shows the plan. |
 | `skylon_set/anonymize_groups.py` | In every supergroup where the account is an admin: enables "Remain Anonymous" for the account, then "Hide Members" for the group (the latter only where Telegram allows it). |
-| `skylon_set/restrict_saving.py` | Enables "Restrict Saving Content" (`noforwards`) on every recipient channel/supergroup — live (`CHAT_MAPPING`) and course (`.configs/citadel_courses.config.yml`). Supports `--dry-run`. |
+| `skylon_set/restrict_saving.py` | Enables "Restrict Saving Content" (`noforwards`) on every recipient channel/supergroup — live (`CHAT_MAPPING`) and course (`.configs/citadel_courses.config.yml`). Supports `--dry-run`; `--yes` skips the confirmation prompt (used by the control panel). |
+
+## Control panel bot (`telemirror/panel`, optional)
+
+A separate Bot API bot (aiogram 3) for managing the mirror from Telegram instead
+of SSH. Its UI is in Russian. It runs as its own process — `python -m
+telemirror.panel` / `telemirror-panel.service` — and never opens the userbot
+session; without `PANEL_BOT_TOKEN` it exits immediately and nothing else changes.
+Supported deployment: the systemd VPS setup from [`deploy/`](deploy/README.md)
+(it drives `systemctl`/`journalctl`; Docker/Heroku are not supported).
+
+| Variable | Description |
+|---|---|
+| `PANEL_BOT_TOKEN` | Token from @BotFather. Unset = panel disabled. |
+| `PANEL_ADMIN_IDS` | Comma-separated Telegram user ids allowed to use the panel (required with a token; everyone else is ignored). |
+
+What it does:
+- **📁 Проекты** — the two mirror configs: the live mirror (`.configs/mirror.config.yml`, `telemirror.service`) and the course replay (`.configs/citadel_courses.config.yml`, `telemirror-past-courses.service`). View/add/delete directions, toggle edit/delete forwarding, global `disable_edit`/`disable_delete`/`mode`; filters are view-only. "Применить" restarts the live mirror (config is read only at startup); "Запустить replay" starts the course backfill.
+- **📊 Задачи** (`/status`) — state of the mirror, the replay and maintenance tasks, the journal of the current run, start/stop/restart with confirmation.
+- **⚙️ Настройки** — where the live config comes from, admins, `TECH_CHANNEL`, monitoring timers; **🛠 Обслуживание** runs `restrict_saving` / `sync_pins` as `telemirror-task@<module>.service` (stops the live mirror for the duration, brings it back): always a `--dry-run` first, the real run only after a successful dry-run with the same flags.
+
+Config writes keep comments (ruamel round-trip), make a `*.bak`, refuse if the
+file was edited by hand meanwhile, and are validated by importing `config.py`
+against the candidate in a subprocess — an invalid config is never written. If
+`YAML_CONFIG_ENV` is set (or the mirror is configured by env vars), the live
+config is shown read-only. Saved-but-unapplied changes also go live at the daily
+04:00 restart.
+
+CLI-only by design: `login.py`, `skylon_set/setup_mirrors.py`,
+`skylon_set/clear_channels.py`, `skylon_set/anonymize_groups.py`,
+`sync_pins --max-pins/--only`, `past_mode.py` for the live config.

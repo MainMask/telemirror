@@ -23,7 +23,9 @@ for unit in \
     telemirror-restart.service \
     telemirror-restart.timer \
     telemirror-health.service \
-    telemirror-health.timer; do
+    telemirror-health.timer \
+    telemirror-panel.service \
+    telemirror-task@.service; do
     ln -sfn "$REPO_DIR/deploy/systemd/$unit" "/etc/systemd/system/$unit"
     echo "  /etc/systemd/system/$unit -> $REPO_DIR/deploy/systemd/$unit"
 done
@@ -63,6 +65,10 @@ Done. Units are installed but NOT started. Next, by hand:
   # one-off course history replay (stops the live mirror, brings it back when done):
   systemctl start telemirror-past-courses.service
   journalctl -u telemirror-past-courses.service -f
+
+  # optional Telegram control panel (needs PANEL_BOT_TOKEN + PANEL_ADMIN_IDS in .env):
+  systemctl enable --now telemirror-panel.service
+  journalctl -u telemirror-panel.service -f
 
 Details — deploy/README.md
 EOF

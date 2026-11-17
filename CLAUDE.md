@@ -47,3 +47,12 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Hook into existing plugin/handler mechanisms instead of building parallel infrastructure.
 - Match surrounding style: naming, module layout, abstraction level.
 For any non-trivial feature: read the relevant files → propose a plan (what changes, what's added, why) → wait for approval → implement.
+
+## Project notes: control panel (`telemirror/panel`)
+
+- Separate process (`python -m telemirror.panel`, `deploy/systemd/telemirror-panel.service`), aiogram 3.32, Bot API only — it never opens the userbot `SESSION_STRING`. No `PANEL_BOT_TOKEN` → exits 0; `main.py` does not know about it.
+- Never `import config` from the panel (heavy, raises on a partial env): it reads its keys via decouple in `panel/settings.py`, like `telemirror/alert.py`.
+- Config writes only via `panel/configstore.py` (`ConfigStore.update`): ruamel round-trip → PyYAML self-check → validation by `import config` in a subprocess → `.bak` → atomic replace, refused if the file changed on disk. Never write `.env`.
+- Changes apply by restarting `telemirror.service` (config is read once at import). Session-exclusive work (replay, `restrict_saving`, `sync_pins`) runs only as systemd units with `Conflicts=telemirror.service`; units/flags are whitelisted in `panel/settings.py`.
+- Layout: `texts.py` (all Russian UI strings), `callbacks.py` (`Nav`/`Act`, ≤64 bytes), `keyboards.py` (markup only), `routers/{start,tasks,projects,settings,maintenance}.py`, `systemd.py`, `status.py`, `ui.py` (single edited-in-place panel message), `app.py` (`build_dispatcher`).
+- Tests: `tests/test_panel_*.py`; `tests/_panel.py` has a fake Bot API session / fake systemd and feeds real updates through the Dispatcher. Routers are module singletons — build the Dispatcher once per test module.
