@@ -1,9 +1,9 @@
 [Unit]
-Description=telemirror — scheduled clean restart of the live mirror
-# Don't touch it if a history backfill is currently holding the mirror stopped.
-After=telemirror.service
+Description=telemirror — scheduled clean restart of the projects' live mirrors
 OnFailure=telemirror-alert@%n.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/systemctl try-restart telemirror.service
+# try-restart: only mirrors that are running — one stopped for a history
+# replay, a task or a shared-session pause stays stopped.
+ExecStart=/usr/bin/systemctl try-restart telemirror@*.service

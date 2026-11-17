@@ -34,3 +34,20 @@ def test_different_callers_can_use_different_retry_policies():
     )
     assert live._connection_retries == 1000
     assert operator_script._connection_retries == 20
+
+
+def test_jsession_lang_pack_and_system_lang_code_reach_init_connection():
+    client = build_telegram_client(
+        "", 2040, "hash", lang_pack="tdesktop", system_lang_code="cs",
+        connection_retries=5, retry_delay=1,
+    )
+    assert client._init_request.lang_pack == "tdesktop"
+    assert client._init_request.system_lang_code == "cs"
+
+
+def test_without_jsession_lang_values_telethon_defaults_stay():
+    client = build_telegram_client(
+        "", 12345, "hash", connection_retries=5, retry_delay=1
+    )
+    assert client._init_request.lang_pack == ""
+    assert client._init_request.system_lang_code == "en"

@@ -17,6 +17,7 @@ from aiogram.enums import ParseMode
 from telemirror.misc.log_setup import setup_stdout_logger
 from telemirror.panel import settings
 from telemirror.panel.app import bot_commands, build_dispatcher
+from telemirror.panel.safe_edit import SafeEdit
 
 
 async def _run(logger: logging.Logger) -> int:
@@ -30,6 +31,8 @@ async def _run(logger: logging.Logger) -> int:
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True),
     )
+    # "message is not modified" / a message that can't be edited: handled once, here.
+    bot.session.middleware(SafeEdit())
     dp = build_dispatcher(settings.ADMIN_IDS)
     await bot.set_my_commands(bot_commands())
     logger.info("Control panel started, admins: %s", sorted(settings.ADMIN_IDS))

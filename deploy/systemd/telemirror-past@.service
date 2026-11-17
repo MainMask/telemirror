@@ -1,0 +1,33 @@
+[Unit]
+Description=telemirror — history replay of project %i
+Documentation=https://github.com/MainMask/telemirror
+After=network-online.target postgresql.service
+Wants=network-online.target
+# Uses the project's session — starting the replay stops its live mirror. The
+# control panel brings the mirror (and any project it paused for a shared
+# session) back once the replay ends, whatever the outcome.
+Conflicts=telemirror@%i.service
+OnFailure=telemirror-alert@%n.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/root/telemirror
+Environment=TELEMIRROR_PROJECT=%i
+# Same config the live mirror reads; only directions with past_mode: are
+# replayed, already-mirrored messages are deduped by the DB.
+ExecStart=/root/telemirror/.venv/bin/python -u past_mode.py
+# Survives a network drop (past_mode resumes from its checkpoint).
+Restart=on-failure
+RestartSec=60
+
+MemoryHigh=1100M
+MemoryMax=1400M
+
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+Nice=10
+
+# No [Install] — started on demand (the control panel or systemctl start).

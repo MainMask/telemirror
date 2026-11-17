@@ -4,40 +4,48 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from telemirror.panel import configstore, settings
-from telemirror.panel.settings import Project
+from telemirror.panel import configstore
 from telemirror.panel.systemd import Systemd, SystemdError, UnitState
+from telemirror.projects import Project, ProjectError, list_projects, load_project
 
 logger = logging.getLogger(__name__)
 
 
-async def unit_state(sysd: Systemd, key: str) -> Optional[UnitState]:
+async def unit_state(sysd: Systemd, unit: str) -> Optional[UnitState]:
     """None when systemd is unavailable or the query failed (logged)."""
     try:
-        return await sysd.show(settings.UNITS[key])
-    except SystemdError as e:
-        logger.warning("panel: systemctl show %s failed: %s", settings.UNITS[key], e)
+        return await sysd.show(unit)
+    except (SystemdError, ValueError) as e:
+        logger.warning("panel: systemctl show %s failed: %s", unit, e)
         return None
 
 
-async def running_exclusive(sysd: Systemd) -> list[str]:
-    """Keys of session-holding units (replay/maintenance) that are running."""
+def find(key: str) -> Optional[Project]:
+    try:
+        return load_project(key)
+    except ProjectError:
+        return None
+
+
+async def running_units(sysd: Systemd, project: Project) -> list:
+    """The project's units that are running now."""
     out = []
-    for key in settings.EXCLUSIVE_UNIT_KEYS:
-        st = await unit_state(sysd, key)
+    for unit in project.units:
+        st = await unit_state(sysd, unit)
         if st is not None and st.running:
-            out.append(key)
+            out.append(unit)
     return out
 
 
-def visible_projects() -> list[Project]:
-    """The live project always (it may be env-configured); the others only
-    when their file exists."""
-    return [p for p in settings.PROJECTS if p.live or p.path.exists()]
-
-
-def project_by_key(key: str) -> Optional[Project]:
-    return next((p for p in visible_projects() if p.key == key), None)
+async def session_holders(sysd: Systemd, project: Project) -> list:
+    """(project, unit) running on this project's session — its own units and
+    those of the projects sharing the session file."""
+    mine = project.session_path.resolve()
+    out = []
+    for other in list_projects():
+        if other.session_path.resolve() == mine:
+            out += [(other, unit) for unit in await running_units(sysd, other)]
+    return out
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,12 @@ class ProjectInfo:
     @property
     def readable(self) -> bool:
         return self.snapshot is not None
+
+    @property
+    def replaceable(self) -> bool:
+        """The whole file may be swapped (rollback / upload) — even when it
+        doesn't parse: that is exactly when those two are needed."""
+        return self.read_only is None
 
     @property
     def writable(self) -> bool:
@@ -66,16 +80,9 @@ class ProjectInfo:
 
 def project_info(project: Project) -> ProjectInfo:
     reason = configstore.read_only_reason(project)
-    # With YAML_CONFIG_ENV the file isn't what the mirror runs — showing it
-    # would mislead; in env mode / missing there is no file at all.
     if reason is not None:
         return ProjectInfo(project, reason, None, None)
     try:
         return ProjectInfo(project, None, configstore.load(project), None)
     except Exception as e:  # noqa: BLE001 - a hand-broken YAML must not kill the screen
         return ProjectInfo(project, None, None, f"{type(e).__name__}: {e}")
-
-
-def total_directions(infos: list[ProjectInfo]) -> Optional[int]:
-    counted = [len(i.directions) for i in infos if i.readable]
-    return sum(counted) if counted else None

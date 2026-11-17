@@ -17,17 +17,26 @@ echo "== 1/5 swap =="
 echo
 echo "== 2/5 systemd units =="
 for unit in \
-    telemirror.service \
-    telemirror-past-courses.service \
+    telemirror@.service \
+    telemirror-past@.service \
+    telemirror-task@.service \
     telemirror-alert@.service \
     telemirror-restart.service \
     telemirror-restart.timer \
     telemirror-health.service \
     telemirror-health.timer \
-    telemirror-panel.service \
-    telemirror-task@.service; do
+    telemirror-panel.service; do
     ln -sfn "$REPO_DIR/deploy/systemd/$unit" "/etc/systemd/system/$unit"
     echo "  /etc/systemd/system/$unit -> $REPO_DIR/deploy/systemd/$unit"
+done
+# The pre-project units (see deploy/README.md → Migrating): their files are gone
+# from the repo, drop the dangling links.
+for unit in telemirror.service telemirror-past-courses.service telemirror-past-live.service; do
+    link="/etc/systemd/system/$unit"
+    if [ -L "$link" ] && [ ! -e "$link" ]; then
+        rm -f "$link"
+        echo "  removed the dangling $link"
+    fi
 done
 
 echo
@@ -58,17 +67,15 @@ cat <<'EOF'
 
 Done. Units are installed but NOT started. Next, by hand:
 
-  # live mirror, 24/7 (if the unit was masked — first: systemctl unmask telemirror.service):
-  systemctl enable --now telemirror.service
-  journalctl -u telemirror.service -f
-
-  # one-off course history replay (stops the live mirror, brings it back when done):
-  systemctl start telemirror-past-courses.service
-  journalctl -u telemirror-past-courses.service -f
-
-  # optional Telegram control panel (needs PANEL_BOT_TOKEN + PANEL_ADMIN_IDS in .env):
+  # the Telegram control panel (needs PANEL_BOT_TOKEN + PANEL_ADMIN_IDS in .env):
   systemctl enable --now telemirror-panel.service
   journalctl -u telemirror-panel.service -f
+
+  # then in the bot: 📁 Проекты → ➕ Новый проект → … → ▶️ Запустить
+  # (coming from telemirror.service: python -m telemirror.projects migrate — deploy/README.md)
+  # or by hand, for a project <key>:
+  systemctl enable --now telemirror@<key>.service
+  journalctl -u telemirror@<key>.service -f
 
 Details — deploy/README.md
 EOF

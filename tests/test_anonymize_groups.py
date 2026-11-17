@@ -134,3 +134,30 @@ def test_apply_anonymous_declined(monkeypatch):
     run(anonymize_groups.apply_anonymous(client, _t.SimpleNamespace(id=1),
                                          [(_dialog(-100), part, False)]))
     assert client.edited == []
+
+
+def _no_input(*_a):
+    raise AssertionError("must not prompt")
+
+
+def test_dry_run_changes_nothing_and_does_not_prompt(monkeypatch):
+    monkeypatch.setattr("builtins.input", _no_input)
+    anon = _AnonFakeClient({-100: False})
+    part = _t.SimpleNamespace(admin_rights=ChatAdminRights(), rank="")
+    run(anonymize_groups.apply_anonymous(anon, _t.SimpleNamespace(id=1),
+                                         [(_dialog(-100), part, False)], dry_run=True))
+    hide = _FakeClient({-100: False})
+    run(anonymize_groups.apply_hide_members(hide, [(_dialog(-100), None, False)], dry_run=True))
+    assert anon.edited == [] and hide.toggled == []
+
+
+def test_yes_skips_the_prompts(monkeypatch):
+    """--yes: the panel's task unit has no terminal to answer input()."""
+    monkeypatch.setattr("builtins.input", _no_input)
+    anon = _AnonFakeClient({-100: False})
+    part = _t.SimpleNamespace(admin_rights=ChatAdminRights(), rank="")
+    run(anonymize_groups.apply_anonymous(anon, _t.SimpleNamespace(id=1),
+                                         [(_dialog(-100), part, False)], assume_yes=True))
+    hide = _FakeClient({-100: False})
+    run(anonymize_groups.apply_hide_members(hide, [(_dialog(-100), None, False)], assume_yes=True))
+    assert anon.edited == [-100] and hide.toggled == [-100]

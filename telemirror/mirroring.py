@@ -2469,6 +2469,8 @@ class Telemirror:
         api_device_model: Optional[str] = None,
         api_system_version: Optional[str] = None,
         api_app_version: Optional[str] = None,
+        api_lang_pack: Optional[str] = None,
+        api_system_lang_code: Optional[str] = None,
         broadcast_channel: Optional[int] = None,
         tech_channel: Optional[int] = None,
     ):
@@ -2484,6 +2486,8 @@ class Telemirror:
             api_device_model (`str`, optional): Telegram API device model. Defaults to `platform.uname().release`
             api_system_version (`str`, optional): Telegram API system version. Defaults to `platform.uname().machine`
             api_app_version (`str`, optional): Telegram API app version. Defaults to `telethon.version.__version__`
+            api_lang_pack (`str`, optional): initConnection lang_pack (from a .jsession file). Defaults to None
+            api_system_lang_code (`str`, optional): initConnection system_lang_code (from a .jsession file). Defaults to Telethon's
             broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup. Defaults to None.
             tech_channel (`int`, optional): Technical monitoring channel ID. Defaults to None.
         """
@@ -2500,6 +2504,8 @@ class Telemirror:
             device_model=api_device_model,
             system_version=api_system_version,
             app_version=api_app_version,
+            lang_pack=api_lang_pack,
+            system_lang_code=api_system_lang_code,
             connection_retries=1000,
             retry_delay=5,
         )

@@ -3,20 +3,25 @@ Description=telemirror — Telegram control panel bot (aiogram)
 Documentation=https://github.com/MainMask/telemirror
 After=network-online.target
 Wants=network-online.target
-# Deliberately NO Conflicts=/PartOf= with telemirror.service: the panel must
+# Deliberately NO Conflicts=/PartOf= with the mirrors (telemirror@*): the panel must
 # stay up while the mirror is stopped, restarting or crash-looping — that's
-# exactly when it's needed. It never opens the userbot session (Bot API only).
+# exactly when it's needed. It never runs on a project's session: it only
+# connects a new account briefly (sign-in by phone, an uploaded session's check).
 StartLimitIntervalSec=600
 StartLimitBurst=5
+# Gave up after the burst above: alert (telemirror.alert — through this bot's
+# token to its admins, so a broken PANEL_BOT_TOKEN / PANEL_ADMIN_IDS shows only
+# in the journal) — otherwise a dead panel goes unnoticed until someone opens it.
+OnFailure=telemirror-alert@%n.service
 
 [Service]
 Type=simple
 WorkingDirectory=/root/telemirror
 # Without PANEL_BOT_TOKEN in .env this exits 0 (panel disabled) and stays down.
-ExecStart=/root/telemirror/.venv/bin/python -u -m telemirror.panel
+ExecStart=/root/telemirror/.venv/bin/python -u -m bot
 Restart=on-failure
 RestartSec=10
-# /run/telemirror-panel: the TASK_ARGS env files read by telemirror-task@.service.
+# /run/telemirror-panel: the TASK_MODULE/TASK_ARGS env files read by telemirror-task@.service.
 RuntimeDirectory=telemirror-panel
 RuntimeDirectoryMode=0700
 

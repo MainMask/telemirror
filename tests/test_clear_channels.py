@@ -171,3 +171,41 @@ def test_reset_db_state_resets_broadcast_sync_only_for_broadcast_targets(
 
     remaining = run(db.get_broadcast_sync(bc))
     assert remaining == ({} if expect_reset else {1: None, 2: 1700000000})
+
+
+@pytest.mark.parametrize("assume_yes, answer, purged", [(True, None, True), (False, "n", False)])
+def test_yes_skips_the_prompt_without_it_a_no_cancels(monkeypatch, assume_yes, answer, purged):
+    import contextlib
+    import logging
+
+    monkeypatch.setattr(clear_channels, "CHAT_MAPPING", {-1001: {-9001: [_cfg(topic=3)]}})
+    prompts = []
+
+    def fake_input(*a):
+        if answer is None:
+            raise AssertionError("--yes must not prompt")
+        prompts.append(a)
+        return answer
+
+    calls = []
+
+    async def fake_purge(client, channel_id, tids, dry_run, logger):
+        calls.append(channel_id)
+        return 1
+
+    async def fake_reset_db_state(cleared_targets, dry_run, logger):
+        pass
+
+    @contextlib.asynccontextmanager
+    async def fake_open_client(logger, **kw):
+        yield (object(), object())
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(clear_channels, "purge", fake_purge)
+    monkeypatch.setattr(clear_channels, "_reset_db_state", fake_reset_db_state)
+    monkeypatch.setattr(clear_channels, "open_client", fake_open_client)
+
+    run(clear_channels._run(logging.getLogger("t"), False, assume_yes))
+
+    assert (calls == [-9001]) is purged
+    assert len(prompts) == (0 if assume_yes else 1)

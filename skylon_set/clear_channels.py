@@ -5,6 +5,7 @@ described in the config (CHAT_MAPPING).
 Usage:
     python clear_channels.py           # with confirmation
     python clear_channels.py --dry-run # only shows the targets
+    python clear_channels.py --yes     # no prompt (the panel's task unit)
 
 Warning: uses the same SESSION_STRING as the main service.
 Do not run at the same time as main.py.
@@ -146,7 +147,7 @@ async def _reset_db_state(
         await db.close()
 
 
-async def _run(logger: logging.Logger, dry_run: bool) -> None:
+async def _run(logger: logging.Logger, dry_run: bool, assume_yes: bool = False) -> None:
     logger.warning(
         "clear_channels.py uses the same SESSION_STRING as the live service. "
         "Make sure main.py is NOT running."
@@ -175,7 +176,7 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
     for channel_id in full_clear:
         logger.info(f"  {channel_id} (DeleteHistory)")
 
-    if not dry_run:
+    if not dry_run and not assume_yes:
         answer = input("\nProceed with deletion? [y/N] ").strip().lower()
         if answer != "y":
             logger.info("Cancelled.")
@@ -227,11 +228,16 @@ def main() -> None:
         action="store_true",
         help="Only show what would be deleted, without deleting anything",
     )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Don't ask for confirmation (non-interactive runs, e.g. the panel's task unit)",
+    )
     args = parser.parse_args()
 
     logger = setup_stdout_logger("purge_targets", LOG_LEVEL)
     try:
-        asyncio.run(_run(logger, args.dry_run))
+        asyncio.run(_run(logger, args.dry_run, args.yes))
     except KeyboardInterrupt:
         pass
 

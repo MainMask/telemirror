@@ -19,7 +19,10 @@ try:
         API_DEVICE_MODEL,
         API_HASH,
         API_ID,
+        API_LANG_PACK,
+        API_SYSTEM_LANG_CODE,
         API_SYSTEM_VERSION,
+        SESSION_FILE,
         SESSION_STRING,
     )
 except Exception:
@@ -31,10 +34,15 @@ from telethon.errors import ChannelPrivateError, FloodWaitError
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import GetForumTopicsRequest
 
+from telemirror.misc.session_lock import lock_session
+from telemirror.misc.telegram_client import apply_lang_pack
+
 
 def make_client(**extra_kwargs) -> TelegramClient:
     """Build a TelegramClient from the shared session/env config."""
-    return TelegramClient(
+    if API_SYSTEM_LANG_CODE:
+        extra_kwargs.setdefault("system_lang_code", API_SYSTEM_LANG_CODE)
+    client = TelegramClient(
         StringSession(SESSION_STRING),
         API_ID,
         API_HASH,
@@ -43,6 +51,8 @@ def make_client(**extra_kwargs) -> TelegramClient:
         app_version=API_APP_VERSION,
         **extra_kwargs,
     )
+    apply_lang_pack(client, API_LANG_PACK)
+    return client
 
 
 @asynccontextmanager
@@ -59,6 +69,8 @@ async def open_client(
             "This script uses the same SESSION_STRING as main.py. "
             "Make sure main.py is NOT running."
         )
+    if SESSION_FILE:
+        lock_session(SESSION_FILE)
     client = make_client(**client_kwargs)
     client.parse_mode = "markdown"
     await client.connect()
@@ -66,7 +78,7 @@ async def open_client(
         me = await client.get_me()
         if me is None:
             raise RuntimeError(
-                "Not authorized. Run login.py to get a SESSION_STRING."
+                "Not authorized. Run login.py and set SESSION_FILE to the saved .jsession."
             )
         at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
         logger.info(f"Logged in as {utils.get_display_name(me)}{at_username}")

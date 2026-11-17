@@ -32,6 +32,10 @@ services:
       - .env
     volumes:
       - ./.configs:/app/.configs:ro
+      # .jsession files from login.py (SESSION_FILE=sessions/<phone>.jsession);
+      # docker-ignored, so never baked into the image. Writable: main.py takes
+      # the session's lock file (<session>.lock) next to it.
+      - ./sessions:/app/sessions
     ports:
       - "8000:8000"
     depends_on:

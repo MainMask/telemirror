@@ -24,7 +24,7 @@ from typing import Set
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
-    from config import CHAT_MAPPING, LOG_LEVEL
+    from config import CHAT_MAPPING, LOG_LEVEL, TELEMIRROR_PROJECT
 except Exception:
     print("Failed reading .env")
     raise
@@ -71,8 +71,16 @@ def course_recipient_ids(path: Path = COURSES_CONFIG_PATH) -> Set[int]:
     }
 
 
+def recipient_ids_of_run(chat_mapping, project) -> Set[int]:
+    """Run as a project (the panel's 🛠 Обслуживание): only its own recipients —
+    the courses are a project of their own. Without one (by hand, pre-project
+    setup): the live mapping plus the course config, as before."""
+    ids = collect_recipient_ids(chat_mapping)
+    return ids if project else ids | course_recipient_ids()
+
+
 async def _run(logger: logging.Logger, dry_run: bool, assume_yes: bool = False) -> None:
-    recipient_ids = collect_recipient_ids(CHAT_MAPPING) | course_recipient_ids()
+    recipient_ids = recipient_ids_of_run(CHAT_MAPPING, TELEMIRROR_PROJECT)
     if not recipient_ids:
         logger.warning("CHAT_MAPPING is empty — nothing to configure.")
         return

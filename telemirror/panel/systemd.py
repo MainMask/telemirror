@@ -1,7 +1,8 @@
 """Async ``systemctl`` / ``journalctl`` access for the panel.
 
-Only unit names from ``settings.UNITS`` / ``settings.TIMERS`` ever reach argv —
-no user input does. ``Runner`` is injectable so tests never call systemd.
+Only the units of existing projects (``telemirror@<key>``, ``telemirror-past@<key>``,
+``telemirror-task@<key>``) and ``settings.TIMERS`` ever reach argv — no user
+input does. ``Runner`` is injectable so tests never call systemd.
 """
 
 import asyncio
@@ -10,6 +11,7 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Sequence
 
 from telemirror.panel import settings
+from telemirror.projects import list_projects
 
 Runner = Callable[[Sequence[str]], Awaitable[tuple[int, str]]]
 
@@ -102,7 +104,7 @@ def parse_show(output: str) -> UnitState:
 
 
 def _check(unit: str) -> str:
-    if unit not in settings.UNITS.values() and unit not in settings.TIMERS:
+    if unit not in settings.TIMERS and not any(unit in p.units for p in list_projects()):
         raise ValueError(f"unit {unit!r} is not managed by the panel")
     return unit
 
@@ -124,12 +126,12 @@ class Systemd:
             raise SystemdError(out.strip() or f"systemctl show exited {rc}")
         return parse_show(out)
 
-    async def _control(self, verb: str, unit: str) -> None:
+    async def _control(self, verb: str, unit: str, *extra: str) -> None:
         if not self.available:
             raise SystemdError("systemctl is not available")
-        # --no-block: queue the job and return — telemirror.service may take up
+        # --no-block: queue the job and return — a live mirror may take up
         # to TimeoutStartSec to report READY=1, the bot must not hang on it.
-        rc, out = await self._run(["systemctl", "--no-block", verb, _check(unit)])
+        rc, out = await self._run(["systemctl", "--no-block", verb, *extra, _check(unit)])
         if rc != 0:
             raise SystemdError(out.strip() or f"systemctl {verb} exited {rc}")
 
@@ -138,6 +140,14 @@ class Systemd:
 
     async def stop(self, unit: str) -> None:
         await self._control("stop", unit)
+
+    async def enable(self, unit: str) -> None:
+        """Start now and on every boot (a mirror the admin turned on)."""
+        await self._control("enable", unit, "--now")
+
+    async def disable(self, unit: str) -> None:
+        """Stop now and not on boot (a mirror the admin turned off)."""
+        await self._control("disable", unit, "--now")
 
     async def restart(self, unit: str) -> None:
         await self._control("restart", unit)

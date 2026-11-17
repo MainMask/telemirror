@@ -43,6 +43,8 @@ async def run_telemirror(
     port: int,
     broadcast_channel: Optional[int] = None,
     tech_channel: Optional[int] = None,
+    api_lang_pack: Optional[str] = None,
+    api_system_lang_code: Optional[str] = None,
 ):
     if use_memory_db:
         warn_memory_db_limits(logger)
@@ -79,6 +81,8 @@ async def run_telemirror(
         api_device_model=api_device_model,
         api_system_version=api_system_version,
         api_app_version=api_app_version,
+        api_lang_pack=api_lang_pack,
+        api_system_lang_code=api_system_lang_code,
         broadcast_channel=broadcast_channel,
         tech_channel=tech_channel,
     )
@@ -100,6 +104,8 @@ def main():
         API_DEVICE_MODEL,
         API_HASH,
         API_ID,
+        API_LANG_PACK,
+        API_SYSTEM_LANG_CODE,
         API_SYSTEM_VERSION,
         BROADCAST_CHANNEL,
         TECH_CHANNEL,
@@ -108,9 +114,17 @@ def main():
         HOST,
         LOG_LEVEL,
         PORT,
+        SESSION_FILE,
         SESSION_STRING,
         USE_MEMORY_DB,
     )
+    from telemirror.misc.session_lock import SessionBusy, lock_session
+
+    if SESSION_FILE:
+        try:
+            lock_session(SESSION_FILE)
+        except SessionBusy as e:
+            sys.exit(str(e))
 
     if sys.platform == "win32":
         if USE_MEMORY_DB is False:
@@ -130,6 +144,8 @@ def main():
             api_device_model=API_DEVICE_MODEL,
             api_system_version=API_SYSTEM_VERSION,
             api_app_version=API_APP_VERSION,
+            api_lang_pack=API_LANG_PACK,
+            api_system_lang_code=API_SYSTEM_LANG_CODE,
             session_string=SESSION_STRING,
             chat_mapping=CHAT_MAPPING,
             logger=setup_stdout_logger("telemirror", LOG_LEVEL),

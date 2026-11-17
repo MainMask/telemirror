@@ -3488,3 +3488,132 @@ its own confirmation and only offers the `--yes` run after a successful
 
 Tests: `test_run_yes_skips_the_prompt`,
 `test_run_without_yes_still_prompts_and_can_cancel` (`tests/test_restrict_saving.py`).
+
+---
+
+# Pass 25 — the control panel (`telemirror/panel`, uncommitted layer)
+
+First review of the panel rebuilt on 2026-11-17 (projects, accounts, turns on
+a shared session, maintenance, config writes): the earlier passes covered the
+core only. Read in full: `middlewares`, `systemd`, `projects`, `session_lock`,
+`turns`, `watcher`, `status`, `configstore` (write path), `writes`, routers
+`projects`, `maintenance`, `tasks`, `accounts`, `config_file`, `settings`,
+`menu`, `stale`, and the four systemd units.
+
+## Fixed
+
+- **A paused mirror killed a later run** (`turns.start`). A's replay paused
+  B's mirror; a maintenance task started meanwhile stops the replay. The
+  replay's entry stayed in `projects/.resume.json`, so ~30 s later the watcher
+  started B's mirror — `Conflicts=` then stopped the task mid-run (or, on
+  another project's session, the two collided on the session). Likewise a
+  mirror started over a run left the mirrors paused for that run to be
+  resumed next to it. Now a start takes over the entries of the units it
+  stops: a run resumes them when *it* ends, a mirror turns them off for good.
+  Tests: `test_a_run_started_over_another_takes_over_its_paused_mirrors`,
+  `test_a_mirror_started_over_a_run_turns_off_the_mirrors_paused_for_it`.
+- **«▶️ Выполнить» after another task's success** (`maintenance.can_run_real`).
+  All tasks of a project share `telemirror-task@<key>`; the check looked only
+  at that unit's last result. A failed 🧨 Очистка check followed by a
+  successful check of another task unlocked the real clearing. Now the task's
+  own check must also be the project's latest launch. Test:
+  `test_a_real_run_needs_its_own_check_to_be_the_last_run`.
+- **«Да» wasn't checked again** (`maintenance.do_run`). Running / a passed
+  check were verified when the question was asked, not when it was answered
+  (up to `CONFIRM_TTL_SEC` later; another admin may have started a task or
+  changed the 📌 flags). Now both are re-checked. Test:
+  `test_a_confirmed_run_is_checked_again`.
+- **Session handover race** (`session_lock.lock_session`). The panel stops the
+  previous holder and starts the next unit at once; `Conflicts=` without
+  `After=` doesn't order the two jobs, so the new process could hit the lock
+  of the one still shutting down — a task failed at once, a mirror counted a
+  crash. The lock now waits up to `WAIT_SEC` (30 s). Test:
+  `test_a_starting_process_waits_for_the_previous_one_to_exit`.
+- **pyflakes** flagged the side-effect import in `tests/test_panel_registry.py`
+  (pyflakes ignores `noqa`); now `importlib.import_module`.
+
+## Fixed after the review (on request) — `mypy .` (run by CI)
+
+It reported 94 errors, all in the uncommitted panel layer (`HEAD` was clean):
+- aiogram's `callback.message` is `Message | InaccessibleMessage | None`; the
+  routers now take it through `_common.message_of(callback)`, which raises if
+  it isn't a `Message` — as the `AttributeError` did before, so the error
+  handler still reports it; no behaviour change.
+- small annotations: `FltCB(**base)`, `hidden` tuples, `logins.Login.client`,
+  `trail`'s list, `ask_confirm`'s sender, the `fcntl = None` fallback,
+  `READ_ONLY.get(None)`, `BY_TITLE[message.text]`, the test `Env`;
+  `LeaveFormOnNavigation` takes the user from `event_from_user`.
+- `config.py`: the env branch re-annotated the names the `.jsession` branch
+  declares (`no-redef`); the annotations are kept once.
+
+## Deferred (P3, non-blocking)
+
+- `settings.LOGIN_TIMEOUT_SEC` is defined but unused: the sign-in by phone has
+  no timeout of its own (Telethon's connection retries bound it).
+- An uploaded `.jsession` that is valid JSON but not an object (`[]`) ends in
+  the generic "internal error" instead of "это не .jsession".
+- `telemirror-panel.service`'s comment says the panel never opens a userbot
+  session; the sign-in by phone now does (a fresh one, not a project's).
+- A check stopped from outside (`systemctl stop`, a mirror started over it)
+  ends with `Result=success`, so it still unlocks the real run.
+
+Full suite 723 passed, 4 skipped; `pyflakes`, `ruff` and `mypy .` green.
+
+---
+
+# Pass 26 — the whole uncommitted layer (core + panel)
+
+Review of every uncommitted change against CLAUDE.md; each finding was
+reproduced before being fixed.
+
+## Fixed
+
+- **Docker: the mirror died at start with `SESSION_FILE`.** `docker-compose.yaml`
+  mounted `./sessions` read-only, while `session_lock.lock_session` creates
+  `<session>.lock` next to the session → `OSError` (EROFS), and `main.py`
+  catches only `SessionBusy`. The mount is writable now.
+- **A project without its config file ran another mirror's mapping.**
+  `config.py` fell through to the env `CHAT_MAPPING` when the project's
+  `config_path` was missing (and the panel's ▶️ allowed the start: it checked
+  "no directions" only for a readable file). `config.py` now raises
+  `ProjectError`; ▶️ (card and 📊 Задачи) refuses with «Файл конфигурации не
+  найден». Tests: `test_a_project_without_its_config_file_refuses_to_start`
+  (`tests/test_projects.py`), `test_a_project_without_its_config_file_is_not_started`.
+- **Deleting a project stranded the mirror its run had paused** (`turns.due`).
+  The `.resume.json` entry named a unit of no project: `systemd._check`
+  refused it, `unit_state` returned None, the entry was kept "until systemctl
+  answers" — forever; the paused mirror never came back. Such an entry is now
+  over at once. Test:
+  `test_deleting_the_project_of_a_run_brings_back_the_mirrors_it_paused`.
+- **🔁 after 👤 Аккаунт moved a running mirror onto a busy session** crash-looped
+  it on the session lock (restart went straight to `systemctl restart`, both
+  mirrors stayed enabled — clashing on every boot too). A mirror's restart now
+  goes through `turns.start(..., restart=True)`: the confirmation names what
+  runs on that session, and it is turned off as for ▶️. Tests:
+  `test_a_restart_on_a_busy_session_turns_the_other_mirror_off`,
+  `test_a_restart_alone_on_its_session_just_restarts`.
+- **A real maintenance run after the config changed** (`maintenance.can_run_real`).
+  The check unlocked ▶️ Выполнить regardless of later config edits — a recipient
+  added after the check could be cleared by 🧨 Очистка without ever being in the
+  plan. `Launch.config` keeps the config's sha at launch; a different config
+  needs a new check. Test: `test_a_real_run_needs_a_check_of_the_current_config`.
+- **An uploaded `.jsession` was saved unchecked**, though the prompt says the bot
+  checks by connecting (and `[]` crashed into "internal error"). It now goes
+  through `session_import.check_and_save` like `.session` / tdata: connected,
+  refused if unauthorized or already saved, the account read from Telegram.
+  Tests: `test_upload_a_session_file`, `test_an_unauthorized_jsession_is_not_saved`.
+- Pass 25's deferred P3s: `settings.LOGIN_TIMEOUT_SEC` now bounds each request
+  of the sign-in by phone; a non-numeric `app_id` in a seller's `.json` is a
+  plain refusal (`test_a_bad_app_id_in_the_json_is_refused_plainly`);
+  `telemirror-panel.service` comments match what the panel does.
+
+## Deferred (P3)
+
+- Filter buttons (`FltCB`) address a direction by index only (no direction
+  fingerprint — the 64-byte limit): an old message's button after a direction
+  was deleted can reach an identical filter of the next direction.
+- `telemirror.alert` with `PANEL_BOT_TOKEN` set never falls back to
+  TECH_CHANNEL, so the panel's own failure from a broken token/admin list is
+  only in the journal (by design: the bot comes first).
+
+Full suite 744 passed, 4 skipped; `pyflakes`, `ruff` and `mypy .` green.

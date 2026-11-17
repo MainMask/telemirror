@@ -6,14 +6,26 @@
 
 Broadcast channels are skipped: they have no Hide Members setting, and their
 subscriber list is already hidden.
+
+Usage:
+    python -m skylon_set.anonymize_groups            # with confirmation
+    python -m skylon_set.anonymize_groups --dry-run  # only shows the plan
+    python -m skylon_set.anonymize_groups --yes      # no prompt (the panel's task unit)
 """
 
+import argparse
 import asyncio
 import functools
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+try:
+    from config import LOG_LEVEL
+except Exception:
+    print("Failed reading .env")
+    raise
 
 from telethon.errors import (
     ChatAdminRequiredError,
@@ -33,7 +45,9 @@ from telethon.tl.types import (
     ChatAdminRights,
 )
 
-from skylon_set._common import entity_type, make_client
+from telemirror.misc.log_setup import setup_stdout_logger
+
+from skylon_set._common import entity_type, open_client
 from skylon_set._common import safe_call as _safe_call
 
 # EditAdmin/GetParticipant/toggles also fail with these when the account lacks the
@@ -89,7 +103,7 @@ def _titles(lst):
     return ", ".join(d.title for d in lst) if lst else "—"
 
 
-async def apply_anonymous(client, me, admin_of):
+async def apply_anonymous(client, me, admin_of, dry_run=False, assume_yes=False):
     """Pass 1: Remain Anonymous for the account in every group where it's an admin."""
     print("\n=== Remain Anonymous ===")
     already = [d for d, _p, is_anon in admin_of if is_anon]
@@ -102,12 +116,17 @@ async def apply_anonymous(client, me, admin_of):
         print("The account is already anonymous in every group where it's an admin.")
         return
 
-    answer = input(
-        f"\nActivate Remain Anonymous in {len(targets)} group(s)? [y/N]: "
-    ).strip().lower()
-    if answer != "y":
-        print("Skipped.")
+    if dry_run:
+        print(f"(dry-run) Would activate it in {len(targets)} group(s).")
         return
+
+    if not assume_yes:
+        answer = input(
+            f"\nActivate Remain Anonymous in {len(targets)} group(s)? [y/N]: "
+        ).strip().lower()
+        if answer != "y":
+            print("Skipped.")
+            return
 
     for d, participant in targets:
         print(f"  {d.title} ...", end=" ", flush=True)
@@ -144,7 +163,7 @@ async def _participants_hidden(client, entity) -> bool | None:
     return bool(result.full_chat.participants_hidden)
 
 
-async def apply_hide_members(client, admin_of):
+async def apply_hide_members(client, admin_of, dry_run=False, assume_yes=False):
     """Pass 2: Hide Members in every group where the account is an admin."""
     print("\n=== Hide Members ===")
     already, targets, unknown = [], [], []
@@ -165,12 +184,17 @@ async def apply_hide_members(client, admin_of):
         print("The member list is already hidden in every group.")
         return
 
-    answer = input(
-        f"\nHide the member list in {len(targets)} group(s)? [y/N]: "
-    ).strip().lower()
-    if answer != "y":
-        print("Skipped.")
+    if dry_run:
+        print(f"(dry-run) Would hide it in {len(targets)} group(s).")
         return
+
+    if not assume_yes:
+        answer = input(
+            f"\nHide the member list in {len(targets)} group(s)? [y/N]: "
+        ).strip().lower()
+        if answer != "y":
+            print("Skipped.")
+            return
 
     too_few = []
     for d in targets:
@@ -205,16 +229,10 @@ async def apply_hide_members(client, admin_of):
         print("All OK — member list hidden in every group.")
 
 
-async def main():
-    client = make_client()
-    await client.start()
-    try:
-        me = await client.get_me()
-        name = me.first_name or ""
-        if me.username:
-            name += f" (@{me.username})"
-        print(f"Account: {name}")
-
+async def _run(logger, dry_run: bool, assume_yes: bool = False):
+    # open_client: the session lock and a clear error instead of a login
+    # prompt (there's no terminal under the panel's task unit).
+    async with open_client(logger) as (client, me):
         print("Loading dialogs...")
         dialogs = await client.get_dialogs()
         supergroups = [d for d in dialogs if entity_type(d.entity) == "supergroup"]
@@ -230,14 +248,32 @@ async def main():
                 admin_of.append((d, info[0], info[1]))
         print(f"Not an admin ({len(not_admin)}): {_titles(not_admin)}")
 
-        await apply_anonymous(client, me, admin_of)
-        await apply_hide_members(client, admin_of)
-    finally:
-        await client.disconnect()
+        await apply_anonymous(client, me, admin_of, dry_run, assume_yes)
+        await apply_hide_members(client, admin_of, dry_run, assume_yes)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Remain Anonymous + Hide Members in every supergroup the account admins"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Only show the plan, without making real changes",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Don't ask for confirmation (non-interactive runs, e.g. the panel's task unit)",
+    )
+    args = parser.parse_args()
+
+    logger = setup_stdout_logger("anonymize_groups", LOG_LEVEL)
+    try:
+        asyncio.run(_run(logger, args.dry_run, args.yes))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    main()

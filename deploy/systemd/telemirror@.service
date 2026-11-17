@@ -1,10 +1,13 @@
 [Unit]
-Description=telemirror — live mirror
+Description=telemirror — live mirror of project %i
 Documentation=https://github.com/MainMask/telemirror
 After=network-online.target postgresql.service
 Wants=network-online.target
-# Shares SESSION_STRING with the history backfill — they can't run at the same time.
-Conflicts=telemirror-past-courses.service
+# The project's history replay and maintenance tasks use its session — they
+# can't run at the same time. Projects sharing one session file run in turn:
+# the control panel pauses the other one, and the session lock
+# (telemirror/misc/session_lock.py) refuses a second process on that session.
+Conflicts=telemirror-past@%i.service telemirror-task@%i.service
 # A broken deploy must not hammer Telegram forever (risk of an account ban).
 # Transient network/Telegram failures are survived by the process itself
 # (connection_retries), so 15 crashes in an hour is a real breakage: shut
@@ -26,6 +29,8 @@ WatchdogSignal=SIGTERM
 # come up slowly — the deadline is generous, a real hang is still bounded.
 TimeoutStartSec=300
 WorkingDirectory=/root/telemirror
+# projects/%i/project.yml: session, mirror config, health port.
+Environment=TELEMIRROR_PROJECT=%i
 ExecStart=/root/telemirror/.venv/bin/python -u main.py
 Restart=always
 RestartSec=10
@@ -35,7 +40,7 @@ RestartSec=10
 RestartSteps=8
 RestartMaxDelaySec=120
 
-# A memory spike/leak only kills telemirror (then a restart + resync via the
+# A memory spike/leak only kills this mirror (then a restart + resync via the
 # binding_id table), not some unrelated process on the server.
 MemoryHigh=1100M
 MemoryMax=1400M

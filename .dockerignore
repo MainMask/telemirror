@@ -97,3 +97,8 @@ venv/
 
 # Telemirror configs folder
 .configs
+
+# Telegram sessions (full account access) — mount, don't bake into the image
+*.jsession
+sessions/
+projects/

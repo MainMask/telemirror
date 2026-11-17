@@ -91,6 +91,13 @@ ENV/
 
 *.session
 
+# Telegram sessions written by login.py (full account access)
+*.jsession
+sessions/
+
+# Projects created in the control panel (deployment data, like .configs)
+projects/
+
 # Config backups written by skylon_set/setup_mirrors.py
 *.bak
 

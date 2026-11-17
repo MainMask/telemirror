@@ -40,10 +40,11 @@ class FakeSession(BaseSession):
             return User(id=42, is_bot=True, first_name="panel", username="panel_bot")
         if isinstance(method, (SendMessage, EditMessageText)):
             mid = getattr(method, "message_id", None) or next(self._ids)
+            # bound to the bot, as the real session's parsed results are
             return Message(
                 message_id=mid, date=datetime.now(),
                 chat=Chat(id=int(method.chat_id or 0), type="private"), text=method.text,
-            )
+            ).as_(bot)
         return True
 
     async def close(self) -> None:

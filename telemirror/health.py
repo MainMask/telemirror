@@ -1,5 +1,5 @@
-"""Periodic health check for ``telemirror.service`` — run by
-``telemirror-health.timer`` every ~10 min.
+"""Periodic health check of every project's live mirror
+(``telemirror@<key>.service``) — run by ``telemirror-health.timer`` every ~10 min.
 
 ``OnFailure=`` only fires once the unit reaches ``failed`` state, which a *slow*
 crash-loop (each run survives a few minutes) never does. This catches that: it
@@ -14,15 +14,19 @@ import sys
 from pathlib import Path
 
 from telemirror import alert
+from telemirror.projects import list_projects
 
-_UNIT = "telemirror.service"
 _STATE = Path("/run/telemirror-health.json")  # tmpfs — resets on boot, like NRestarts
 _FLAP_THRESHOLD = 3  # restarts since last check that count as flapping
 
 
-def _show(prop: str) -> str:
+def _units() -> list:
+    return [p.live_unit for p in list_projects()]
+
+
+def _show(unit: str, prop: str) -> str:
     out = subprocess.run(
-        ["systemctl", "show", _UNIT, "-p", prop, "--value"],
+        ["systemctl", "show", unit, "-p", prop, "--value"],
         capture_output=True, text=True, timeout=10, check=False,
     )
     return out.stdout.strip()
@@ -42,46 +46,55 @@ def _save_state(state: dict) -> None:
         print(f"telemirror.health: failed to write state: {e}", file=sys.stderr)
 
 
-def check() -> list[str]:
+def _check_unit(unit: str, prev: dict) -> tuple:
     try:
-        nrestarts = int(_show("NRestarts") or 0)
+        nrestarts = int(_show(unit, "NRestarts") or 0)
     except ValueError:
         nrestarts = 0
-    active = _show("ActiveState")
-
-    prev = _load_state()
+    active = _show(unit, "ActiveState")
     problems = []
 
     delta = nrestarts - prev.get("nrestarts", nrestarts)
     if delta >= _FLAP_THRESHOLD:
         problems.append(
-            f"⚠️ {_UNIT}: {delta} restart(s) in this interval (total {nrestarts}) — flapping"
+            f"⚠️ {unit}: {delta} restart(s) in this interval (total {nrestarts}) — flapping"
         )
     # Only on the transition into 'failed': OnFailure= has already alerted
     # once, and repeating it on every tick while the unit stays failed is noise.
     if active == "failed" and prev.get("active") != "failed":
-        problems.append(f"⚠️ {_UNIT}: ActiveState=failed")
+        problems.append(f"⚠️ {unit}: ActiveState=failed")
     # Two consecutive checks stuck outside 'active'/'inactive' = not just a
     # transient restart. 'inactive' is excluded: Restart=always means a crashing
     # unit cycles through activating/failed and essentially never settles into
-    # inactive on its own — a stable 'inactive' means systemd stopped it on
-    # purpose (the telemirror-past-courses.service Conflicts= switch-over, or an
-    # operator's manual stop), not a stuck unit. 'failed' has its own alert above.
+    # inactive on its own — a stable 'inactive' means it was stopped on purpose
+    # (a project that isn't running, a history replay's / task's Conflicts=
+    # switch-over, a shared-session pause, an operator's manual stop), not a
+    # stuck unit. 'failed' has its own alert above.
     _settled = (None, "active", "inactive", "failed")
     if active not in _settled and prev.get("active") not in _settled:
-        problems.append(f"⚠️ {_UNIT}: not active twice in a row (currently {active})")
+        problems.append(f"⚠️ {unit}: not active twice in a row (currently {active})")
+    return problems, {"nrestarts": nrestarts, "active": active}
 
-    _save_state({"nrestarts": nrestarts, "active": active})
-    return problems
+
+def check() -> list[tuple]:
+    """``[(unit, problems)]`` for the units with a problem."""
+    prev = _load_state()
+    state, found = {}, []
+    for unit in _units():
+        problems, state[unit] = _check_unit(unit, prev.get(unit, {}))
+        if problems:
+            found.append((unit, problems))
+    _save_state(state)
+    return found
 
 
 def main() -> None:
-    problems = check()
     result = None
-    if problems:
-        result = alert.send_alert(
-            "\n".join(problems) + "\n\n" + alert.journal_tail(_UNIT)[-2500:]
+    for unit, problems in check():
+        sent = alert.send_alert(
+            "\n".join(problems) + "\n\n" + alert.journal_tail(unit)[-2500:]
         )
+        result = False if sent is False or result is False else sent
     sys.exit(1 if result is False else 0)
 
 

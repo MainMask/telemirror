@@ -86,6 +86,14 @@ async def connect_with_timeout(client: TelegramClient, timeout_sec: float = 30.0
             ) from e
 
 
+def apply_lang_pack(client: TelegramClient, lang_pack: Optional[str]) -> None:
+    """Send ``lang_pack`` in initConnection. Telethon has no parameter for it
+    and hardcodes ``''`` into its private ``_init_request``; an official-app
+    fingerprint (``.jsession`` ``application.lang_pack``) needs the real value."""
+    if lang_pack:
+        client._init_request.lang_pack = lang_pack
+
+
 def build_telegram_client(
     session_string: str,
     api_id: str,
@@ -94,6 +102,8 @@ def build_telegram_client(
     device_model: Optional[str] = None,
     system_version: Optional[str] = None,
     app_version: Optional[str] = None,
+    lang_pack: Optional[str] = None,
+    system_lang_code: Optional[str] = None,
     connection_retries: int,
     retry_delay: int,
 ) -> TelegramClient:
@@ -107,6 +117,7 @@ def build_telegram_client(
     live mirror retries indefinitely through an outage while operator scripts
     (``past_mode.py``) give up after a bounded window.
     """
+    lang_kwargs = {"system_lang_code": system_lang_code} if system_lang_code else {}
     client = TelegramClient(
         StringSession(session_string),
         api_id,
@@ -117,6 +128,8 @@ def build_telegram_client(
         flood_sleep_threshold=300,
         connection_retries=connection_retries,
         retry_delay=retry_delay,
+        **lang_kwargs,
     )
+    apply_lang_pack(client, lang_pack)
     client.parse_mode = "markdown"
     return client

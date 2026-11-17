@@ -25,11 +25,14 @@ try:
         API_DEVICE_MODEL,
         API_HASH,
         API_ID,
+        API_LANG_PACK,
+        API_SYSTEM_LANG_CODE,
         API_SYSTEM_VERSION,
         CHAT_MAPPING,
         DB_URL,
         DirectionConfig,
         LOG_LEVEL,
+        SESSION_FILE,
         SESSION_STRING,
         TECH_CHANNEL,
         USE_MEMORY_DB,
@@ -667,6 +670,8 @@ async def _run(logger: logging.Logger) -> None:
         device_model=API_DEVICE_MODEL,
         system_version=API_SYSTEM_VERSION,
         app_version=API_APP_VERSION,
+        lang_pack=API_LANG_PACK,
+        system_lang_code=API_SYSTEM_LANG_CODE,
         connection_retries=_CONN_RETRIES,
         retry_delay=_RETRY_DELAY,
     )
@@ -677,7 +682,7 @@ async def _run(logger: logging.Logger) -> None:
 
     me = await client.get_me()
     if me is None:
-        raise RuntimeError("Not authorized. Run login.py to get a SESSION_STRING.")
+        raise RuntimeError("Not authorized. Run login.py and set SESSION_FILE to the saved .jsession.")
     at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
     logger.info(f"Logged in as {utils.get_display_name(me)}{at_username}")
 
@@ -731,6 +736,13 @@ async def _run(logger: logging.Logger) -> None:
 
 def main() -> None:
     logger = _configure_logging(LOG_LEVEL)
+    if SESSION_FILE:
+        from telemirror.misc.session_lock import SessionBusy, lock_session
+
+        try:
+            lock_session(SESSION_FILE)
+        except SessionBusy as e:
+            sys.exit(str(e))
     asyncio.run(_run(logger))
 
 

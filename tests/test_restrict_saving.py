@@ -152,3 +152,12 @@ def test_run_without_yes_still_prompts_and_can_cancel(monkeypatch):
     run(restrict_saving._run(logging.getLogger("t"), dry_run=False))
 
     assert len(prompts) == 1 and client.toggled == []
+
+
+def test_a_project_run_touches_only_its_own_recipients(monkeypatch):
+    """Under TELEMIRROR_PROJECT (the panel's task unit) the hard-coded course
+    config must not leak into another project's run."""
+    monkeypatch.setattr(restrict_saving, "course_recipient_ids", lambda *_a: {-100999})
+    mapping = {-100111: {-100222: []}}
+    assert restrict_saving.recipient_ids_of_run(mapping, "news") == {-100222}
+    assert restrict_saving.recipient_ids_of_run(mapping, None) == {-100222, -100999}

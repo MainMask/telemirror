@@ -2,9 +2,16 @@
 
 import pytest
 
-from telemirror.panel import settings
+from telemirror import projects
 from telemirror.panel.systemd import Systemd, SystemdError, parse_show
 from tests.conftest import run
+
+
+@pytest.fixture
+def demo(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "PROJECTS_DIR", tmp_path / "projects")
+    monkeypatch.setattr(projects, "REPO_DIR", tmp_path)
+    return projects.create_project("Демо", "🧪", "s.jsession")
 
 SHOW_ACTIVE = """\
 ActiveState=active
@@ -54,27 +61,30 @@ class _Recorder:
         return self.rc, self.out
 
 
-def test_commands_use_no_block_and_whitelist():
+def test_commands_use_no_block_and_whitelist(demo):
     rec = _Recorder(out=SHOW_ACTIVE)
     sd = Systemd(runner=rec)
-    run(sd.restart(settings.LIVE_UNIT))
-    run(sd.show(settings.COURSES_UNIT))
-    run(sd.journal(settings.UNITS["sp"], 15, invocation="abc", grep=r"\[Progress\]"))
-    assert rec.calls[0] == ["systemctl", "--no-block", "restart", "telemirror.service"]
-    assert rec.calls[1][:4] == ["systemctl", "show", "telemirror-past-courses.service", "--timestamp=unix"]
+    run(sd.restart(demo.live_unit))
+    run(sd.show(demo.past_unit))
+    run(sd.journal(demo.task_unit, 15, invocation="abc", grep=r"\[Progress\]"))
+    run(sd.show("telemirror-health.timer"))
+    assert rec.calls[0] == ["systemctl", "--no-block", "restart", "telemirror@demo.service"]
+    assert rec.calls[1][:4] == ["systemctl", "show", "telemirror-past@demo.service", "--timestamp=unix"]
     assert rec.calls[2] == [
-        "journalctl", "-u", "telemirror-task@sync_pins.service", "-n", "15", "--no-pager",
+        "journalctl", "-u", "telemirror-task@demo.service", "-n", "15", "--no-pager",
         "-o", "cat", "_SYSTEMD_INVOCATION_ID=abc", "--grep", r"\[Progress\]",
     ]
     with pytest.raises(ValueError):
         run(sd.stop("sshd.service"))
     with pytest.raises(ValueError):
-        run(sd.journal("telemirror.service; rm -rf /", 1))
+        run(sd.stop("telemirror@other.service"))  # no such project
+    with pytest.raises(ValueError):
+        run(sd.journal("telemirror@demo.service; rm -rf /", 1))
 
 
-def test_errors_surface():
+def test_errors_surface(demo):
     sd = Systemd(runner=_Recorder(rc=1, out="Access denied"))
     with pytest.raises(SystemdError, match="Access denied"):
-        run(sd.start(settings.LIVE_UNIT))
+        run(sd.start(demo.live_unit))
     # journalctl --grep with no match exits 1 — that's "no lines", not an error
-    assert run(Systemd(runner=_Recorder(rc=1, out="")).journal(settings.LIVE_UNIT, 5, grep="x")) == ""
+    assert run(Systemd(runner=_Recorder(rc=1, out="")).journal(demo.live_unit, 5, grep="x")) == ""

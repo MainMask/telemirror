@@ -1,8 +1,22 @@
 """telemirror.alert: message shape, and send_alert never raises."""
 
+import io
+import json
+
 import pytest
 
 from telemirror import alert
+
+
+@pytest.fixture(autouse=True)
+def _no_bot_from_dotenv(monkeypatch):
+    """A developer's real .env may hold PANEL_BOT_TOKEN — never let a test
+    reach the real Bot API through it."""
+    real = alert._env
+    monkeypatch.setattr(
+        alert, "_env",
+        lambda key, default=None: default if key.startswith("PANEL_") else real(key, default=default),
+    )
 
 
 def test_failed_state_message_has_unit_and_journal(monkeypatch):
@@ -70,3 +84,50 @@ def test_main_exits_zero_when_tech_channel_not_configured(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         alert.main()
     assert exc_info.value.code == 0
+
+
+def _bot_env(monkeypatch, admins="111, 222"):
+    env = {"PANEL_BOT_TOKEN": "123:abc", "PANEL_ADMIN_IDS": admins}
+    monkeypatch.setattr(alert, "_env", lambda key, default=None: env.get(key, default))
+
+
+def test_send_alert_goes_through_the_bot_to_every_admin(monkeypatch):
+    _bot_env(monkeypatch)
+    sent = []
+
+    def _urlopen(request, timeout):
+        sent.append((request.full_url, json.loads(request.data)))
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(alert.urllib.request, "urlopen", _urlopen)
+
+    async def _no_userbot(text):
+        raise AssertionError("with a bot token the userbot session must not be used")
+
+    monkeypatch.setattr(alert, "_connect_and_send", _no_userbot)
+    assert alert.send_alert("down") is True
+    assert [body["chat_id"] for _, body in sent] == [111, 222]
+    assert all(url.endswith("/bot123:abc/sendMessage") for url, _ in sent)
+    assert sent[0][1]["text"].startswith("down")
+
+
+def test_bot_alert_counts_as_delivered_if_any_admin_got_it(monkeypatch):
+    _bot_env(monkeypatch)
+
+    def _urlopen(request, timeout):
+        if json.loads(request.data)["chat_id"] == 111:
+            raise OSError("blocked")
+        return io.BytesIO(b'{"ok": true}')
+
+    monkeypatch.setattr(alert.urllib.request, "urlopen", _urlopen)
+    assert alert.send_alert("down") is True
+
+
+def test_bot_alert_fails_when_no_admin_got_it(monkeypatch):
+    _bot_env(monkeypatch)
+
+    def _urlopen(request, timeout):
+        raise OSError("network down")
+
+    monkeypatch.setattr(alert.urllib.request, "urlopen", _urlopen)
+    assert alert.send_alert("down") is False

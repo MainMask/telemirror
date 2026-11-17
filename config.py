@@ -21,6 +21,8 @@ from telemirror.messagefilters import (
     UrlMessageFilter,
     WatermarkRemovalFilter,
 )
+from telemirror.misc.jsession import load_jsession
+from telemirror.projects import ProjectError, load_project
 
 
 config = AutoConfig()
@@ -125,22 +127,55 @@ def _parse_chat_topic(value) -> tuple:
     return int(value), None
 
 
-# telegram app id
-API_ID: str = config("API_ID")
-# telegram app hash
-API_HASH: str = config("API_HASH")
+# (Optional) path to a `<phone>.jsession` file written by login.py. When set,
+# the session AND the client fingerprint (API_ID, API_HASH, API_DEVICE_MODEL,
+# API_SYSTEM_VERSION, API_APP_VERSION, lang pack) all come from the file and
+# the env values below are ignored. A relative path is taken from the repo
+# root (where .env is found), not the current directory.
+SESSION_FILE: Optional[str] = config("SESSION_FILE", default=None)
 
-# The next optional parameters can be set to prevent bans/logouts
-# (Optional) System version info for telegram client. You can set it to `4.16.30-vxCUSTOM` or any other value if you believe it will help fix the bans. Default is `platform.uname().release`
-# See: https://github.com/LonamiWebs/Telethon/issues/4051
-API_SYSTEM_VERSION: Optional[str] = config("API_SYSTEM_VERSION", default=None)
-# (Optional) Device model info for telegram client. Default is `platform.uname().machine`
-API_DEVICE_MODEL: Optional[str] = config("API_DEVICE_MODEL", default=None)
-# (Optional) Application version info for telegram client. Default is `telethon.version.__version__`
-API_APP_VERSION: Optional[str] = config("API_APP_VERSION", default=None)
+# (Optional) run as project <key> (projects/<key>/project.yml; systemd's
+# telemirror@<key>.service sets it): the project's session, mirror config and
+# health port replace SESSION_FILE, YAML_CONFIG_ENV/./.configs/mirror.config.yml
+# and PORT.
+TELEMIRROR_PROJECT: Optional[str] = config("TELEMIRROR_PROJECT", default=None)
+_project = load_project(TELEMIRROR_PROJECT) if TELEMIRROR_PROJECT else None
+if _project:
+    SESSION_FILE = _project.session
 
-# auth session string: can be obtain by run login.py
-SESSION_STRING: str = config("SESSION_STRING")
+# Only set from a .jsession file; Telethon defaults otherwise.
+API_LANG_PACK: Optional[str] = None
+API_SYSTEM_LANG_CODE: Optional[str] = None
+
+if SESSION_FILE:
+    SESSION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), SESSION_FILE)
+    _jsession = load_jsession(SESSION_FILE)
+    _app = _jsession["application"]
+    API_ID: str = _app["api_id"]
+    API_HASH: str = _app["api_hash"]
+    API_SYSTEM_VERSION: Optional[str] = _app.get("sdk")
+    API_DEVICE_MODEL: Optional[str] = _app.get("device_name")
+    API_APP_VERSION: Optional[str] = _app.get("app_version")
+    API_LANG_PACK = _app.get("lang_pack")
+    API_SYSTEM_LANG_CODE = _app.get("system_lang_code")
+    SESSION_STRING: str = _jsession["auth_key"]
+else:
+    # telegram app id
+    API_ID = config("API_ID")
+    # telegram app hash
+    API_HASH = config("API_HASH")
+
+    # The next optional parameters can be set to prevent bans/logouts
+    # (Optional) System version info for telegram client. You can set it to `4.16.30-vxCUSTOM` or any other value if you believe it will help fix the bans. Default is `platform.uname().release`
+    # See: https://github.com/LonamiWebs/Telethon/issues/4051
+    API_SYSTEM_VERSION = config("API_SYSTEM_VERSION", default=None)
+    # (Optional) Device model info for telegram client. Default is `platform.uname().machine`
+    API_DEVICE_MODEL = config("API_DEVICE_MODEL", default=None)
+    # (Optional) Application version info for telegram client. Default is `telethon.version.__version__`
+    API_APP_VERSION = config("API_APP_VERSION", default=None)
+
+    # auth session string: the `auth_key` of a login.py .jsession file
+    SESSION_STRING = config("SESSION_STRING")
 
 USE_MEMORY_DB: bool = config("USE_MEMORY_DB", default=False, cast=bool)
 
@@ -181,12 +216,15 @@ LOG_LEVEL: str = config("LOG_LEVEL", default="INFO").upper()
 # Application local host, defaults to 0.0.0.0
 HOST: str = config("HOST", default="0.0.0.0")
 # Application local port, defaults to 8000
-PORT: int = config("PORT", default=8000, cast=int)
+PORT: int = _project.port if _project else config("PORT", default=8000, cast=int)
 
 ###############Channel mirroring config#################
 
-YAML_CONFIG_ENV: Optional[str] = config("YAML_CONFIG_ENV", default=None)
-YAML_CONFIG_FILE = "./.configs/mirror.config.yml"
+YAML_CONFIG_ENV: Optional[str] = None if _project else config("YAML_CONFIG_ENV", default=None)
+YAML_CONFIG_FILE = str(_project.config_path) if _project else "./.configs/mirror.config.yml"
+if _project and not os.path.exists(YAML_CONFIG_FILE):
+    # Not the env CHAT_MAPPING fallback below: that is another mirror's mapping.
+    raise ProjectError(f"project {_project.key!r}: mirror config {YAML_CONFIG_FILE} not found")
 
 # source and target chats mapping
 CHAT_MAPPING: Dict[int, Dict[int, List["DirectionConfig"]]] = {}

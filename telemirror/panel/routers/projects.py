@@ -1,529 +1,449 @@
-"""📁 Проекты: mirror configurations, their directions, filters and params."""
+"""📁 Проекты: the list, a project's card (its mirror: ▶️ / ⏹ / 🔁), ➕ Новый
+проект, 🧰 Управление (name, icon, account, deletion)."""
 
 import logging
+import os
+import unicodedata
 from contextlib import suppress
-from typing import Any, Callable, Optional
+from typing import Optional
 
-from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import StateFilter
+from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
-from aiogram.utils.callback_answer import CallbackAnswer
 
-from telemirror.panel import configstore, keyboards, settings, status, texts
-from telemirror.panel.callbacks import Act, Nav
-from telemirror.panel.configstore import ConfigError, ConfigStore
-from telemirror.panel.settings import Project
-from telemirror.panel.systemd import Systemd
-from telemirror.panel.ui import Panel, Screen, show
+from telemirror import projects
+from telemirror.panel import registry, settings, status, texts, turns
+from telemirror.panel.callbacks import ActCB, ChoiceCB, NavCB
+from telemirror.panel.keyboards.common import button, choice_kb, pages, paged_rows
+from telemirror.panel.registry import YES_DELETE, title
+from telemirror.panel.routers import accounts
+from telemirror.panel.routers._common import (
+    ask,
+    ask_confirm,
+    confirmed,
+    input_kind,
+    leave_form,
+    message_of,
+    on_action,
+    project_of,
+    session_ok,
+    stale_tap,
+    start_form,
+)
+from telemirror.panel.runtime import Runtime
+from telemirror.panel.screens import esc, head, project_label, show, view
+from telemirror.panel.states import Input, NewProject
+from telemirror.panel.systemd import Systemd, SystemdError
+from telemirror.panel.watcher import unit_label
+from telemirror.projects import Project
 
 logger = logging.getLogger(__name__)
 router = Router(name="projects")
 
-
-class AddDirection(StatesGroup):
-    source = State()
-    targets = State()
-    choice = State()  # mode / history / summary — answered with buttons
+NAME_MAX = 40
+ICONS = ("🪞", "📰", "🏰", "🚀", "💎", "🦊", "⭐️", "🔥")
 
 
-def _title(project: Project) -> str:
-    return texts.PROJECT_TITLES[project.key]
+# ── 📁 Проекты ──────────────────────────────────────────────────────────────
 
 
-def _filter_name(f: Any) -> str:
-    return str(next(iter(f))) if isinstance(f, dict) and f else str(f)
-
-
-def _short(value: Any, limit: int = 60) -> str:
-    if isinstance(value, (set, frozenset)):
-        value = sorted(str(v) for v in value)
-    if isinstance(value, (list, tuple)):
-        value = ", ".join(str(v) for v in value)
-    text = str(value)
-    return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
-def _effective(d: Any, data: Any) -> tuple[str, bool, bool]:
-    """(mode, edits forwarded, deletes forwarded), direction over global."""
-    mode = str(d.get("mode", data.get("mode", "copy")))
-    edit_on = not bool(d.get("disable_edit", data.get("disable_edit", False)))
-    delete_on = not bool(d.get("disable_delete", data.get("disable_delete", False)))
-    return mode, edit_on, delete_on
-
-
-def _history(pm: Any) -> str:
-    if not isinstance(pm, dict) or not pm:
-        return texts.HISTORY_NONE
-    if pm.get("full_history"):
-        return texts.HISTORY_FULL
-    if pm.get("last_n") is not None:
-        return texts.HISTORY_LAST_N.format(n=texts.esc(pm["last_n"]))
-    if pm.get("since_date") is not None:
-        return texts.HISTORY_SINCE.format(date=texts.esc(pm["since_date"]))
-    return texts.HISTORY_NONE
-
-
-def _chats(info: status.ProjectInfo, side: str) -> int:
-    chats = set()
-    for d in info.directions:
-        for ref in d.get(side) or []:
-            with suppress(ValueError):
-                chats.add(configstore.chat_of(configstore.ref_str(ref)))
-    return len(chats)
-
-
-def _display_path(project: Project) -> str:
-    try:
-        return str(project.path.relative_to(settings.REPO_DIR))
-    except ValueError:
-        return str(project.path)
-
-
-def _not_found() -> Screen:
-    return texts.NOT_FOUND, keyboards.back(Nav(s="prj"), texts.BTN_TO_PROJECTS)
-
-
-# ── screens ─────────────────────────────────────────────────────────────────
-
-
-async def projects_screen(sysd: Systemd) -> Screen:
+@view("prj")
+async def projects_view(message: Message, edit: bool, nav: NavCB, state: FSMContext, sysd: Systemd,
+                        note: str = "", **_) -> None:
+    found = projects.list_projects()
     items = []
-    for project in status.visible_projects():
-        info = status.project_info(project)
-        st = await status.unit_state(sysd, project.unit_key)
-        count = len(info.directions) if info.readable else None
-        items.append((project.key, texts.project_button(_title(project), count, st.active if st else None)))
-    text = texts.PROJECTS_TITLE + ("" if items else texts.PROJECTS_EMPTY)
-    return text, keyboards.projects_list(items)
+    for p in found:
+        st = await status.unit_state(sysd, p.live_unit)
+        info = status.project_info(p)
+        count = len(info.directions) if info.readable else texts.UNKNOWN
+        items.append(button(
+            f"{p.icon} {p.name} · {texts.state_icon(st.active if st else None)} · {count} напр.",
+            NavCB(s="card", p=p.key),
+        ))
+    body = (
+        f"Проектов: <b>{len(found)}</b>. 🟢 — зеркало работает, ⚪️ — остановлено, 🔴 — сбой."
+        if found else "Проектов пока нет. Создайте первый: ➕ Новый проект."
+    )
+    own = paged_rows(items, nav.pg, settings.PAGE_SIZE, lambda pg: NavCB(s="prj", pg=pg))
+    await show(message, edit, "prj", body=body, note=note, own=own,
+               pg=nav.pg % pages(len(items), settings.PAGE_SIZE))
 
 
-async def project_screen(sysd: Systemd, key: str) -> Screen:
-    project = status.project_by_key(key)
+# ── 📁 Проект ───────────────────────────────────────────────────────────────
+
+
+@view("card")
+async def card_view(message: Message, edit: bool, nav: NavCB, state: FSMContext, sysd: Systemd,
+                    note: str = "", **_) -> None:
+    project = status.find(nav.p)
     if project is None:
-        return _not_found()
+        await projects_view(message, edit, NavCB(s="prj"), state, sysd, note=texts.NO_PROJECT)
+        return
+    await show_card(message, edit, project, sysd, note)
+
+
+async def show_card(message: Message, edit: bool, project: Project, sysd: Systemd, note: str = "") -> None:
     info = status.project_info(project)
-    st = await status.unit_state(sysd, project.unit_key)
+    st = await status.unit_state(sysd, project.live_unit)
     active = st.active if st else None
-    state = texts.mirror_state(active) if project.live else texts.task_state(active)
-    readable = info.readable
-    text = texts.PROJECT_CARD.format(
-        title=_title(project),
-        descr=texts.PROJECT_DESCR[project.key],
-        path=texts.esc(_display_path(project)),
-        unit=settings.UNITS[project.unit_key],
-        state=f"{texts.state_icon(active)} {state}",
-        count=len(info.directions) if readable else texts.UNKNOWN_COUNT,
-        sources=_chats(info, "from") if readable else texts.UNKNOWN_COUNT,
-        targets=_chats(info, "to") if readable else texts.UNKNOWN_COUNT,
-    )
+    lines = [
+        f"👤 Аккаунт: {esc(accounts.account_label(project.session))}"
+        + ("" if project.session_path.exists() else f"\n{texts.SESSION_MISSING}"),
+        f"{texts.state_icon(active)} Зеркало: <b>{texts.mirror_state(active)}</b>"
+        + (f" · с {texts.fmt_ts(st.since)}" if st and st.since and st.running else ""),
+        f"🔀 Направлений: <b>{len(info.directions) if info.readable else texts.UNKNOWN}</b>",
+        f"🗂 Конфиг: <code>{esc(project.config)}</code>",
+    ]
+    shared = projects.sharing_session(project)
+    if shared:
+        lines.append("🔁 На этой же сессии: " + ", ".join(esc(project_label(p)) for p in shared)
+                     + " — работают по очереди.")
     if info.read_only:
-        text += "\n\n" + texts.READ_ONLY[info.read_only]
+        lines.append(texts.READ_ONLY[info.read_only])
     if info.error:
-        text += "\n\n" + texts.LOAD_ERROR.format(error=texts.esc(info.error[:300]))
-    if (
-        project.live
-        and info.snapshot is not None
-        and st is not None
-        and st.running
-        and st.since is not None
-        and info.snapshot.mtime > st.since
-    ):
-        text += "\n\n" + texts.UNAPPLIED
-    markup = keyboards.project_card(
-        project.key, project.live, readable, bool(st and st.running), sysd.available
-    )
-    return text, markup
+        lines.append(f"⚠️ Не удалось прочитать конфиг: <code>{esc(info.error[:300])}</code>")
+    if info.snapshot and st and st.running and st.since and info.snapshot.mtime > st.since:
+        lines.append("⚠️ <b>Есть неприменённые изменения</b> — нажмите «🔁 Перезапустить».")
+    if not sysd.available:
+        lines.append(texts.SYSTEMD_UNAVAILABLE)
+    running = bool(st and st.running)
+    hidden = ("start",) if running else ("stop", "restart")
+    await show(message, edit, "card", project, body="\n".join(lines), note=note, hidden=hidden)
 
 
-def directions_screen(key: str, page: int) -> Screen:
-    project = status.project_by_key(key)
-    if project is None:
-        return _not_found()
-    info = status.project_info(project)
-    if not info.readable:
-        return project_card_fallback(key)
-    dirs = info.directions
-    pages = max(1, -(-len(dirs) // settings.PAGE_SIZE))
-    page = min(max(page, 0), pages - 1)
-    start = page * settings.PAGE_SIZE
-    lines, items = [], []
-    for idx in range(start, min(start + settings.PAGE_SIZE, len(dirs))):
-        d = dirs[idx]
-        sources, targets = list(d.get("from") or []), list(d.get("to") or [])
-        mode, edit_on, delete_on = _effective(d, info.data)
-        marks = [
-            texts.MARK_FORWARD if mode == "forward" else "",
-            texts.MARK_HISTORY if d.get("past_mode") else "",
-            texts.MARK_FILTERS if d.get("filters") else "",
-            "" if edit_on else texts.MARK_NO_EDIT,
-            "" if delete_on else texts.MARK_NO_DELETE,
-        ]
-        suffix = " · ".join(m for m in marks if m)
-        lines.append(
-            f"<b>{idx + 1}.</b> {texts.refs(sources)} → {texts.refs(targets)}"
-            + (f" · <i>{suffix}</i>" if suffix else "")
-        )
-        items.append(
-            (idx, f"{idx + 1}. {texts.short_refs(sources)} → {texts.short_refs(targets)}")
-        )
-    text = texts.DIRECTIONS_TITLE.format(
-        project=_title(project), page=page + 1, pages=pages, count=len(dirs)
-    )
-    text += ("\n\n" + "\n".join(lines)) if lines else texts.DIRECTIONS_EMPTY
-    return text, keyboards.directions_list(key, page, pages, items, info.writable)
-
-
-def project_card_fallback(key: str) -> Screen:
-    return texts.NOT_FOUND, keyboards.back(Nav(s="pc", p=key), texts.BTN_TO_PROJECT)
-
-
-def direction_screen(key: str, page: int, idx: int) -> Screen:
-    project = status.project_by_key(key)
-    if project is None:
-        return _not_found()
-    info = status.project_info(project)
-    dirs = info.directions
-    if not 0 <= idx < len(dirs):
-        return texts.NOT_FOUND, keyboards.back(Nav(s="dl", p=key, pg=page), texts.BTN_TO_LIST)
-    d, data = dirs[idx], info.data
-    mode, edit_on, delete_on = _effective(d, data)
-    own = d.get("filters")
-    text = texts.DIRECTION_CARD.format(
-        n=idx + 1,
-        project=_title(project),
-        sources=texts.refs(d.get("from") or []),
-        targets=texts.refs(d.get("to") or []),
-        mode=texts.esc(mode),
-        mode_src="" if "mode" in d else texts.FROM_GLOBAL,
-        edit=texts.FORWARDED if edit_on else texts.NOT_FORWARDED,
-        edit_src="" if "disable_edit" in d else texts.FROM_GLOBAL,
-        delete=texts.FORWARDED if delete_on else texts.NOT_FORWARDED,
-        delete_src="" if "disable_delete" in d else texts.FROM_GLOBAL,
-        history=_history(d.get("past_mode")),
-        filters=", ".join(texts.esc(_filter_name(f)) for f in own) if own else texts.FILTERS_GLOBAL,
-    )
-    markup = keyboards.direction_card(
-        key, page, idx, configstore.fingerprint(d), edit_on, delete_on, info.writable
-    )
-    return text, markup
-
-
-def filters_screen(key: str) -> Screen:
-    project = status.project_by_key(key)
-    if project is None:
-        return _not_found()
-    info = status.project_info(project)
-    lines = []
-    for n, f in enumerate(info.data.get("filters") or [], start=1):
-        args = next(iter(f.values()), None) if isinstance(f, dict) else None
-        detail = (
-            "; ".join(f"{k}: {_short(v)}" for k, v in args.items())
-            if isinstance(args, dict)
-            else ""
-        )
-        lines.append(
-            f"{n}. <b>{texts.esc(_filter_name(f))}</b>"
-            + (f" — <code>{texts.esc(detail)}</code>" if detail else "")
-        )
-    own = sum(1 for d in info.directions if d.get("filters"))
-    text = texts.FILTERS_TITLE.format(
-        project=_title(project), filters="\n".join(lines) or texts.FILTERS_NONE
-    )
-    text += texts.FILTERS_OWN.format(n=own) + texts.FILTERS_HINT
-    return text, keyboards.back(Nav(s="pc", p=key), texts.BTN_TO_PROJECT)
-
-
-def params_screen(key: str) -> Screen:
-    project = status.project_by_key(key)
-    if project is None:
-        return _not_found()
-    info = status.project_info(project)
-    data = info.data
-    edit_on = not bool(data.get("disable_edit", False))
-    delete_on = not bool(data.get("disable_delete", False))
-    mode = str(data.get("mode", "copy"))
-    text = texts.PARAMS_TITLE.format(
-        project=_title(project),
-        edit=texts.on_off(edit_on),
-        delete=texts.on_off(delete_on),
-        mode=texts.esc(mode),
-    )
-    return text, keyboards.params(key, edit_on, delete_on, mode, info.writable)
-
-
-# ── navigation handlers ─────────────────────────────────────────────────────
-
-
-@router.callback_query(Nav.filter(F.s == "prj"))
-async def on_projects(callback: CallbackQuery, bot: Bot, panel: Panel, sysd: Systemd) -> None:
-    await show(callback, bot, panel, await projects_screen(sysd))
-
-
-@router.callback_query(Nav.filter(F.s == "pc"))
-async def on_project(
-    callback: CallbackQuery, callback_data: Nav, bot: Bot, panel: Panel, sysd: Systemd
-) -> None:
-    await show(callback, bot, panel, await project_screen(sysd, callback_data.p))
-
-
-@router.callback_query(Nav.filter(F.s == "dl"))
-async def on_directions(callback: CallbackQuery, callback_data: Nav, bot: Bot, panel: Panel) -> None:
-    await show(callback, bot, panel, directions_screen(callback_data.p, callback_data.pg))
-
-
-@router.callback_query(Nav.filter(F.s == "dc"))
-async def on_direction(callback: CallbackQuery, callback_data: Nav, bot: Bot, panel: Panel) -> None:
-    await show(callback, bot, panel, direction_screen(callback_data.p, callback_data.pg, callback_data.i))
-
-
-@router.callback_query(Nav.filter(F.s == "flt"))
-async def on_filters(callback: CallbackQuery, callback_data: Nav, bot: Bot, panel: Panel) -> None:
-    await show(callback, bot, panel, filters_screen(callback_data.p))
-
-
-@router.callback_query(Nav.filter(F.s == "par"))
-async def on_params(callback: CallbackQuery, callback_data: Nav, bot: Bot, panel: Panel) -> None:
-    await show(callback, bot, panel, params_screen(callback_data.p))
-
-
-# ── writes ──────────────────────────────────────────────────────────────────
-
-
-async def _write(
-    callback: CallbackQuery,
-    callback_answer: CallbackAnswer,
-    bot: Bot,
-    panel: Panel,
-    store: ConfigStore,
-    key: str,
-    mutate: Callable[[Any], None],
-    after: Callable[[], Screen],
-    error_back: Nav,
-) -> bool:
-    """Validate + write, then render ``after`` (or the error). True on success."""
-    project = status.project_by_key(key)
-    if project is None:
-        await show(callback, bot, panel, _not_found())
+async def _systemd_ready(callback: CallbackQuery, sysd: Systemd) -> bool:
+    if not sysd.available:
+        await stale_tap(callback, texts.SYSTEMD_UNAVAILABLE)
         return False
-    # Validation imports config.py in a subprocess — seconds; say so first.
-    await show(callback, bot, panel, (texts.VALIDATING, None))
-    try:
-        await store.update(project, mutate)
-    except ConfigError as e:
-        logger.warning("panel: config write to %s refused: %s", project.path.name, e)
-        await show(
-            callback, bot, panel,
-            (texts.config_error(e.code, e.detail), keyboards.back(error_back)),
-        )
-        return False
-    logger.info(
-        "panel: %s updated by admin %s", project.path.name, callback.from_user.id
-    )
-    callback_answer.text = texts.SAVED[project.key]
-    await show(callback, bot, panel, after())
     return True
 
 
-@router.callback_query(Act.filter(F.a.in_({"te", "td", "dd"})))
-async def on_direction_action(
-    callback: CallbackQuery, callback_data: Act, callback_answer: CallbackAnswer,
-    bot: Bot, panel: Panel, store: ConfigStore,
-) -> None:
-    data = callback_data
-    back = Nav(s="dl", p=data.p, pg=data.pg)
-    if data.a == "dd" and not data.ok:
-        project = status.project_by_key(data.p)
-        dirs = status.project_info(project).directions if project else []
-        if not 0 <= data.i < len(dirs) or configstore.fingerprint(dirs[data.i]) != data.h:
-            await show(callback, bot, panel, (texts.config_error("stale", ""), keyboards.back(back)))
-            return
-        d = dirs[data.i]
-        text = texts.CONFIRM_DELETE_DIRECTION.format(
-            n=data.i + 1, sources=texts.refs(d.get("from") or []), targets=texts.refs(d.get("to") or [])
-        )
-        yes = Act(a="dd", p=data.p, pg=data.pg, i=data.i, h=data.h, ok=True)
-        await show(callback, bot, panel, (text, keyboards.confirm(yes, Nav(s="dc", p=data.p, pg=data.pg, i=data.i))))
-        return
+def pause_text(holders: list, mirror: bool = False) -> str:
+    """What starting will stop, for a confirmation ("" — nothing): ``mirror``
+    — a mirror replaces them (turned off), else they're paused for a run."""
+    if not holders:
+        return ""
+    names = "\n".join(f"• {esc(unit_label(p, u))}" for p, u in holders)
+    after = (
+        "Это будет выключено: на одной сессии работает одно зеркало."
+        if mirror else "Это будет остановлено; зеркала запустятся снова, когда это закончится."
+    )
+    return f"\n\nНа этой сессии сейчас работает:\n{names}\n{after}"
 
-    def mutate(cfg: Any) -> None:
-        if data.a == "dd":
-            configstore.delete_direction(cfg, data.i, data.h)
+
+async def restart_pause_text(sysd: Systemd, project: Project) -> str:
+    """For a restart's confirmation: what else runs on the mirror's session —
+    possible after 👤 Аккаунт moved the project to a busy session; the restart
+    turns it off (``turns.start``) instead of crash-looping on the session lock."""
+    holders = [(p, u) for p, u in await status.session_holders(sysd, project) if u != project.live_unit]
+    return pause_text(holders, mirror=True)
+
+
+async def start_unit(callback: CallbackQuery, state: FSMContext, sysd: Systemd, runtime: Runtime,
+                     project: Project, unit: str, kind: str, back: NavCB, what: str) -> bool:
+    """Start now, or ask first when it pauses something on the session.
+    False: refused (said in a pop-up)."""
+    left = runtime.cooldown_left(unit)
+    if left:
+        await stale_tap(callback, texts.COOLDOWN.format(sec=left))
+        return False
+    holders = [(p, u) for p, u in await status.session_holders(sysd, project) if u != unit]
+    if holders:
+        await ask_confirm(callback, state, f"{head(what)}?{pause_text(holders, unit == project.live_unit)}",
+                          kind, back, p=project.key, unit=unit)
+        return False
+    await do_start(callback, sysd, runtime, project, unit)
+    return True
+
+
+async def do_start(callback: CallbackQuery, sysd: Systemd, runtime: Runtime, project: Project, unit: str) -> bool:
+    try:
+        await turns.start(sysd, runtime, project, unit)
+    except SystemdError as e:
+        logger.error("panel: starting %s failed: %s", unit, e)
+        await stale_tap(callback, texts.SYSTEMD_ERROR.format(detail=str(e)[:150]))
+        return False
+    await callback.answer("Команда отправлена systemd.")
+    return True
+
+
+@on_action(router, "start")
+async def on_start(callback: CallbackQuery, callback_data: ActCB, state: FSMContext, sysd: Systemd,
+                   runtime: Runtime) -> None:
+    project = await project_of(callback, callback_data.p)
+    if project is None or not await _systemd_ready(callback, sysd) or not await session_ok(callback, project):
+        return
+    info = status.project_info(project)
+    if info.read_only == "missing":  # config.py refuses to start without it
+        await stale_tap(callback, texts.READ_ONLY["missing"])
+        return
+    if info.readable and not info.directions:
+        await stale_tap(callback, "⛔ В проекте нет направлений. Добавьте: "
+                        f"{registry.menu_path('dir_add')}.")
+        return
+    if await start_unit(callback, state, sysd, runtime, project, project.live_unit, "start",
+                        NavCB(s="card", p=project.key), "▶️ Запустить зеркало"):
+        await show_card(message_of(callback), True, project, sysd, "▶️ Зеркало запускается.")
+
+
+@confirmed("start")
+async def do_confirmed_start(callback: CallbackQuery, action: dict, state: FSMContext, sysd: Systemd,
+                             runtime: Runtime, **_) -> None:
+    project = await project_of(callback, action["p"])
+    if project is not None and await do_start(callback, sysd, runtime, project, action["unit"]):
+        await show_card(message_of(callback), True, project, sysd, "▶️ Запущено.")
+
+
+@on_action(router, "stop", "restart")
+async def on_stop(callback: CallbackQuery, callback_data: ActCB, state: FSMContext, sysd: Systemd) -> None:
+    project = await project_of(callback, callback_data.p)
+    if project is None or not await _systemd_ready(callback, sysd):
+        return
+    text = (
+        f"{head('⏹ Остановить зеркало')} {esc(project_label(project))}?\n\nПересылка прекратится до "
+        "запуска. Ежедневный перезапуск в 04:00 остановленное зеркало не поднимает."
+        if callback_data.a == "stop" else
+        f"{head('🔁 Перезапустить зеркало')} {esc(project_label(project))}?\n\nКонфигурация будет "
+        "перечитана; на время перезапуска пересылка приостанавливается."
+        + await restart_pause_text(sysd, project)
+    )
+    await ask_confirm(callback, state, text, callback_data.a, NavCB(s="card", p=project.key), p=project.key)
+
+
+@confirmed("stop")
+@confirmed("restart")
+async def do_stop(callback: CallbackQuery, action: dict, state: FSMContext, sysd: Systemd,
+                  runtime: Runtime, **_) -> None:
+    project = await project_of(callback, action["p"])
+    if project is None:
+        return
+    restart = action["kind"] == "restart"
+    if restart and runtime.cooldown_left(project.live_unit):
+        await stale_tap(callback, texts.COOLDOWN.format(sec=runtime.cooldown_left(project.live_unit)))
+        return
+    try:
+        if restart:
+            await turns.start(sysd, runtime, project, project.live_unit, restart=True)
         else:
-            flag = "disable_edit" if data.a == "te" else "disable_delete"
-            configstore.toggle_direction_flag(cfg, data.i, data.h, flag)
-
-    after: Callable[[], Screen] = (
-        (lambda: directions_screen(data.p, data.pg))
-        if data.a == "dd"
-        else (lambda: direction_screen(data.p, data.pg, data.i))
-    )
-    await _write(callback, callback_answer, bot, panel, store, data.p, mutate, after, back)
-
-
-@router.callback_query(Act.filter(F.a.in_({"ge", "gd", "gm"})))
-async def on_param_action(
-    callback: CallbackQuery, callback_data: Act, callback_answer: CallbackAnswer,
-    bot: Bot, panel: Panel, store: ConfigStore,
-) -> None:
-    key = {"ge": "disable_edit", "gd": "disable_delete", "gm": "mode"}[callback_data.a]
-    pkey = callback_data.p
-    await _write(
-        callback, callback_answer, bot, panel, store, pkey,
-        lambda cfg: configstore.toggle_global(cfg, key),
-        lambda: params_screen(pkey),
-        Nav(s="par", p=pkey),
-    )
-
-
-# ── add direction (FSM) ─────────────────────────────────────────────────────
-
-
-def _add_text(project_key: str, body: str) -> str:
-    return texts.ADD_HEADER.format(project=texts.PROJECT_TITLES[project_key]) + body
-
-
-async def _edit_panel(message: Message, bot: Bot, panel: Panel, screen: Screen) -> None:
-    # Keep the chat to one panel message: drop the typed input, edit the panel.
-    with suppress(TelegramBadRequest):
-        await message.delete()
-    await panel.edit(bot, message.chat.id, screen[0], screen[1])
-
-
-@router.callback_query(Act.filter(F.a == "add"))
-async def on_add(
-    callback: CallbackQuery, callback_data: Act, callback_answer: CallbackAnswer,
-    bot: Bot, panel: Panel, state: FSMContext,
-) -> None:
-    project = status.project_by_key(callback_data.p)
-    if project is None or not status.project_info(project).writable:
-        callback_answer.text = texts.CONFIG_ERRORS["read_only"]
-        callback_answer.show_alert = True
+            await sysd.disable(project.live_unit)
+    except SystemdError as e:
+        await stale_tap(callback, texts.SYSTEMD_ERROR.format(detail=str(e)[:150]))
         return
-    await state.set_state(AddDirection.source)
-    await state.set_data({"p": project.key})
-    await show(callback, bot, panel, (_add_text(project.key, texts.ADD_SOURCE), keyboards.add_cancel(project.key)))
+    await callback.answer("Команда отправлена systemd.")
+    await show_card(message_of(callback), True, project, sysd,
+                    "🔁 Зеркало перезапускается." if restart else "⏹ Зеркало остановлено.")
 
 
-@router.message(StateFilter(AddDirection.source), F.text)
-async def on_add_source(message: Message, bot: Bot, panel: Panel, state: FSMContext) -> None:
-    key = (await state.get_data()).get("p", "")
-    try:
-        source = configstore.normalize_chat_ref(message.text or "")
-    except ConfigError as e:
-        body = texts.config_error(e.code, e.detail) + "\n\n" + texts.ADD_SOURCE
-        await _edit_panel(message, bot, panel, (_add_text(key, body), keyboards.add_cancel(key)))
+# ── ➕ Новый проект: name → icon → account ───────────────────────────────────
+
+NAME_ASK = f"{head(title('new'))} — пришлите имя проекта (до {NAME_MAX} символов):"
+ICON_ASK = "— выберите значок проекта или пришлите свой эмодзи:"
+
+
+def name_problem(name: str, skip: str = "") -> Optional[str]:
+    if not name or len(name) > NAME_MAX:
+        return f"нужно от 1 до {NAME_MAX} символов"
+    if any(p.name.casefold() == name.casefold() and p.key != skip for p in projects.list_projects()):
+        return "проект с таким именем уже есть"
+    return None
+
+
+def icon_problem(icon: str) -> Optional[str]:
+    if not icon or len(icon) > 8 or any(unicodedata.category(c)[0] in "LN" for c in icon):
+        return "нужен один эмодзи"
+    if registry.emoji_of(icon) in {registry.emoji_of(s.title) for s in registry.SCREENS.values()}:
+        return "этот значок уже означает раздел бота — выберите другой"
+    return None
+
+
+def icon_kb():
+    return choice_kb("icon", [(i, i) for i in ICONS], widths=(4,))
+
+
+@on_action(router, "new")
+async def on_new(callback: CallbackQuery, state: FSMContext) -> None:
+    await start_form(callback, state, NewProject.name, NAME_ASK, NavCB(s="prj"))
+
+
+@router.message(NewProject.name)
+async def on_new_name(message: Message, state: FSMContext) -> None:
+    name = (message.text or "").strip()
+    if problem := name_problem(name):
+        await message.answer(f"Не подходит: {problem}. Пришлите другое имя:")
         return
-    await state.update_data(source=source)
-    await state.set_state(AddDirection.targets)
-    body = texts.ADD_TARGETS.format(source=texts.refs([source]))
-    await _edit_panel(message, bot, panel, (_add_text(key, body), keyboards.add_cancel(key)))
+    await ask(message, state, NewProject.icon, f"{head(title('new'))} «{esc(name)}» {ICON_ASK}",
+              icon_kb(), name=name)
 
 
-@router.message(StateFilter(AddDirection.targets), F.text)
-async def on_add_targets(message: Message, bot: Bot, panel: Panel, state: FSMContext) -> None:
-    data = await state.get_data()
-    key, source = data.get("p", ""), data.get("source", "")
-    try:
-        targets = configstore.parse_chat_refs(message.text or "")
-    except ConfigError as e:
-        body = texts.config_error(e.code, e.detail) + "\n\n" + texts.ADD_TARGETS.format(
-            source=texts.refs([source])
-        )
-        await _edit_panel(message, bot, panel, (_add_text(key, body), keyboards.add_cancel(key)))
-        return
-    await state.update_data(targets=targets)
-    await state.set_state(AddDirection.choice)
-    body = texts.ADD_MODE.format(source=texts.refs([source]), targets=texts.refs(targets))
-    await _edit_panel(message, bot, panel, (_add_text(key, body), keyboards.add_mode(key)))
-
-
-def _summary(data: dict) -> Screen:
-    key = data["p"]
-    body = texts.ADD_SUMMARY.format(
-        source=texts.refs([data["source"]]),
-        targets=texts.refs(data["targets"]),
-        mode=data["mode"],
-        history=texts.HISTORY_FULL if data["history"] else texts.HISTORY_NONE,
-    )
-    return _add_text(key, body), keyboards.add_summary(key)
-
-
-async def _add_data(state: FSMContext, *required: str) -> Optional[dict]:
-    if await state.get_state() != AddDirection.choice.state:
-        return None
-    data = await state.get_data()
-    return data if all(k in data for k in ("p", *required)) else None
-
-
-async def _expired(callback: CallbackQuery, bot: Bot, panel: Panel, state: FSMContext, key: str) -> None:
-    await state.clear()
-    await show(callback, bot, panel, (texts.ADD_EXPIRED, keyboards.back(Nav(s="dl", p=key), texts.BTN_TO_LIST)))
-
-
-@router.callback_query(Act.filter(F.a == "am"))
-async def on_add_mode(
-    callback: CallbackQuery, callback_data: Act, bot: Bot, panel: Panel, state: FSMContext
-) -> None:
-    data = await _add_data(state, "source", "targets")
-    if data is None:
-        await _expired(callback, bot, panel, state, callback_data.p)
-        return
-    mode = "forward" if callback_data.i == 1 else "copy"
-    project = status.project_by_key(data["p"])
-    if project is not None and not project.live:
-        # The courses config is only ever replayed — a direction there without
-        # past_mode would be ignored by past_mode.py.
-        await state.update_data(mode=mode, history=True)
-        await show(callback, bot, panel, _summary({**data, "mode": mode, "history": True}))
-        return
-    await state.update_data(mode=mode)
-    body = texts.ADD_HISTORY.format(
-        source=texts.refs([data["source"]]), targets=texts.refs(data["targets"]), mode=mode
-    )
-    await show(callback, bot, panel, (_add_text(data["p"], body), keyboards.add_history(data["p"])))
-
-
-@router.callback_query(Act.filter(F.a == "ah"))
-async def on_add_history(
-    callback: CallbackQuery, callback_data: Act, bot: Bot, panel: Panel, state: FSMContext
-) -> None:
-    data = await _add_data(state, "source", "targets", "mode")
-    if data is None:
-        await _expired(callback, bot, panel, state, callback_data.p)
-        return
-    history = callback_data.i == 1
-    await state.update_data(history=history)
-    await show(callback, bot, panel, _summary({**data, "history": history}))
-
-
-@router.callback_query(Act.filter(F.a == "as"))
-async def on_add_save(
-    callback: CallbackQuery, callback_data: Act, callback_answer: CallbackAnswer,
-    bot: Bot, panel: Panel, state: FSMContext, store: ConfigStore,
-) -> None:
-    data = await _add_data(state, "source", "targets", "mode", "history")
-    if data is None:
-        await _expired(callback, bot, panel, state, callback_data.p)
-        return
-    await state.clear()
-    key = data["p"]
-
-    def mutate(cfg: Any) -> None:
-        configstore.add_direction(cfg, [data["source"]], data["targets"], data["mode"], data["history"])
-
-    await _write(
-        callback, callback_answer, bot, panel, store, key, mutate,
-        lambda: directions_screen(key, 10**6),  # clamps to the last page
-        Nav(s="dl", p=key),
+async def _new_icon(message: Message, state: FSMContext, icon: str) -> None:
+    paths = accounts.session_files()
+    await ask(
+        message, state, NewProject.account,
+        f"{head(title('new'))} {esc(icon)} «{esc((await state.get_data())['name'])}» — выберите аккаунт: "
+        "от его имени зеркало будет читать источники и писать в получатели. Проекты на одной "
+        "сессии работают по очереди.",
+        accounts.picker(paths), icon=icon, accounts=paths, then="new",
     )
 
 
-@router.callback_query(Act.filter(F.a == "ax"))
-async def on_add_cancel(
-    callback: CallbackQuery, callback_data: Act, bot: Bot, panel: Panel, state: FSMContext
-) -> None:
-    await state.clear()
-    await show(callback, bot, panel, directions_screen(callback_data.p, 0))
+@router.message(NewProject.icon)
+async def on_new_icon_typed(message: Message, state: FSMContext) -> None:
+    icon = (message.text or "").strip()
+    if problem := icon_problem(icon):
+        await message.answer(f"Не подходит: {problem}. Выберите значок выше или пришлите другой:")
+        return
+    await _new_icon(message, state, icon)
+
+
+@router.callback_query(ChoiceCB.filter(F.scope == "icon"))
+async def on_icon_button(callback: CallbackQuery, callback_data: ChoiceCB, state: FSMContext, **deps) -> None:
+    current = await state.get_state()
+    if callback_data.value not in ICONS or current not in (NewProject.icon.state, Input.value.state):
+        await stale_tap(callback)
+        return
+    await callback.answer()
+    with suppress(Exception):
+        await message_of(callback).edit_reply_markup(reply_markup=None)
+    if current == NewProject.icon.state:
+        await _new_icon(message_of(callback), state, callback_data.value)
+    else:
+        await set_icon(message_of(callback), state, callback_data.value, await state.get_data(), **deps)
+
+
+async def create(message: Message, name: str, icon: str, session: str, note: str, sysd: Systemd) -> None:
+    """The new project (an account was picked or signed in): its card."""
+    project = projects.create_project(name, icon, session)
+    logger.info("panel: project %s created on %s", project.key, session)
+    done = (f"{note}\n" if note else "") + (
+        f"✅ Проект {esc(project_label(project))} создан. Теперь добавьте направления: "
+        f"{registry.SCREENS['dirs'].title} → {title('dir_add')}."
+    )
+    await show_card(message, False, project, sysd, done)
+
+
+# ── 🧰 Управление ───────────────────────────────────────────────────────────
+
+
+@on_action(router, "rename")
+async def on_rename(callback: CallbackQuery, callback_data: ActCB, state: FSMContext) -> None:
+    project = await project_of(callback, callback_data.p)
+    if project is None:
+        return
+    await start_form(callback, state, Input.value,
+                     f"{head(title('rename'))} — сейчас «{esc(project.name)}». Пришлите новое имя:",
+                     NavCB(s="mng", p=project.key), data={"kind": "rename", "p": project.key})
+
+
+@input_kind("rename")
+async def set_name(message: Message, state: FSMContext, raw: str, data: dict, sysd: Systemd, **_) -> None:
+    if problem := name_problem(raw, skip=data["p"]):
+        await message.answer(f"Не подходит: {problem}. Пришлите другое имя:")
+        return
+    await leave_form(message.chat.id, state)
+    project = projects.update_project(data["p"], name=raw)
+    await show(message, False, "mng", project, note=f"✅ Проект переименован: {esc(project_label(project))}.")
+
+
+@on_action(router, "icon")
+async def on_icon(callback: CallbackQuery, callback_data: ActCB, state: FSMContext) -> None:
+    project = await project_of(callback, callback_data.p)
+    if project is None:
+        return
+    await start_form(callback, state, Input.value, f"{head(title('icon'))} {ICON_ASK}",
+                     NavCB(s="mng", p=project.key), markup=icon_kb(), data={"kind": "icon", "p": project.key})
+
+
+@input_kind("icon")
+async def set_icon(message: Message, state: FSMContext, raw: str, data: dict, **_) -> None:
+    if problem := icon_problem(raw):
+        await message.answer(f"Не подходит: {problem}. Выберите значок выше или пришлите другой:")
+        return
+    await leave_form(message.chat.id, state)
+    project = projects.update_project(data["p"], icon=raw)
+    await show(message, False, "mng", project, note=f"✅ Новый значок: {esc(project_label(project))}.")
+
+
+@on_action(router, "account")
+async def on_account(callback: CallbackQuery, callback_data: ActCB, state: FSMContext) -> None:
+    project = await project_of(callback, callback_data.p)
+    if project is None:
+        return
+    paths = accounts.session_files()
+    await start_form(
+        callback, state, Input.value,
+        f"{head(title('account'))} — сейчас {esc(accounts.account_label(project.session))}. "
+        "Выберите другой; зеркало начнёт работать от него после перезапуска.",
+        NavCB(s="mng", p=project.key), markup=accounts.picker(paths),
+        data={"kind": "account", "p": project.key, "accounts": paths, "then": project.key},
+    )
+
+
+@input_kind("account")
+async def account_typed(message: Message, state: FSMContext, raw: str, data: dict, **_) -> None:
+    await message.answer("Выберите аккаунт кнопкой выше — или /cancel, чтобы выйти.")
+
+
+async def set_account(message: Message, key: str, session: str, note: str = "") -> None:
+    project = status.find(key)
+    if project is None:
+        await message.answer(texts.NO_PROJECT)
+        return
+    project = projects.update_project(key, session=session)
+    done = (f"{note}\n" if note else "") + (
+        f"✅ Аккаунт проекта: {esc(accounts.account_label(session))}. "
+        "Перезапустите зеркало, чтобы он заработал."
+    )
+    await show(message, False, "mng", project, note=done)
+
+
+@view("mng")
+async def manage_view(message: Message, edit: bool, nav: NavCB, state: FSMContext, sysd: Systemd,
+                      note: str = "", **_) -> None:
+    project = status.find(nav.p)
+    if project is None:
+        await projects_view(message, edit, NavCB(s="prj"), state, sysd, note=texts.NO_PROJECT)
+        return
+    body = (f"Имя: <b>{esc(project.name)}</b> · значок: {esc(project.icon)} · ключ <code>{esc(project.key)}</code>\n"
+            f"👤 Аккаунт: {esc(accounts.account_label(project.session))}")
+    await show(message, edit, "mng", project, body=body, note=note)
+
+
+@on_action(router, "delete")
+async def on_delete(callback: CallbackQuery, callback_data: ActCB, state: FSMContext) -> None:
+    project = await project_of(callback, callback_data.p)
+    if project is None:
+        return
+    own_config = project.config_path.resolve().is_relative_to((projects.PROJECTS_DIR / project.key).resolve())
+    keeps = ("Папка проекта вместе с конфигом перенесётся в <code>projects/.deleted/</code> — "
+             "оттуда её можно вернуть." if own_config else
+             f"Файл конфигурации <code>{esc(project.config)}</code> останется на месте, настройки "
+             "проекта перенесутся в <code>projects/.deleted/</code>.")
+    await ask_confirm(
+        callback, state,
+        f"{head(title('delete'))} {esc(project_label(project))}?\n\nЕго зеркало, догрузка и "
+        f"обслуживание будут остановлены. {keeps} Сессия аккаунта останется в {registry.ACCOUNTS}.",
+        "delete", NavCB(s="mng", p=project.key), yes=YES_DELETE, p=project.key,
+    )
+
+
+@confirmed("delete")
+async def do_delete(callback: CallbackQuery, action: dict, state: FSMContext, sysd: Systemd, **_) -> None:
+    project = await project_of(callback, action["p"])
+    if project is None:
+        return
+    if sysd.available:
+        for unit in project.units:  # disabled too: an enabled instance would fail on every boot
+            with suppress(SystemdError):
+                await sysd.disable(unit)
+    archive = projects.delete_project(project.key)
+    logger.info("panel: project %s deleted, archived to %s", project.key, archive)
+    await callback.answer()
+    where = os.path.relpath(archive, projects.REPO_DIR)
+    await projects_view(message_of(callback), True, NavCB(s="prj"), state, sysd,
+                        note=f"✅ Проект {esc(project_label(project))} удалён. Копия: <code>{esc(where)}</code>.")
+
+
+@router.message(NewProject.account)
+async def on_new_account_typed(message: Message, state: FSMContext) -> None:
+    await message.answer("Выберите аккаунт кнопкой выше — или /cancel, чтобы выйти.")
+
