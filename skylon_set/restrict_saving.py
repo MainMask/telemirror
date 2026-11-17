@@ -7,6 +7,7 @@ supergroup: live ones (CHAT_MAPPING from mirror.config.yml) and course ones
 Usage:
     python -m skylon_set.restrict_saving            # with confirmation
     python -m skylon_set.restrict_saving --dry-run  # only shows the plan
+    python -m skylon_set.restrict_saving --yes      # no prompt (the panel's task unit)
 
 Warning: uses the same SESSION_STRING as the main service.
 Do not run at the same time as main.py.
@@ -70,7 +71,7 @@ def course_recipient_ids(path: Path = COURSES_CONFIG_PATH) -> Set[int]:
     }
 
 
-async def _run(logger: logging.Logger, dry_run: bool) -> None:
+async def _run(logger: logging.Logger, dry_run: bool, assume_yes: bool = False) -> None:
     recipient_ids = collect_recipient_ids(CHAT_MAPPING) | course_recipient_ids()
     if not recipient_ids:
         logger.warning("CHAT_MAPPING is empty — nothing to configure.")
@@ -110,12 +111,13 @@ async def _run(logger: logging.Logger, dry_run: bool) -> None:
             )
             return
 
-        answer = input(
-            f"\nEnable Restrict Saving Content in {len(targets)} chat(s)? [y/N] "
-        ).strip().lower()
-        if answer != "y":
-            logger.info("Cancelled.")
-            return
+        if not assume_yes:
+            answer = input(
+                f"\nEnable Restrict Saving Content in {len(targets)} chat(s)? [y/N] "
+            ).strip().lower()
+            if answer != "y":
+                logger.info("Cancelled.")
+                return
 
         for entity in targets:
             result = await safe_call(
@@ -154,11 +156,16 @@ def main() -> None:
         action="store_true",
         help="Only show the plan, without making real changes",
     )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Don't ask for confirmation (non-interactive runs, e.g. the panel's task unit)",
+    )
     args = parser.parse_args()
 
     logger = setup_stdout_logger("restrict_saving", LOG_LEVEL)
     try:
-        asyncio.run(_run(logger, args.dry_run))
+        asyncio.run(_run(logger, args.dry_run, args.yes))
     except KeyboardInterrupt:
         pass
 

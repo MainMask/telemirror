@@ -3473,3 +3473,18 @@ A review of this pass's whole diff. No bug in the code.
   `Path.read_bytes()`.
 
 Full suite 564, `pyflakes`, `ruff` and `mypy .` green.
+
+---
+
+## `skylon_set/restrict_saving.py` — `--yes` for the control panel (targeted)
+
+Reason: the new control panel (`telemirror/panel`) runs this script as
+`telemirror-task@restrict_saving.service`, where there is no terminal — the
+`input()` confirmation would die with `EOFError`. Added `--yes` (skips only that
+prompt). Without the flag the CLI behaves exactly as before (prompt, `y` to
+proceed); `--dry-run` is unchanged and still never prompts. The panel enforces
+its own confirmation and only offers the `--yes` run after a successful
+`--dry-run` with the same arguments.
+
+Tests: `test_run_yes_skips_the_prompt`,
+`test_run_without_yes_still_prompts_and_can_cancel` (`tests/test_restrict_saving.py`).

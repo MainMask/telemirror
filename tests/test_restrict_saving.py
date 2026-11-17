@@ -125,3 +125,30 @@ def test_run_dry_run_makes_no_calls(monkeypatch):
     run(restrict_saving._run(logging.getLogger("t"), dry_run=True))
 
     assert client.toggled == []
+
+
+def test_run_yes_skips_the_prompt(monkeypatch):
+    entities = [_entity(-100, False)]
+    client = _FakeClient(entities)
+    _patch_client(monkeypatch, client)
+
+    def _no_input(*_a):
+        raise AssertionError("--yes must not prompt")
+
+    monkeypatch.setattr("builtins.input", _no_input)
+
+    run(restrict_saving._run(logging.getLogger("t"), dry_run=False, assume_yes=True))
+
+    assert client.toggled == [-100]
+
+
+def test_run_without_yes_still_prompts_and_can_cancel(monkeypatch):
+    entities = [_entity(-100, False)]
+    client = _FakeClient(entities)
+    _patch_client(monkeypatch, client)
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda *a: prompts.append(a) or "n")
+
+    run(restrict_saving._run(logging.getLogger("t"), dry_run=False))
+
+    assert len(prompts) == 1 and client.toggled == []
