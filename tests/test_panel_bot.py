@@ -311,3 +311,14 @@ def test_dry_run_launch_writes_env_file(env, tmp_path):
     # the real run is refused until that dry-run has finished successfully
     env.feed(callback_update(Act(a="run", p="sp", i=1, ok=True).pack()))
     assert env.session.of(AnswerCallbackQuery)[-1].text == texts.RUN_NEEDS_DRY
+
+
+def test_callback_toasts_fit_telegram_limit():
+    # answerCallbackQuery text is capped at 200 characters.
+    toasts = [
+        texts.SYSTEMD_UNAVAILABLE, texts.COOLDOWN.format(sec=999), texts.RUN_NEEDS_DRY,
+        texts.DONE_QUEUED, texts.TASK_STARTED, texts.SYSTEMD_ERROR.format(detail="x" * 150),
+        texts.CONFIG_ERRORS["read_only"], *texts.SAVED.values(),
+        *(texts.TASK_BUSY.format(title=t) for t in texts.UNIT_TITLES.values()),
+    ]
+    assert max(len(t) for t in toasts) <= 200
