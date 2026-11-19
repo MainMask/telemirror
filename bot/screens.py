@@ -79,7 +79,8 @@ def screen_text(
         lines = [_line(titles.get(b.action, b.title), b.hint) for b in buttons]
         blocks.append("\n".join([f"<i>{esc(group)}</i>", *lines] if group else lines))
     blocks.append("\n".join([_line(label, hint) for label, hint in own_hints]
-                            + [_line(c.title, c.hint) for c in children(screen_id)]))
+                            + [_line(titles.get(c.id, c.title), c.hint)
+                               for c in children(screen_id) if c.id not in hidden]))
     if more:
         blocks.append(texts.more(more))
     return fit("\n\n".join(b for b in blocks if b))

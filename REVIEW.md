@@ -4473,8 +4473,9 @@ checked to fail with its fix taken out.
 - **A service message during the stop was listed as cut off** (pass 42): the
   stop was checked in `new_message`/`new_album`, before `_impl`'s skips — a
   pin or a join landing during ⏹ became «❗ Не скопировано» for every channel.
-  Checked past them now. A post the filters would drop is still listed (they
-  run per target, some through the closed client); ♻️ drops it. Test:
+  Checked past them now. A post a direction would skip later (its topic, the
+  filters, already copied) is still listed — those run per target, the filters
+  some through the closed client; ♻️ drops it. Test:
   `test_a_service_message_during_the_stop_is_not_listed_as_cut_off`.
 
 Rejected: `_forget_sent` across sources (a dedup limit, not a regression),
@@ -4485,3 +4486,14 @@ index for `forget_fingerprints`, the second `sink.close()`.
 
 954 passed, 4 skipped (also under `-W error`); `ruff`, `pyflakes`, `mypy .`
 green.
+
+### Pass 43b — review of this session's changes (2026-11-19)
+
+Each finding re-checked; none a bug. The comment on `_stopped()` claimed more
+than it does (see above) — corrected. Rejected: the same text logged again
+during `aclose`'s wait, or a record dropped by the `close()` after it — nothing
+on `telemirror.*` logs WARNING+ in that window (`telemirror.notify` is never a
+notice); the sends left by the stop deadline — `asyncio.run` cancels them at
+teardown; the card's count after 🧽 with the mirror stopped — the list itself
+still has them too (the panel only asks); `hidden`/`titles` keyed by action and
+screen id — no id is both; failed.json read per card — up to 300 entries.

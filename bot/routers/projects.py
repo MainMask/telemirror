@@ -6,7 +6,7 @@ import logging
 import os
 import unicodedata
 from contextlib import suppress
-from typing import Optional
+from typing import Optional, Tuple
 
 from aiogram import F, Router
 from aiogram.filters import StateFilter
@@ -34,7 +34,7 @@ from bot.sessions import account_label, picker, session_files
 from bot.states import Input, NewProject, leave_form
 from bot.systemd import Systemd, SystemdError
 from bot.texts import esc, head, project_label
-from telemirror import projects
+from telemirror import failed, projects
 from telemirror.projects import Project
 
 logger = logging.getLogger(__name__)
@@ -97,11 +97,16 @@ async def card_view(message: Message, edit: bool, nav: NavCB, *, project: Projec
         lines.append(f"👉 <b>Что дальше:</b> {step}")
     if not sysd.available:
         lines.append(texts.SYSTEMD_UNAVAILABLE)
-    hidden = ("start",) if st and st.running else ("stop", "restart")
+    hidden: Tuple[str, ...] = ("start",) if st and st.running else ("stop", "restart")
+    # ❗ Не скопировано only while posts wait in it (the mirror's notice opens it anyway)
+    waiting = len(failed.load(project.key))
+    titles = {"fail": f"{registry.FAILED} ({waiting})"} if waiting else {}
+    if not waiting:
+        hidden += ("fail",)
     ready = project.session_path.exists() and info.readable and bool(info.directions)
     primary = "restart" if pending else ("start" if not running and ready else "")
-    await show(message, edit, "card", project, body="\n".join(lines), note=note, hidden=hidden, pg=nav.pg,
-               primary=primary)
+    await show(message, edit, "card", project, body="\n".join(lines), note=note, hidden=hidden, titles=titles,
+               pg=nav.pg, primary=primary)
 
 
 def next_step(project: Project, info: status.ProjectInfo, running: bool) -> str:

@@ -1747,14 +1747,10 @@ def _failed_entry(env, link="https://t.me/c/1111111111/5", mid=5):
 
 def test_failed_posts_screen_and_retry(env):
     from telemirror import failed
-    _open_card(env)
-    env.press("❗ Не скопировано")
-    assert "Список пуст" in env.last_text()
-    assert not any(label.startswith("♻️ Повторить все") for label in env.labels())
-
     eid = _failed_entry(env)
     projects.save_chat_names(env.live.key, {-1002222222222: "Мой канал"})
-    env.press("🔄 Обновить")
+    _open_card(env)
+    env.press("❗ Не скопировано")
     text = env.last_text()
     assert "Ждут повтора: <b>1</b>" in text and "<b>Мой канал</b>: ChatWriteForbiddenError: &lt;нет&gt;" in text
     row = next(label for label in env.labels() if label.startswith("♻️ ") and "Мой канал" in label)
@@ -1765,6 +1761,22 @@ def test_failed_posts_screen_and_retry(env):
     env.press("♻️ Повторить все")
     env.press("🧽 Очистить список")
     assert sorted(failed.take_requests(env.live.key)) == [failed.ALL, failed.CLEAR]
+
+
+def test_the_card_shows_failed_posts_only_while_some_wait(env):
+    """❗ Не скопировано is on the card only while posts wait in it, with how
+    many; an empty list is still opened by the mirror's notice (after a retry)."""
+    _open_card(env)
+    assert not any(label.startswith("❗ Не скопировано") for label in env.labels())
+    assert "Не скопировано" not in env.last_text()
+    env.feed(callback_update(NavCB(s="fail", p=env.live.key).pack()))
+    assert "Список пуст" in env.last_text()
+    assert not any(label.startswith("♻️ Повторить все") for label in env.labels())
+
+    _failed_entry(env)
+    _open_card(env)
+    assert "❗ Не скопировано (1) ›" in env.labels()
+    assert "❗ Не скопировано (1)</b> —" in env.last_text()
 
 
 def test_failed_posts_notice_buttons_open_the_panel(env):

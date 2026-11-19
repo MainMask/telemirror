@@ -1186,7 +1186,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             )
             return
 
-        self._stopped()  # past the skips above: what wouldn't be copied isn't «cut off»
+        # Past the skips above (a service message isn't «cut off»); one a direction
+        # skips later (its topic, its filters) still is — they may need the closed client.
+        self._stopped()
         self._logger.info(f"[New message]: {message_link}")
 
         reply_to_messages: Dict[Tuple[int, Optional[int]], int] = (
