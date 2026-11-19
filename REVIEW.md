@@ -4221,3 +4221,267 @@ the same call fills Telethon's entity cache the mirror relies on, and asking
 chat by chat would be more requests, not fewer.
 
 923 passed, 4 skipped (also under `-W error`); `ruff`, `pyflakes`, `mypy .` green.
+
+## Pass 37 — whole-project review, and its fixes
+
+`/code-review` over the whole project at `67ae470`, requested by the owner;
+each finding re-checked against the code (and Telethon's own source) before a
+verdict. Fixed, each with a test that failed first:
+
+- **P2 — a post cut off by the stop was lost.** `__connect_client`'s
+  `finally` wrote the sink (`failed.json`, stats) before `client.disconnect()`
+  — the call that cancels Telethon's handler tasks still under way
+  (`_disconnect_coro`), so their «зеркало остановилось» outcome reached the
+  sink after its last write. The sink is written after the disconnect now
+  (in a `finally` of its own: a second SIGTERM mid-disconnect still writes
+  it). Test: `test_a_post_cut_off_by_the_stop_is_saved_in_the_list`.
+- **P2 — a ban / expired session was never told to the admins.** Its
+  critical log line waits out `NoticeLogHandler`'s 5 s debounce, and the
+  `finally` right after closed the handler, cancelling it. The new
+  `NoticeLogHandler.aclose` sends what is still pending at once and waits
+  for the sends under way (at most `SEND_TIMEOUT`). Test:
+  `test_a_ban_is_told_to_the_admins`.
+- **P3 — `dedup_hours` let the same post from two sources at once through.**
+  Each update is its own task, and the fingerprint is remembered only after
+  the send: both checks ran before either had sent. `_dedup_turn` (next to
+  `_track_fanout` / `_recording` in `new_message` / `new_album`) has posts
+  with the same fingerprint fan out one at a time; a first copy that fails
+  doesn't hold back the second. Tests:
+  `test_the_same_post_from_two_sources_at_once_is_sent_once`,
+  `test_a_failed_first_copy_does_not_hold_back_the_second`.
+- **P3 — a FloodWait dropped the panel's other requests.** `take_requests`
+  removes every request file, and `_handle_requests` returned at the
+  FloodWait: a 🗑 (or another ♻️) taken with it was lost. The copies stop,
+  a 🗑 still runs. Test: `test_a_floodwait_still_runs_the_clear_asked_after_it`.
+- **P3 — a negative `dedup_hours` in YAML** was truthy: the check on with a
+  cutoff in the future, every fingerprint pruned each hour. Refused at load
+  (`_validate_dedup_hours`). Test: `test_negative_dedup_hours_is_refused`.
+- **P3 — a fan-out broken off before any target wasn't counted.** Its
+  `ALL_CHATS` failure was listed but left out of the stats: the report said
+  «ошибок отправки: 0» and «🔇 Ничего не пришло». It counts as a failure of
+  each of the source's directions now (and `retrying` takes those back).
+  Test: `test_a_fanout_broken_off_counts_as_a_failure_for_every_target`.
+
+Rejected after re-checking: the LaMa semaphore released on a cancellation
+(the photo path is behind `ReuploadCache`'s `asyncio.shield`; nothing else
+cancels it but the process stopping); the `extra={"notice": …}` flags
+(a design remark, not a bug); `get_dialogs()` at every start (left as is in
+pass 36b). Not changed: `BotNotifier.send`'s session per notice (a few
+notices a minute at most).
+
+930 passed, 4 skipped; `ruff`, `pyflakes`, `mypy .` green.
+
+## Pass 38 — a second whole-project review (pass 37's fixes), and its fixes
+
+`/code-review` again, requested by the owner; it went over pass 37's
+uncommitted fixes. Fixed, each with a test that failed first:
+
+- **The ban's notice could still be dropped after a burst.** `aclose` sent
+  through `_send`, which keeps the rate and the in-flight cap: past them the
+  notice was held back, and `close()` cancelled the held-back timer. Stopping,
+  `_send(force=True)` / `_send_held_back(force=True)` go out anyway. Tests:
+  `test_aclose_sends_what_waits_even_past_the_rate`,
+  `test_aclose_tells_the_held_back_count_with_nothing_else_waiting`.
+- **A slow first admin cut the next ones off.** `aclose` waited
+  `SEND_TIMEOUT` for everything, but `BotNotifier.send` messages the admins
+  one by one, each request with its own timeout. It waits for the sends now
+  (each request is bounded by its own timeout, the stop by systemd's). Test:
+  `test_aclose_waits_for_every_admin_however_slow`.
+- **`dedup_hours: .nan` / `.inf` passed** (truthy, never < 0), then broke
+  every check. Refused at load (`math.isfinite`). Test:
+  `test_dedup_hours_must_be_a_number_of_hours`.
+- **A source without dedup took a turn too** (`_dedup_turn` asked the
+  project-wide `_dedup_max_hours`): the same post from a source with dedup
+  waited for its fan-out. The fingerprint is taken only for a source with a
+  dedup direction (`_fingerprint`), once, and passed to the `_impl`s (it was
+  computed twice). Test: `test_a_source_without_dedup_does_not_hold_back_one_with_it`.
+
+Rejected after re-checking: `disconnect()` hanging past `TimeoutStopSec`
+(Telethon bounds `wait_closed` at 10 s; the handler tasks end on their
+cancellation); the cross-project dedup race (the projects share no channel);
+the ♻️ requests skipped after a FloodWait (intended: the warning reaches the
+admins, the posts stay listed). Left as is: an `ALL_CHATS` entry saved by
+`67ae470` (never counted then) takes a real failure off that day when
+retried — transitional, at most 14 days, the report only.
+
+936 passed, 4 skipped; `ruff`, `pyflakes`, `mypy .` green.
+
+## Pass 39 — whole-project review (all modules, not the diff), and its fixes
+
+`/code-review` over every module, requested by the owner; each finding
+re-checked before a verdict. Fixed, with a test that failed first (but 4):
+
+- **The panel kept a stale pause** (`bot/turns.start`). The admin starting
+  the mirror a replay had paused dropped that pause in memory only — the
+  file was saved on `lives or taken`, both empty — so the watcher later
+  «brought it back» (a false notice, or the mirror on again after the admin
+  turned it off). Saved whenever the list changed. Test:
+  `test_starting_the_paused_mirror_itself_forgets_its_pause`.
+- **The «❗ Не скопировано» notice still due was lost at the stop**
+  (`LiveSink.close` wrote the files only). `LiveSink.aclose` (from
+  `__connect_client`'s `finally`) writes them, then sends it. Test:
+  `test_stopping_tells_the_posts_not_told_yet`.
+- **A deleted copy's fingerprint stayed**: the same post from another source
+  within the window was skipped as a repeat of a post the channel no longer
+  had. `delete_message` forgets the fingerprints of the copies it deleted
+  (`Database.forget_fingerprints`, per channel and topic; a direction with
+  `disable_delete` keeps its copy and its fingerprint). Test:
+  `test_a_deleted_copy_is_no_reason_to_skip_the_post_again`. The Postgres
+  statement follows `seen_fingerprint`'s; not run here (no server).
+- **`install.sh` ran a bare `pip`**: without the venv active it installed
+  into the system Python (the units run `.venv/bin/python`). It refuses to
+  run without `VIRTUAL_ENV`; `deploy/README.md` says how to make one.
+
+Confirmed but latent — only when two projects share a channel (the owner's
+share none): `broadcast_sync` has no project in its key (two projects on one
+broadcast channel mark each other's posts synced); `clear_channels` removes
+the cleared channel's `binding_id` rows of every topic and project. Left
+for when projects share channels (a schema change).
+
+Intended: a fan-out broken off mid-way doesn't list the targets it never
+tried (`test_floodwait_mid_fanout_fails_the_rest_and_propagates`; ♻️ goes
+over every target); ♻️ may send twice where a copy went out but its row
+wasn't written (README). Rejected: `health._show` without `TimeoutExpired`
+(a missed round; the next one compares against the saved state);
+`safe_call` without `FloodPremiumWaitError` (no file transfer goes through
+it). Not changed: `clear_channels` doesn't forget fingerprints (the replay
+after it isn't a repeat of its own posts).
+
+939 passed, 4 skipped; `ruff`, `pyflakes`, `mypy .` green.
+
+## Pass 40 — full review of the project (2026-11-19)
+
+Every finding re-checked against the code (Telethon's included) before a
+verdict; all the confirmed ones fixed, each with a regression test that fails
+without its fix.
+
+- **An album cut off by the stop was lost from the not-copied list** (the
+  pass 37 fix covered single posts only): Telethon dispatches `events.Album`
+  from `AlbumHack`'s own task, not one of the `_event_handler_tasks`
+  `disconnect()` cancels — the album's «зеркало остановилось» was recorded
+  after the list was written. `EventProcessor` keeps the tasks of its
+  fan-outs (`_track_fanout`); `cancel_fanouts()` cancels and awaits them after
+  `disconnect()`, before the sink is written. Test:
+  `test_an_album_cut_off_by_the_stop_is_saved_in_the_list`.
+- **An album's fingerprint was kept under its first item only**: deleting
+  that one item forgot it (the other copies still in the channel, the same
+  album from another source sent again); deleting all the others kept it. It
+  is now remembered under every item (`remember_fingerprint` /
+  `seen_fingerprint` take the post's ids) — forgotten once the whole copy is
+  deleted. Test: `test_an_album_is_forgotten_only_once_its_whole_copy_is_deleted`.
+  The Postgres statements (`executemany`, `original_id = ANY(%s)`) not run
+  here (no server).
+- **The stop had no overall limit**: `sink.aclose()` then
+  `log_handler.aclose()`, each up to 20 s per admin, one after another —
+  past systemd's 90 s to stop with a Bot API that doesn't answer. The files
+  are written first (`LiveSink.close`), then both notices go together under
+  `Mirroring.STOP_NOTICES_SEC` (60 s); the log handler is removed and closed
+  in a `finally` of its own. Test: `test_a_hung_bot_api_does_not_hold_the_stop`.
+- **`_send_held_back(force=True)` dropped the held-back timer without
+  cancelling it** (harmless: it fired into an empty count). Cancelled now.
+  Test: `test_aclose_cancels_the_held_back_timer`.
+- **`install.sh` accepted any active venv**: it checks for this repo's
+  `.venv` (`-ef`, so a symlinked path matches too).
+- Style: `_dedup_turns` values are a small `_DedupTurn` (lock, users), not a
+  `[lock, count]` list.
+
+Rejected: ALL_CHATS counted for every target of the source (the pass 38
+compromise); the dedup lock per fingerprint keeping posts with disjoint dedup
+targets waiting (two sources posting the same at once into different
+channels — rare, a wait, not a loss: not worth the code); `_forget_sent`'s DELETE per channel and topic (1–3 statements over
+rows pruned hourly).
+
+944 passed, 4 skipped (also under `-W error`); `ruff`, `pyflakes`, `mypy .`
+green.
+
+## Pass 41 — full review of the project (2026-11-19)
+
+Each finding re-checked against the code (Telethon's `AlbumHack` and
+`_dispatch_event` included); the confirmed ones fixed, each test checked to
+fail with its fix taken out.
+
+- **Fan-outs cancelled one by one at the stop** (pass 40's `cancel_fanouts`):
+  the first one cancelled handed its dedup turn to the next, which started
+  sending through the closed client — its error in the list, not «зеркало
+  остановилось». All are cancelled first, then awaited. Test:
+  `test_fan_outs_waiting_their_dedup_turn_are_all_cut_off`.
+- **An album still within Telethon's delay at the stop was lost**: dispatched
+  `_ALBUM_EVENT_DELAY_SEC` after its last item, it started after the files
+  were written. The stop waits out what's left of that delay after the last
+  update (`_last_update_ts`, at most `_ALBUM_EVENT_GRACE_SEC`; a second
+  SIGTERM doesn't cut the rest of the stop) before `cancel_fanouts`. Test:
+  `test_an_album_still_within_telethons_delay_is_cut_off_too`.
+- **`_forget_sent`** — three in one: the topics losing a copy were pooled per
+  channel and every deleted id forgotten in each (a post whose copy its
+  direction keeps, deleted along with another, lost its fingerprint); one
+  `try` around every channel (the first failure kept the others'); a DELETE
+  also for directions without `dedup_hours`. It now gets, per (channel,
+  topic), the ids whose copies a dedup direction deleted, each on its own.
+  Tests: `test_a_kept_copy_keeps_its_fingerprint_when_deleted_together_with_another`,
+  `test_one_channel_failing_to_forget_does_not_keep_the_others`.
+- **`dedup_hours: 24h`** failed with a bare `ValueError` (no direction) — now
+  the validator's own error. Test: `test_dedup_hours_must_be_a_number_of_hours[24h]`.
+
+Intended: the `sink.close()` before the notices (said to duplicate
+`aclose`'s) — `gather`'s children may never start (a second SIGTERM), the
+files must not depend on them; the comment now says so. Rejected again:
+ALL_CHATS counted for every target (pass 38); the dedup lock's scope (pass
+40). Latent: dedup across processes (the database is shared, the lock is
+in-process) — only with channels shared between projects.
+
+949 passed, 4 skipped (also under `-W error`); `ruff`, `pyflakes`, `mypy .`
+green.
+
+## Pass 42 — full review of the project (2026-11-19)
+
+Each finding re-checked against the code; the confirmed ones fixed, each test
+checked to fail with its fix taken out.
+
+- **A fan-out starting during the stop ran on the closed client** (two ways,
+  both in pass 41's stop): an album Telethon dispatched within the wait for
+  it, and a dedup turn handed by a fan-out `disconnect()` cancelled to one it
+  doesn't track — each failed with `ConnectionError` as the reason.
+  `EventProcessor.stop()`, before `disconnect()`: a fan-out that hasn't
+  started sending is cut off («зеркало остановилось») when its turn comes.
+  Tests: `test_an_album_still_within_telethons_delay_is_cut_off_too`
+  (now: nothing tried), `test_a_turn_handed_over_while_disconnecting_does_not_start`.
+- **`NoticeLogHandler.aclose` sent what waited one notice each, past every
+  limit**: a burst before a ban went to Telegram at once, past its per-chat
+  limit — the ban's (logged last) the likeliest refused. One notice now, the
+  latest first (a cut trims the oldest). `_send`/`_send_held_back` lost their
+  `force` (pass 40's timer fix went with it; `close` cancels the timer). Test:
+  `test_aclose_tells_what_waits_in_one_notice_the_latest_first`.
+- **`dedup_hours: true` passed as 1 hour** (`float(True)`): refused like «24h».
+
+False: «failed.json and stats written twice at every stop» — both flushes
+write only when dirty. Rejected again: ALL_CHATS for every target (pass 38),
+the dedup lock's scope (pass 40), an index for `forget_fingerprints` (pass 40).
+
+952 passed, 4 skipped (also under `-W error`); `ruff`, `pyflakes`, `mypy .`
+green.
+
+## Pass 43 — review of the uncommitted changes (2026-11-19)
+
+Each finding re-checked against the code; the confirmed ones fixed, each test
+checked to fail with its fix taken out.
+
+- **`NoticeLogHandler.aclose` could tell a notice twice** (pass 42): it told
+  what waited but left the debounce timers running while it waited for the
+  sends — a Bot API slower than the debounce left, and the timer sent the same
+  text again. The timers it tells are cancelled first. Test:
+  `test_aclose_does_not_tell_a_text_again_when_its_timer_fires_during_the_wait`.
+- **A service message during the stop was listed as cut off** (pass 42): the
+  stop was checked in `new_message`/`new_album`, before `_impl`'s skips — a
+  pin or a join landing during ⏹ became «❗ Не скопировано» for every channel.
+  Checked past them now. A post the filters would drop is still listed (they
+  run per target, some through the closed client); ♻️ drops it. Test:
+  `test_a_service_message_during_the_stop_is_not_listed_as_cut_off`.
+
+Rejected: `_forget_sent` across sources (a dedup limit, not a regression),
+`retrying()` on pre-upgrade ALL_CHATS entries (one-off, clamped at 0),
+`dedup_hours: false` refused (documented «0 or absent»). Rejected again:
+ALL_CHATS for every target, the dedup lock's scope, a cross-process lock, an
+index for `forget_fingerprints`, the second `sink.close()`.
+
+954 passed, 4 skipped (also under `-W error`); `ruff`, `pyflakes`, `mypy .`
+green.

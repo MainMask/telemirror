@@ -5,7 +5,7 @@ import re
 import time
 from collections import Counter
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple, Union
+from typing import AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from telethon import TelegramClient, errors, events, utils
 from telethon.tl import types
@@ -78,6 +78,15 @@ _ALBUM_EVENT_GRACE_SEC = _ALBUM_EVENT_DELAY_SEC + 0.5
 # Only an edit of an item posted this recently can be in that window; older ones
 # (e.g. `_sync_broadcast_channel` catch-up edits) never wait. Allows clock skew.
 _ALBUM_EDIT_RACE_WINDOW_SEC = 30
+
+class _DedupTurn:
+    """``EventProcessor._dedup_turn``: a fingerprint's lock and the fan-outs
+    holding or waiting for it."""
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
+
 
 # Returned by an `on_caption_too_long` hook passed to
 # `_send_with_reference_refresh` to say "already fully handled (including
@@ -155,6 +164,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         self._dedup_sources = sorted({source for source, _, _ in dedup})
         self._dedup_targets = sorted({target for _, target, _ in dedup})
         self._fingerprints_pruned_at = float("-inf")
+        self._dedup_turns: Dict[str, _DedupTurn] = {}  # by fingerprint: see `_dedup_turn`
         self._database = database
         self._client = client
         self._logger = logger
@@ -171,6 +181,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         # deleted/edited right after posting can't race a still-in-progress
         # fan-out into an orphaned/unedited copy.
         self._fanout_inflight: Dict[Tuple[int, int], List[asyncio.Future]] = {}
+        # The tasks running those fan-outs: see `cancel_fanouts`.
+        self._fanout_tasks: Set[asyncio.Task] = set()
+        self._stopping = False  # see `stop`
 
     @asynccontextmanager
     async def _track_fanout(
@@ -179,9 +192,13 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         done_future: asyncio.Future = asyncio.get_running_loop().create_future()
         for key in keys:
             self._fanout_inflight.setdefault(key, []).append(done_future)
+        task = asyncio.current_task()
+        assert task is not None  # a coroutine runs in a task
+        self._fanout_tasks.add(task)
         try:
             yield
         finally:
+            self._fanout_tasks.discard(task)
             for key in keys:
                 bucket = self._fanout_inflight.get(key)
                 if bucket is not None:
@@ -192,6 +209,57 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     if not bucket:
                         self._fanout_inflight.pop(key, None)
             done_future.set_result(None)
+
+    def stop(self: "EventProcessor") -> None:
+        """The mirror stops: a fan-out not sending yet doesn't start — an album
+        Telethon dispatches late, a dedup turn handed over by a cancelled one.
+        It's cut off («зеркало остановилось»), not failed on the closed client."""
+        self._stopping = True
+
+    def _stopped(self: "EventProcessor") -> None:
+        if self._stopping:
+            raise asyncio.CancelledError
+
+    async def cancel_fanouts(self: "EventProcessor") -> None:
+        """The mirror stops: the fan-outs still under way, cancelled and waited
+        for — their outcomes («зеркало остановилось») reach the sink before it's
+        written. ``client.disconnect()`` cancels only the update tasks Telethon
+        tracks, and an album comes from a task of its own (``AlbumHack``).
+        All cancelled first: one cancelled alone would hand its dedup turn to
+        the next, which would start sending through the closed client."""
+        tasks = list(self._fanout_tasks)
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            await cancel_and_await(task)
+
+    def _fingerprint(
+        self: "EventProcessor", chat_id: int, messages: List[EventMessage]
+    ) -> Optional[str]:
+        """The post's fingerprint — only from a source with a dedup direction."""
+        return fingerprint(messages) if chat_id in self._dedup_sources else None
+
+    @asynccontextmanager
+    async def _dedup_turn(
+        self: "EventProcessor", fp: Optional[str]
+    ) -> AsyncIterator[None]:
+        """``dedup_hours``: posts with the same fingerprint fan out one at a
+        time — each update is its own task, and the fingerprint is remembered
+        only after the send, so two sources posting the same at once both
+        passed the check. The second one's check now sees what the first sent
+        (or, if it failed, sends it)."""
+        if fp is None:
+            yield
+            return
+        turn = self._dedup_turns.setdefault(fp, _DedupTurn())
+        turn.users += 1
+        try:
+            async with turn.lock:
+                yield
+        finally:
+            turn.users -= 1
+            if not turn.users:
+                del self._dedup_turns[fp]
 
     async def _await_fanouts(
         self: "EventProcessor", chat_id: int, message_ids: List[int]
@@ -266,7 +334,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
     async def _is_repeat(
         self: "EventProcessor", fp: Optional[str], outgoing_chat: int, config: DirectionConfig,
-        chat_id: int, original_id: int,
+        chat_id: int, original_ids: List[int],
     ) -> bool:
         """``dedup_hours``: the target already got this post from another source
         post lately. A lookup failure isn't a repeat (better twice than lost)."""
@@ -275,7 +343,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         try:
             return await self._database.seen_fingerprint(
                 outgoing_chat, config.to_topic_id, fp, int(time.time() - config.dedup_hours * 3600),
-                chat_id, original_id,
+                chat_id, original_ids,
             )
         except Exception as e:
             self._logger.warning(f"Could not check for a repeat: {type(e).__name__}: {e}")
@@ -283,14 +351,16 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
     async def _remember_sent(
         self: "EventProcessor", fp: Optional[str], outgoing_chat: int, config: DirectionConfig,
-        chat_id: int, original_id: int,
+        chat_id: int, original_ids: List[int],
     ) -> None:
+        """Under each of the post's ids (an album's items): what the channel
+        lost only when the whole copy is deleted (``_forget_sent``)."""
         if not config.dedup_hours or fp is None:
             return
         now = time.time()
         try:
             await self._database.remember_fingerprint(
-                outgoing_chat, config.to_topic_id, fp, chat_id, original_id, int(now)
+                outgoing_chat, config.to_topic_id, fp, chat_id, original_ids, int(now)
             )
             if now - self._fingerprints_pruned_at >= 3600:
                 self._fingerprints_pruned_at = now
@@ -1089,13 +1159,16 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     async def new_message(
         self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
     ):
+        fp = self._fingerprint(chat_id, [message])
         async with self._track_fanout([(chat_id, message.id)]), \
-                self._recording(chat_id, [message.id], message_link):
-            await self._new_message_impl(chat_id, message, message_link)
+                self._recording(chat_id, [message.id], message_link), \
+                self._dedup_turn(fp):
+            await self._new_message_impl(chat_id, message, message_link, fp)
 
     @__handle_exceptions
     async def _new_message_impl(
-        self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
+        self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str,
+        fp: Optional[str],
     ):
         strict_media_mode.set(self._strict_media_errors)
         if message.action is not None:
@@ -1113,6 +1186,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             )
             return
 
+        self._stopped()  # past the skips above: what wouldn't be copied isn't «cut off»
         self._logger.info(f"[New message]: {message_link}")
 
         reply_to_messages: Dict[Tuple[int, Optional[int]], int] = (
@@ -1138,7 +1212,6 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         flush_inserted = self._make_flush_inserted(inserted, message_link)
         outcomes = current_outcomes.get() or Outcomes()
-        fp = fingerprint([message]) if self._dedup_max_hours else None
 
         for outgoing_chat, configs in outgoing_chats.items():
             matching = [c for c in configs if self._matches_from_topic(c, message)]
@@ -1152,7 +1225,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 ):
                     continue
                 outcomes.expect(outgoing_chat, config.to_topic_id)
-                if await self._is_repeat(fp, outgoing_chat, config, chat_id, message.id):
+                if await self._is_repeat(fp, outgoing_chat, config, chat_id, [message.id]):
                     outcomes.duplicate()
                     self._logger.info(
                         f"[New message]: {message_link} is a repeat in chat#{outgoing_chat}, skipping"
@@ -1226,7 +1299,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     # not leave an already-delivered message untracked (same
                     # write-then-sleep order as new_album).
                     await flush_inserted()
-                    await self._remember_sent(fp, outgoing_chat, config, chat_id, message.id)
+                    await self._remember_sent(fp, outgoing_chat, config, chat_id, [message.id])
 
                 def _apply_fresh_message_media(
                     fresh: List[types.TypeMessageMedia],
@@ -1348,13 +1421,16 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     async def new_album(
         self: "EventProcessor", chat_id: int, album: EventAlbumMessage, album_link: str
     ) -> None:
+        fp = self._fingerprint(chat_id, album)
         async with self._track_fanout([(chat_id, m.id) for m in album]), \
-                self._recording(chat_id, [m.id for m in album], album_link):
-            await self._new_album_impl(chat_id, album, album_link)
+                self._recording(chat_id, [m.id for m in album], album_link), \
+                self._dedup_turn(fp):
+            await self._new_album_impl(chat_id, album, album_link, fp)
 
     @__handle_exceptions
     async def _new_album_impl(
-        self: "EventProcessor", chat_id: int, album: EventAlbumMessage, album_link: str
+        self: "EventProcessor", chat_id: int, album: EventAlbumMessage, album_link: str,
+        fp: Optional[str],
     ) -> None:
         strict_media_mode.set(self._strict_media_errors)
         incoming_first_message: EventMessage = album[0]
@@ -1367,6 +1443,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             self._logger.warning(f"[New album]: No target chats for chat#{chat_id}")
             return
 
+        self._stopped()  # past the skip above, as in new_message
         self._logger.info(f"[New album]: {album_link}")
 
         reply_to_messages: Dict[Tuple[int, Optional[int]], int] = (
@@ -1389,7 +1466,6 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
 
         flush_inserted = self._make_flush_inserted(inserted, album_link)
         outcomes = current_outcomes.get() or Outcomes()
-        fp = fingerprint(album) if self._dedup_max_hours else None
 
         for outgoing_chat, configs in outgoing_chats.items():
             matching = [
@@ -1406,7 +1482,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 ):
                     continue
                 outcomes.expect(outgoing_chat, config.to_topic_id)
-                if await self._is_repeat(fp, outgoing_chat, config, chat_id, incoming_first_message.id):
+                if await self._is_repeat(fp, outgoing_chat, config, chat_id, [m.id for m in album]):
                     outcomes.duplicate()
                     self._logger.info(
                         f"[New album]: {album_link} is a repeat in chat#{outgoing_chat}, skipping"
@@ -1510,7 +1586,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     # not leave an already-delivered album untracked (same
                     # write-then-sleep order as new_message).
                     await flush_inserted()
-                    await self._remember_sent(fp, outgoing_chat, config, chat_id, incoming_first_message.id)
+                    await self._remember_sent(fp, outgoing_chat, config, chat_id, [m.id for m in album])
 
                 # `files` is intentionally read by name (not bound as a
                 # default arg like the other loop locals below) in `_do_send`
@@ -1990,6 +2066,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         )
 
         deleting_per_channel: Dict[int, List[int]] = {}
+        # (channel, topic) -> the source ids whose copies there a dedup direction deletes
+        forgetting: Dict[Tuple[int, Optional[int]], List[int]] = {}
 
         for deleting_message in deleting_messages:
             configs = self._chat_mapping.get(chat_id, {}).get(
@@ -2017,6 +2095,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             )
             if deleting_message.mirror_id not in _ch_ids:
                 _ch_ids.append(deleting_message.mirror_id)
+            if config.dedup_hours:
+                forgetting.setdefault(
+                    (deleting_message.mirror_channel, deleting_message.mirror_topic_id), []
+                ).append(deleting_message.original_id)
 
         done_channels: List[int] = []
         for channel_id, mirror_ids in deleting_per_channel.items():
@@ -2058,6 +2140,22 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     f"Message(s) deleted from Telegram but DB purge failed for "
                     f"chat#{chat_id}, channels {done_channels}: {type(e).__name__}: {e}"
                 )
+            await self._forget_sent(chat_id, {
+                key: ids for key, ids in forgetting.items() if key[0] in done_channels
+            })
+
+    async def _forget_sent(
+        self: "EventProcessor", chat_id: int,
+        forgetting: Dict[Tuple[int, Optional[int]], List[int]],
+    ) -> None:
+        """``dedup_hours``: the copies deleted — their fingerprints too (the same
+        post from another source isn't a repeat of a post the channel lost).
+        Each (channel, topic) on its own: one failing doesn't keep the others."""
+        for (channel, topic), ids in forgetting.items():
+            try:
+                await self._database.forget_fingerprints(channel, topic, chat_id, ids)
+            except Exception as e:
+                self._logger.warning(f"Could not forget a deleted post: {type(e).__name__}: {e}")
 
 
 class NoticeLogHandler(logging.Handler):
@@ -2180,6 +2278,33 @@ class NoticeLogHandler(logging.Handler):
             msg += f"\n\n…и ещё {self._held_back} сообщ. не отправлено, чтобы не засыпать чат, — они в журнале."
             self._held_back = 0
         self._dispatch(msg)
+
+    async def aclose(self) -> None:
+        """Detached (the mirror is stopping): what still waits out its debounce
+        goes now, past the rate (a ban's notice is logged just before the stop,
+        often after a burst), the count held back too — in one notice: a burst
+        of them would be refused by Telegram past its per-chat limit, likely
+        the ban's, logged last (so it leads, and a cut trims the oldest). The
+        sends under way are waited for (each request has its own timeout);
+        then ``close``."""
+        await asyncio.sleep(0)  # the records emitted just before: _enqueue'd
+        lines = []
+        for text in reversed(list(self._timers)):
+            self._timers.pop(text).cancel()  # told here: not again by its timer during the wait
+            count = self._counts.pop(text, 1)
+            lines.append(f"{text} (×{count})" if count > 1 else text)
+        if self._held_back:
+            lines.append(
+                f"…и ещё {self._held_back} сообщ. не отправлено, чтобы не засыпать чат, — они в журнале."
+                if lines else
+                f"⚠️ Ещё {self._held_back} сообщ. не отправлено, чтобы не засыпать чат, — они в журнале."
+            )
+            self._held_back = 0
+        if lines:
+            self._dispatch("\n\n".join(lines))
+        if self._tasks:
+            await asyncio.wait(self._tasks)
+        self.close()
 
     def close(self) -> None:
         """Detached (the mirror is stopping): drop the pending debounced sends."""
@@ -2339,6 +2464,10 @@ class Mirroring:
     # How often the sink's files are written, the panel's requests handled and
     # the not-copied-posts notice (at most once a minute) sent.
     SINK_TICK_SEC = 15
+    # The last notices at a stop (the not-copied posts, the log's): at most this
+    # long all together — disconnect's ≤10 s on top stays within systemd's 90 s
+    # to stop (TimeoutStopSec isn't set), so a hung Bot API doesn't get it killed.
+    STOP_NOTICES_SEC = 60
 
     def __init__(
         self: "Mirroring",
@@ -2545,9 +2674,12 @@ class Mirroring:
         """The panel's requests: copy a post again, all of them, forget them."""
         sink = self._sink
         assert sink is not None
+        flooded = False  # the copies stop; a 🗑 taken with them still runs
         for request in take_requests(sink.key):
             if request == CLEAR:
                 sink.failed.clear()
+                continue
+            if flooded:
                 continue
             entries = sink.failed.entries if request == ALL else [e for e in [sink.failed.get(request)] if e]
             for entry in entries:
@@ -2558,7 +2690,8 @@ class Mirroring:
                         f"[Retry]: Telegram asks to wait {e.seconds} s — stopped; "
                         f"the posts left stay in the list, try again later"
                     )
-                    return
+                    flooded = True
+                    break
 
     async def _retry(self: "Mirroring", client: TelegramClient, entry: dict) -> None:
         """The post again, from the source: the channels that have it already
@@ -2672,13 +2805,38 @@ class Mirroring:
                 await cancel_and_await(watchdog_task)
             if sink_task is not None:
                 await cancel_and_await(sink_task)
-            if self._sink is not None:
-                self._sink.close()
             sdnotify.notify("STOPPING=1")
-            if log_handler is not None:
-                logging.getLogger("telemirror").removeHandler(log_handler)
-                log_handler.close()
-            await client.disconnect()
+            self._processor.stop()
+            try:
+                # Cancels the posts still under way: their outcomes («зеркало
+                # остановилось») reach the sink before it's written.
+                await client.disconnect()
+            finally:
+                # An album dispatched only _ALBUM_EVENT_DELAY_SEC after its last
+                # item (an update): one that came just before the stop is
+                # dispatched now — and recorded as cut off before the files.
+                album_due = self._last_update_ts + _ALBUM_EVENT_GRACE_SEC - time.monotonic()
+                if album_due > 0:
+                    try:
+                        await asyncio.sleep(album_due)
+                    except asyncio.CancelledError:
+                        pass  # a second SIGTERM: the rest of the stop still runs
+                await self._processor.cancel_fanouts()  # …and the albums
+                if self._sink is not None:
+                    # The files first, whatever becomes of the notices: cut by the
+                    # deadline, or by a second SIGTERM before they've even started.
+                    self._sink.close()
+                try:
+                    # One deadline for the last notices, within systemd's 90 s to stop.
+                    await asyncio.wait_for(asyncio.gather(*(
+                        closing.aclose() for closing in (self._sink, log_handler) if closing is not None
+                    )), self.STOP_NOTICES_SEC)
+                except asyncio.TimeoutError:
+                    self._logger.info("The last notices didn't go out in time")
+                finally:
+                    if log_handler is not None:
+                        logging.getLogger("telemirror").removeHandler(log_handler)
+                        log_handler.close()
 
     def __watchdog_probe(
         self: "Mirroring", client: TelegramClient

@@ -32,7 +32,8 @@ back).
 ## Requirements
 
 - Ubuntu + systemd ≥ 254 (`RestartSteps=`/`RestartMaxDelaySec=`).
-- A Python venv at `/root/telemirror/.venv` (`bash install.sh` from the repo root;
+- A Python venv at `/root/telemirror/.venv` (`python3.13 -m venv .venv && source
+  .venv/bin/activate`, then `bash install.sh` from the repo root — it refuses to run without that venv active;
   on Linux it also installs the CPU build of torch — LaMa needs it to remove a
   source's watermark from photos; without it photos keep the watermark).
 - `ffmpeg` in `PATH` (`apt install ffmpeg`) — for the video watermark.

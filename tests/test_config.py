@@ -280,3 +280,22 @@ def test_two_filters_in_one_list_item_are_refused(tmp_path):
     text = ("filters:\n  - SkipUrlFilter: {}\n    EmptyMessageFilter: {}\n" + ONE_DIRECTION)
     out = import_config(tmp_path, "import telemirror.config", text)
     assert out.returncode != 0 and "one filter per list item, got SkipUrlFilter, EmptyMessageFilter" in out.stderr
+
+
+def test_negative_dedup_hours_is_refused(tmp_path):
+    """Regression: a negative value written by hand (the panel allows 0..720)
+    was truthy — it turned the check on with a cutoff in the future (nothing
+    ever a repeat) and pruned every fingerprint of the project each hour."""
+    out = import_config(tmp_path, "import telemirror.config", ONE_DIRECTION + "dedup_hours: -1\n")
+    assert out.returncode != 0
+    assert "dedup_hours must be 0 or more" in out.stderr
+
+
+@pytest.mark.parametrize("value", [".nan", ".inf", "24h", "true"])
+def test_dedup_hours_must_be_a_number_of_hours(tmp_path, value):
+    """``.nan`` is truthy and never < 0: it passed, and every post's check then
+    failed (a warning to the admins each time). «24h» failed with a bare
+    ValueError that didn't say which direction; «true» passed as 1 hour."""
+    out = import_config(tmp_path, "import telemirror.config", ONE_DIRECTION + f"dedup_hours: {value}\n")
+    assert out.returncode != 0
+    assert "->" in out.stderr and "dedup_hours must be 0 or more" in out.stderr

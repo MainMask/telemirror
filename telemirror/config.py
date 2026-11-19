@@ -4,6 +4,7 @@ set by ``telemirror@<key>.service``), else ``./.configs/mirror.config.yml``.
 Everything is read at import time; a bad value fails the import.
 """
 
+import math
 import os
 from typing import Dict, List, Literal, Optional, cast
 
@@ -54,6 +55,21 @@ def _validate_mode(value: str, context: str) -> Literal["copy", "forward"]:
             f"{context}: mode must be 'copy' or 'forward', got {value!r}"
         )
     return cast(Literal["copy", "forward"], value)
+
+
+def _validate_dedup_hours(value, context: str) -> float:
+    """A negative ``dedup_hours`` is truthy: the check would be on with a
+    cutoff in the future, and every fingerprint pruned each hour; ``.nan`` /
+    ``.inf`` would break every check (``int()`` of them)."""
+    try:
+        if isinstance(value, bool):  # «true» isn't a number of hours (float() takes it as 1)
+            raise ValueError
+        hours = float(value or 0)
+    except (TypeError, ValueError):  # «24h»: the same error, with the direction
+        hours = math.nan
+    if not math.isfinite(hours) or hours < 0:
+        raise ValueError(f"{context}: dedup_hours must be 0 or more, got {value!r}")
+    return hours
 
 
 _CONTENT_MUTATING_FILTERS = (
@@ -337,8 +353,9 @@ for direction in yaml_config["directions"]:
                     fallback_link_url=direction.get(
                         "fallback_link_url", yaml_config.get("fallback_link_url")
                     ),
-                    dedup_hours=float(
-                        direction.get("dedup_hours", yaml_config.get("dedup_hours", 0)) or 0
+                    dedup_hours=_validate_dedup_hours(
+                        direction.get("dedup_hours", yaml_config.get("dedup_hours", 0)),
+                        f"{source}->{target}",
                     ),
                 )
             )

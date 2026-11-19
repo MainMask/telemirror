@@ -50,9 +50,9 @@ async def start(sysd: Systemd, runtime: Runtime, project: Project, unit: str, re
     # The runs stopped here hand over the mirrors paused for them: resumed when
     # they stop, those would kill this unit (Conflicts=) or clash with it on the session.
     stopped = {u for _, u in holders} | {unit}
-    entries = load()
-    taken = [u for e in entries if e["after"] in stopped for u in e["resume"] if u != unit]
-    entries = [e for e in entries if e["after"] not in stopped]
+    loaded = load()
+    taken = [u for e in loaded if e["after"] in stopped for u in e["resume"] if u != unit]
+    entries = [e for e in loaded if e["after"] not in stopped]
     if mirror:
         for u in taken:  # this mirror replaces them for good, like the running ones
             try:
@@ -64,7 +64,7 @@ async def start(sysd: Systemd, runtime: Runtime, project: Project, unit: str, re
         lives = list(dict.fromkeys([u for p, u in holders if u == p.live_unit] + taken))
     if lives:
         entries.append({"after": unit, "resume": lives, "at": time.time(), "seen": False})
-    if lives or taken:
+    if entries != loaded:  # a pause dropped (this unit among it) or added
         _save(entries)
     # a mirror is turned on for good (boot included); a replay / a task runs once
     if restart:

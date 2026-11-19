@@ -177,6 +177,23 @@ def test_a_mirror_started_over_a_run_turns_off_the_mirrors_paused_for_it(pair):
     assert turns.load() == []
 
 
+def test_starting_the_paused_mirror_itself_forgets_its_pause(pair):
+    """Regression: A's replay paused B; the admin starts B's mirror (it stops
+    the replay). The pause was dropped in memory only — the file wasn't saved
+    with nothing else to keep — so the watcher «brought B back» after the
+    replay: a false notice, or B turned on again after the admin turned it off."""
+    a, b = pair
+    fake = FakeSystemd({b.live_unit: "active"})
+    sysd = Systemd(runner=fake)
+    run(turns.start(sysd, Runtime(), a, a.past_unit))
+    fake.states = {a.past_unit: "active"}
+    run(turns.due(sysd))  # the replay is seen running
+    run(turns.start(sysd, Runtime(), b, b.live_unit))
+    assert turns.load() == []
+    fake.states = {}
+    assert run(turns.due(sysd)) == []
+
+
 def test_nothing_to_pause_records_nothing(pair):
     a, _ = pair
     run(turns.start(Systemd(runner=FakeSystemd()), Runtime(), a, a.live_unit))

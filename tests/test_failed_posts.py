@@ -375,3 +375,62 @@ def test_a_fanout_broken_off_is_one_notice_with_a_sink(caplog):
         run(_processor({T1: [_cfg()]}, None, run(_BadDB())).new_message(SOURCE, make_message("x"), "l"))
     with_sink, without = (r for r in caplog.records if "db down" in r.getMessage())
     assert with_sink.notice is False and without.notice is True
+
+
+def test_a_floodwait_still_runs_the_clear_asked_after_it(project_dir, monkeypatch):
+    """Regression: a FloodWait while copying again returned at once — the
+    requests taken with it (their files already removed), a 🗑 among them,
+    were lost though the panel had said «принято». The copies stop; the
+    🗑 still runs."""
+    async def send(client, entity, message, **kw):
+        raise errors.FloodWaitError(request=None, capture=600)
+
+    monkeypatch.setattr(mirroring, "send_message", send)
+    sink = LiveSink("p", None, {SOURCE: {T1: []}})
+    sink.failed.upsert(SOURCE, [1], "l1", [_target(T1)])
+    client = _Client({1: make_message("x")})
+    mirror = _mirror(client, sink, run(InMemoryDatabase()), {T1: [_cfg()]})
+    failed.request("p", failed.ALL)
+    failed.request("p", failed.CLEAR)
+    folder = project_dir / "requests"
+    os.utime(folder / failed.ALL, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(folder / failed.CLEAR, ns=(2_000_000_000, 2_000_000_000))
+    run(mirror._handle_requests(client))
+    assert sink.failed.entries == []
+
+
+def test_a_fanout_broken_off_counts_as_a_failure_for_every_target(project_dir):
+    """Regression: a post broken off before any target (ALL_CHATS: the database
+    down…) was listed but not counted — the weekly report said «ошибок
+    отправки: 0» and «🔇 Ничего не пришло». It's a failure of each of the
+    source's directions; copied again, it's off their counters too."""
+    from datetime import date
+
+    sink = LiveSink("p", None, {SOURCE: {T1: [], T2: []}})
+    broken = Outcomes()
+    broken.finish(RuntimeError("db down"))
+    sink.record(SOURCE, [1], "l1", broken)
+    day = sink.stats._data["days"][date.today().isoformat()]
+    assert day == {f"{SOURCE}>{T1}": [0, 0, 0, 1], f"{SOURCE}>{T2}": [0, 0, 0, 1]}
+
+    (entry,) = sink.failed.entries
+    sink.retrying(entry)
+    assert day == {f"{SOURCE}>{T1}": [0, 0, 0, 0], f"{SOURCE}>{T2}": [0, 0, 0, 0]}
+
+
+def test_stopping_tells_the_posts_not_told_yet(project_dir):
+    """Regression: a post failed within the minute after the last notice (or
+    cut off by the stop itself), then the mirror stopped — the files were
+    written, the notice lost: the counter starts at 0 again."""
+    notifier = _Notifier()
+    sink = LiveSink("p", notifier, {SOURCE: {T1: []}})
+    sink.record(SOURCE, [1], "l1", _outcomes((T1, FAILED, "нет прав")))
+    run(sink.tick())
+    sink.record(SOURCE, [2], "l2", _outcomes((T1, FAILED, "зеркало остановилось")))
+    run(sink.tick())  # within the minute: held
+    assert len(notifier.sent) == 1
+    run(sink.aclose())
+    assert notifier.sent[-1][0].startswith("❗ Не скопировано постов: 1. Последний: l2")
+    assert [e["link"] for e in failed.load("p")] == ["l1", "l2"]
+    run(sink.aclose())
+    assert len(notifier.sent) == 2  # nothing more to tell

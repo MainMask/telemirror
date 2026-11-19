@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -e
 
+# Into this repo's .venv — the one the units run (/root/telemirror/.venv/bin/python),
+# never the system Python or another venv left active.
+if ! [ "${VIRTUAL_ENV:-}" -ef "$(dirname "$0")/.venv" ]; then
+    echo "This repo's .venv isn't active: python3.13 -m venv .venv && source .venv/bin/activate, then bash install.sh" >&2
+    exit 1
+fi
+
 # simple-lama-inpainting pins pillow<10 which doesn't build on Python 3.12+.
 # Install it without its broken dependency metadata, then install everything else normally.
 pip install "simple-lama-inpainting==0.1.2" --no-deps

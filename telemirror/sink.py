@@ -30,6 +30,7 @@ class LiveSink:
         self.key = key
         self.failed = FailedQueue(key)
         self.stats = Stats(key, [(s, t) for s, targets in chat_mapping.items() for t in targets])
+        self._targets = {s: list(targets) for s, targets in chat_mapping.items()}
         self._notifier = notifier
         self._unnoticed = 0  # posts failed since the last notice
         self._last: Optional[tuple] = None  # (link, Target) of the latest
@@ -38,8 +39,8 @@ class LiveSink:
 
     def record(self, chat_id: int, ids: List[int], link: str, outcomes: Outcomes) -> None:
         for t in outcomes.targets:
-            if t.chat != ALL_CHATS:
-                self.stats.add(chat_id, t.chat, t.state)
+            for target in self._counted_as(chat_id, t.chat):
+                self.stats.add(chat_id, target, t.state)
         failed = outcomes.failed
         if failed:
             self.failed.upsert(chat_id, ids, link, failed)
@@ -56,8 +57,13 @@ class LiveSink:
         self.failed.drop(entry["id"])
         day = date.fromtimestamp(entry.get("at", 0))
         for t in entry.get("targets", []):
-            if t.get("chat") != ALL_CHATS:
-                self.stats.remove(entry["chat"], t["chat"], FAILED, day)
+            for target in self._counted_as(entry["chat"], t.get("chat")):
+                self.stats.remove(entry["chat"], target, FAILED, day)
+
+    def _counted_as(self, source: int, chat: int) -> List[int]:
+        """The directions a target's outcome counts for: its own; broken off
+        before any target (ALL_CHATS) — every target of the source."""
+        return self._targets.get(source, []) if chat == ALL_CHATS else [chat]
 
     def notice_text(self) -> str:
         assert self._last is not None
@@ -78,8 +84,17 @@ class LiveSink:
             self._unnoticed, self._notice_at = 0, now
             await self._notifier.send(text, failed_buttons(self.key))
 
+    async def aclose(self) -> None:
+        """The mirror stops: the files, then the notice still due — now, not a
+        minute later (there's no later)."""
+        self.close()
+        if self._unnoticed and self._notifier is not None:
+            text = self.notice_text()
+            self._unnoticed = 0
+            await self._notifier.send(text, failed_buttons(self.key))
+
     def close(self) -> None:
-        """The mirror stops: write what's in memory."""
+        """Write what's in memory."""
         for flush in (self.failed.flush, self.stats.flush):
             try:
                 flush()

@@ -157,3 +157,143 @@ def test_a_burst_with_no_notice_after_it_still_says_how_many_were_held_back():
         assert h._held_back == 0 and h._held_timer is None
     finally:
         loop.close()
+
+
+def test_aclose_sends_what_waits_even_past_the_rate():
+    """Regression: a ban comes after a burst of errors — the rate (or the sends
+    under way) held its notice back, and ``close`` dropped the held-back one:
+    the admins never told. Stopping, what waits goes out anyway."""
+    loop = asyncio.new_event_loop()
+    try:
+        notifier = FakeNotifier()
+        h = NoticeLogHandler(notifier, loop)
+
+        async def drive():
+            for n in range(h._PER_MINUTE + 2):
+                h._send(f"distinct {n}")  # the burst: two held back
+            h._enqueue("🚨 Критично: Account banned")
+            await h.aclose()
+
+        loop.run_until_complete(drive())
+        assert notifier.sent[-1] == (
+            "🚨 Критично: Account banned\n\n…и ещё 2 сообщ. не отправлено, "
+            "чтобы не засыпать чат, — они в журнале."
+        )
+    finally:
+        loop.close()
+
+
+def test_aclose_tells_the_held_back_count_with_nothing_else_waiting():
+    loop = asyncio.new_event_loop()
+    try:
+        notifier = FakeNotifier()
+        h = NoticeLogHandler(notifier, loop)
+
+        async def drive():
+            for n in range(h._PER_MINUTE + 1):
+                h._send(f"distinct {n}")
+            await h.aclose()
+
+        loop.run_until_complete(drive())
+        assert notifier.sent[-1] == "⚠️ Ещё 1 сообщ. не отправлено, чтобы не засыпать чат, — они в журнале."
+    finally:
+        loop.close()
+
+
+def test_aclose_waits_for_every_admin_however_slow(monkeypatch):
+    """Regression: aclose waited SEND_TIMEOUT for all of it — a notice goes to
+    the admins one by one (each request with its own timeout), so a slow first
+    one cut the next ones off. (A short timeout, if there is one at all.)"""
+    import telemirror.mirroring as mirroring
+
+    monkeypatch.setattr(mirroring, "SEND_TIMEOUT", 0.01, raising=False)
+    loop = asyncio.new_event_loop()
+    try:
+        done = []
+
+        class SlowNotifier:
+            async def send(self, body):
+                await asyncio.sleep(0.05)
+                done.append(body)
+                return True
+
+        h = NoticeLogHandler(SlowNotifier(), loop)
+
+        async def drive():
+            h._enqueue("ban")
+            await h.aclose()
+
+        loop.run_until_complete(drive())
+        assert done == ["ban"]
+    finally:
+        loop.close()
+
+
+def test_aclose_cancels_the_held_back_timer():
+    """Regression: aclose told the held-back count and dropped the timer that
+    would have told it — without cancelling it: it outlived the handler."""
+    loop = asyncio.new_event_loop()
+    try:
+        h = NoticeLogHandler(FakeNotifier(), loop)
+
+        async def drive():
+            for n in range(h._PER_MINUTE + 1):
+                h._send(f"distinct {n}")
+            timer = h._held_timer
+            await h.aclose()
+            return timer
+
+        timer = loop.run_until_complete(drive())
+        assert timer is not None and timer.cancelled()
+    finally:
+        loop.close()
+
+
+def test_aclose_tells_what_waits_in_one_notice_the_latest_first():
+    """Regression: what waited went out past every limit, one send each — a
+    burst before a ban was refused by Telegram past its per-chat limit, the
+    ban's notice (logged last) the likeliest. One notice now, the ban first."""
+    loop = asyncio.new_event_loop()
+    try:
+        notifier = FakeNotifier()
+        h = NoticeLogHandler(notifier, loop)
+
+        async def drive():
+            for n in range(30):
+                h._enqueue(f"distinct {n}")
+            h._enqueue("🚨 Критично: Account banned")
+            await h.aclose()
+
+        loop.run_until_complete(drive())
+        (body,) = notifier.sent
+        assert body.startswith("🚨 Критично: Account banned\n\ndistinct 29\n\n")
+        assert body.endswith("distinct 0")
+    finally:
+        loop.close()
+
+
+def test_aclose_does_not_tell_a_text_again_when_its_timer_fires_during_the_wait(monkeypatch):
+    """Regression: aclose told what waited but left its debounce timers running
+    while it waited for the sends — a slow Bot API, and the timer sent the same
+    notice a second time."""
+    monkeypatch.setattr(NoticeLogHandler, "_DEBOUNCE", 0.05)
+    loop = asyncio.new_event_loop()
+    try:
+        sent = []
+
+        class SlowNotifier:
+            async def send(self, body):
+                sent.append(body)
+                await asyncio.sleep(0.2)  # longer than the debounce left
+                return True
+
+        h = NoticeLogHandler(SlowNotifier(), loop)
+
+        async def drive():
+            h._enqueue("🚨 Критично: Account banned")
+            await h.aclose()
+
+        loop.run_until_complete(drive())
+        assert sent == ["🚨 Критично: Account banned"]
+    finally:
+        loop.close()
