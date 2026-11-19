@@ -24,7 +24,8 @@ InactiveEnterTimestamp=@1763390000
 NRestarts=0
 MemoryCurrent=524288000
 InvocationID=abc
-LoadState=loaded
+ExecMainCode=1
+ExecMainStatus=0
 """
 
 

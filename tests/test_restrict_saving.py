@@ -8,8 +8,8 @@ from contextlib import asynccontextmanager
 
 import pytest
 
-from config import DirectionConfig
-from skylon_set import restrict_saving
+from telemirror.directions import DirectionConfig
+from telemirror.tasks import restrict_saving
 from telemirror.messagefilters import EmptyMessageFilter
 from tests.conftest import run
 
@@ -77,7 +77,7 @@ class _FakeClient:
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    import skylon_set._common as common
+    import telemirror.tasks._common as common
 
     async def _noop(*_a, **_kw):
         pass
@@ -87,10 +87,10 @@ def _no_sleep(monkeypatch):
 
 def _patch_client(monkeypatch, client):
     @asynccontextmanager
-    async def _fake_open_client(logger, **kwargs):
+    async def _fake_open_account(logger, **kwargs):
         yield client, _t.SimpleNamespace(id=1)
 
-    monkeypatch.setattr(restrict_saving, "open_client", _fake_open_client)
+    monkeypatch.setattr(restrict_saving, "open_account", _fake_open_account)
     monkeypatch.setattr(
         restrict_saving, "CHAT_MAPPING", {-1: {e.id: [_cfg()] for e in client._entities.values()}}
     )

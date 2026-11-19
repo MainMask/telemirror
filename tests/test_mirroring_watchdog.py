@@ -40,8 +40,7 @@ def _probe(client):
     m = Mirroring(
         chat_mapping={SRC: {TGT: []}},
         database=object(),
-        receiver=client,
-        sender=client,
+        client=client,
         logger=logging.getLogger("test.wd"),
     )
     return m._Mirroring__watchdog_probe(client)

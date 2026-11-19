@@ -3,7 +3,7 @@ can't corrupt or redirect the connection URL."""
 
 from urllib.parse import unquote, urlsplit
 
-from config import build_dsn
+from telemirror.config import build_dsn
 
 
 def test_special_chars_encoded():

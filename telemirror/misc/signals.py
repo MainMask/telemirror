@@ -16,7 +16,7 @@ def cancel_on_sigterm() -> None:
     A no-op on Windows: `loop.add_signal_handler` isn't supported there
     (raises `NotImplementedError`), and production only runs under systemd,
     which is Linux-only — so graceful-shutdown-on-SIGTERM isn't load-bearing
-    on Windows, but crashing at startup there is a real regression (main.py
+    on Windows, but crashing at startup there is a real regression (telemirror.live
     otherwise supports Windows, see its `sys.platform == "win32"` branch).
     """
     if sys.platform == "win32":

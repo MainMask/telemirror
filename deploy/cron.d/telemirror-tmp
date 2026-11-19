@@ -2,7 +2,7 @@
 # documents) from the shared /tmp. In normal operation the watermark/media
 # filters' `finally` deletes them, and systemd units also get PrivateTmp=true
 # (the namespace dies with the process). This cron job is a safety net for
-# manual past_mode.py runs outside systemd, and for OOM crashes. The
+# manual telemirror.past runs outside systemd, and for OOM crashes. The
 # telemirror-tmp- prefix (set via tempfile.NamedTemporaryFile(prefix=...) in
 # _media.py / watermarkfilter.py) keeps this scoped to telemirror's own
 # files — plain 'tmp*' would also match any other tool's default-named temp

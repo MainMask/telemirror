@@ -1,7 +1,7 @@
 """edit_message/delete_message are only reachable from live event handlers
 (on_edit_message/on_deleted_message) and from _sync_broadcast_channel's
 catch-up loop — neither has a retry wrapper for a FloodWaitError, unlike
-new_message/new_album which past_mode.py replays and retries. So a flood on
+new_message/new_album which telemirror.past replays and retries. So a flood on
 one target must be logged and NOT propagate: propagating would only abort
 processing of every other, un-flooded target for the same edit/delete, with
 no compensating benefit (nothing upstream would ever retry it anyway)."""
@@ -12,7 +12,7 @@ import pytest
 from telethon import errors
 from telethon.tl import types
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.messagefilters.base import FilterAction, FilterResult
 from telemirror.mirroring import EventProcessor
@@ -61,8 +61,8 @@ def _processor(db, client, targets):
 
 def test_edit_message_flood_on_one_target_does_not_abort_the_others():
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
-    run(db.insert(MirrorMessage(100, SOURCE, 6000, TARGET_B)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 6000, TARGET_B)]))
     client = _FloodOnAEditClient()
     proc = _processor(db, client, [TARGET_A, TARGET_B])
     msg = make_message("hi", channel_id=1000)
@@ -87,8 +87,8 @@ def test_edit_message_flood_from_filters_process_does_not_abort_the_others():
     filter), not just from client.edit_message itself — that path must be
     guarded the same way."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
-    run(db.insert(MirrorMessage(100, SOURCE, 6000, TARGET_B)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 6000, TARGET_B)]))
 
     edited = []
 
@@ -143,7 +143,7 @@ def test_edit_message_gives_up_on_remaining_siblings_when_send_floods():
     target, so an immediate retry on the same client would almost certainly
     burn another request into the same active flood window."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))  # no topic recorded -> no exact match
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))  # no topic recorded -> no exact match
     client = _FloodOnceEditClient()
 
     proc = EventProcessor(
@@ -213,7 +213,7 @@ def test_edit_message_gives_up_on_remaining_siblings_when_the_refresh_retry_floo
     give-up-immediately reasoning applies: the nested retry must not fall
     back to the next sibling config either."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))  # no topic recorded -> no exact match
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))  # no topic recorded -> no exact match
 
     fresh_message = make_message(media=_doc_media(b"fresh-reference"), channel_id=1000)
     client = _StaleThenFloodEditClient(fresh_message)
@@ -399,8 +399,8 @@ def test_delete_message_disambiguates_via_source_topic_when_destination_collides
 
 def test_delete_message_flood_on_one_channel_does_not_abort_the_others():
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
-    run(db.insert(MirrorMessage(200, SOURCE, 6000, TARGET_B)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
+    run(db.insert_batch([MirrorMessage(200, SOURCE, 6000, TARGET_B)]))
     client = _FloodOnADeleteClient()
     proc = _processor(db, client, [TARGET_A, TARGET_B])
 
@@ -420,7 +420,7 @@ def test_edit_message_flood_from_filters_process_skips_sibling_configs():
     as a flood from the edit itself — the flood is account-wide, so running
     the sibling config's filters immediately would just hit it again."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))  # no topic columns
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))  # no topic columns
 
     sibling_calls = []
 

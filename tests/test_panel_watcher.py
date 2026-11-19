@@ -4,11 +4,11 @@ is over."""
 
 import pytest
 
+from bot import turns
+from bot.runtime import Runtime
+from bot.systemd import Systemd, parse_show
+from bot.watcher import Watcher
 from telemirror import projects
-from telemirror.panel import turns
-from telemirror.panel.runtime import Runtime
-from telemirror.panel.systemd import Systemd, parse_show
-from telemirror.panel.watcher import Watcher
 from tests._panel import SHOW, FakeSystemd
 from tests.conftest import run
 
@@ -39,15 +39,13 @@ def test_first_poll_is_baseline(pair):
 
 
 def test_task_finished_ok_and_failed(pair):
+    """A failed run isn't told here: OnFailure= (telemirror.alert) does — one notice."""
     a, _ = pair
     w = Watcher()
     w.step({(a, a.past_unit): _st("active"), (a, a.task_unit): _st("active")})
     out = w.step({(a, a.past_unit): _st("failed", result="exit-code"), (a, a.task_unit): _st("inactive")})
-    assert _texts(out) == [
-        "‼️ 🅰️ Альфа · догрузка: завершилась с ошибкой (exit-code).",
-        "✅ 🅰️ Альфа · обслуживание: завершилась успешно.",
-    ]
-    assert (out[0].nav.s, out[0].nav.p, out[0].nav.i) == ("unit", a.key, 1)
+    assert _texts(out) == ["✅ 🅰️ Альфа · инструмент: закончилось успешно."]
+    assert (out[0].nav.s, out[0].nav.p, out[0].nav.i) == ("unit", a.key, 2)
     assert w.step({(a, a.past_unit): _st("failed", result="exit-code"), (a, a.task_unit): _st("inactive")}) == []
 
 
@@ -64,13 +62,13 @@ def test_mirror_failed_back_and_crash_cooldown(pair):
     w = Watcher(clock=lambda: now[0])
     w.step({(a, a.live_unit): _st("active"), (b, b.live_unit): _st("active")})
     assert _texts(w.step({(a, a.live_unit): _st("active", restarts=1)})) == [
-        "⚠️ 🅰️ Альфа · пересылка: упало и перезапущено systemd (1 раз за всё время)."
+        "⚠️ 🅰️ Альфа · зеркало: упало и запущено снова автоматически (1 раз за всё время)."
     ]
     now[0] = 60
     assert w.step({(a, a.live_unit): _st("active", restarts=2)}) == []  # within the cooldown
     # the cooldown is per mirror: another project's crash is still reported
     assert len(w.step({(b, b.live_unit): _st("active", restarts=1)})) == 1
-    assert "сбой" in _texts(w.step({(a, a.live_unit): _st("failed", restarts=2)}))[0]
+    assert w.step({(a, a.live_unit): _st("failed", restarts=2)}) == []  # OnFailure= tells it
     assert "снова работает" in _texts(w.step({(a, a.live_unit): _st("active", restarts=2)}))[0]
     now[0] = 10_000
     assert len(w.step({(a, a.live_unit): _st("active", restarts=3)})) == 1
@@ -192,7 +190,7 @@ def test_the_watch_loop_notifies_and_brings_paused_mirrors_back(pair, monkeypatc
 
     from aiogram.methods import SendMessage
 
-    from telemirror.panel import watcher
+    from bot import watcher
     from tests._panel import ADMIN_ID, make_bot
 
     a, b = pair
@@ -213,6 +211,30 @@ def test_the_watch_loop_notifies_and_brings_paused_mirrors_back(pair, monkeypatc
     with pytest.raises(asyncio.CancelledError):
         run(watcher.watch(bot, sysd, frozenset({ADMIN_ID})))
     texts = [m.text for m in session.of(SendMessage)]
-    assert any("🅰️ Альфа · догрузка: завершилась успешно" in t for t in texts)
-    assert any(t.startswith("▶️ Снова запущено: 🅱️ Бета · пересылка") for t in texts)
+    assert any("🅰️ Альфа · копирование истории: закончилось успешно" in t for t in texts)
+    assert any(t.startswith("▶️ Снова запущено: 🅱️ Бета · зеркало") for t in texts)
     assert ["systemctl", "--no-block", "start", b.live_unit] in fake.calls
+
+
+def test_a_deleted_projects_units_are_forgotten(pair):
+    a, b = pair
+    w = Watcher()
+    w.step({(a, a.live_unit): _st("active"), (b, b.live_unit): _st("active")})
+    w.forget_gone({a.live_unit})
+    assert set(w._prev) == {a.live_unit}
+
+
+def test_a_run_stopped_from_outside_is_not_reported_as_finished(pair):
+    """systemd counts a SIGTERM stop (⏹, Conflicts=) as Result=success: the
+    notice tells it by ExecMainCode/ExecMainStatus (killed, or the replay's 143)."""
+    a, _ = pair
+    w = Watcher()
+    w.step({(a, a.task_unit): _st("active"), (a, a.past_unit): _st("active")})
+    killed = parse_show(SHOW.format(active="inactive", sub="dead", result="success")
+                        .replace("ExecMainCode=1", "ExecMainCode=2").replace("ExecMainStatus=0", "ExecMainStatus=15"))
+    replay_stopped = parse_show(SHOW.format(active="inactive", sub="dead", result="success")
+                                .replace("ExecMainStatus=0", "ExecMainStatus=143"))
+    assert _texts(w.step({(a, a.task_unit): killed, (a, a.past_unit): replay_stopped})) == [
+        "⏹ 🅰️ Альфа · инструмент: прервано, не закончив работу.",
+        "⏹ 🅰️ Альфа · копирование истории: прервано, не закончив работу.",
+    ]

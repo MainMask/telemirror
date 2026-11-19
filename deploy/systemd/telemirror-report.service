@@ -1,0 +1,11 @@
+[Unit]
+Description=telemirror — send the weekly report of the live mirrors to the panel's admins
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/telemirror
+ExecStart=/root/telemirror/.venv/bin/python -m telemirror.report
+TimeoutStartSec=120
+NoNewPrivileges=true
+ProtectSystem=full
+Nice=10

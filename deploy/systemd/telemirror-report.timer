@@ -1,0 +1,10 @@
+[Unit]
+Description=telemirror — weekly report of the live mirrors (Mondays, 10:00)
+
+[Timer]
+OnCalendar=Mon *-*-* 10:00:00
+# The server was off on Monday morning: send it when it's back.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

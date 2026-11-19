@@ -17,7 +17,7 @@ import logging
 
 from telethon.tl import types
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters._media import ReuploadCache
 from telemirror.messagefilters.documentfilenamefilter import DocumentFilenameFilter
 from telemirror.mirroring import EventProcessor

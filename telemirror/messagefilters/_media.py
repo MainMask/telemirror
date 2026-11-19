@@ -47,23 +47,16 @@ class MediaDownloadError(Exception):
     rather than lose the message. ``message_id`` is the source message
     past_mode uses to advance/skip its checkpoint — for an album this is
     overwritten to the album's last id so earlier siblings aren't stranded
-    (see ``past_mode.process_album``). ``failed_message_id`` is always the
+    (see ``telemirror.past``'s ``process_album``). ``failed_message_id`` is always the
     specific message that actually could not be downloaded, for operator-
-    facing reporting (e.g. the TECH_CHANNEL skip alert); it defaults to
-    ``message_id`` when not given separately.
+    facing reporting (e.g. the replay's "skipped a post" notice): ``message_id`` as
+    raised, before any such overwrite.
     """
 
-    def __init__(
-        self,
-        *args,
-        message_id: Optional[int] = None,
-        failed_message_id: Optional[int] = None,
-    ) -> None:
+    def __init__(self, *args, message_id: Optional[int] = None) -> None:
         super().__init__(*args)
         self.message_id = message_id
-        self.failed_message_id = (
-            failed_message_id if failed_message_id is not None else message_id
-        )
+        self.failed_message_id = message_id
 
 
 async def fetch_fresh_media(client, chat_id: int, ids):
@@ -75,7 +68,7 @@ async def fetch_fresh_media(client, chat_id: int, ids):
     Returns ``None`` if any target message is gone or has lost its media,
     leaving it to the caller to decide how to surface that (raise, log and
     skip, ...) — shared by `download_media_with_retry` below and
-    `EventProcessor._refresh_file_reference` in mirroring.py, which differ
+    `EventProcessor._send_with_reference_refresh` in mirroring.py, which differ
     only in that reaction.
     """
     fresh = await client.get_messages(chat_id, ids=ids)
@@ -139,7 +132,7 @@ async def download_media_with_retry(message: EventMessage, **kwargs):
                     message_id=message.id,
                 ) from e
             # Mutate the caller's message in place (not `message = fresh`) so
-            # the refreshed reference is visible to the caller too — mirrors.py
+            # the refreshed reference is visible to the caller too — mirroring.py
             # does the same for its own shared message/album objects, letting
             # a later fan-out target reuse this refresh instead of redoing it.
             message.media = fresh_media
@@ -308,9 +301,13 @@ class ReuploadCache:
             inflight = asyncio.ensure_future(_run())
             self._inflight[key] = inflight
 
-            def _cleanup(_task: "asyncio.Future") -> None:
+            def _cleanup(task: "asyncio.Future") -> None:
                 if self._inflight.get(key) is inflight:
                     del self._inflight[key]
+                # Retrieved here: when every awaiter was cancelled, nobody else
+                # reads a failure (asyncio would log "never retrieved").
+                if not task.cancelled():
+                    task.exception()
 
             inflight.add_done_callback(_cleanup)
         return await asyncio.shield(inflight)

@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import io
 import logging
 import math
@@ -6,6 +7,8 @@ import os
 import random
 import subprocess
 import threading
+import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -41,6 +44,47 @@ _template_cache: dict[
 _stamp_cache: dict[str, "Image.Image"] = {}
 _lama: Optional[object] = None
 _lama_lock = threading.Lock()
+# Photos are processed one at a time process-wide: LaMa holds its model and
+# the host has one core — a burst of photos must queue, not pile up threads.
+_photo_jobs = asyncio.Semaphore(1)
+_FFMPEG_POLL_SEC = 0.5
+
+
+def _run_ffmpeg(cmd: list, timeout: float, cancel: Optional[threading.Event] = None) -> tuple[int, bytes]:
+    """Run ffmpeg to completion: (return code, stderr). Killed past ``timeout``
+    (``subprocess.TimeoutExpired``, as before) or once ``cancel`` is set — the
+    coroutine waiting for it was cancelled: no orphan encode keeps the core busy
+    and writes into files that are about to be deleted."""
+    deadline = time.monotonic() + timeout
+    # `with`: closes the stderr pipe and waits for the process, however it ends
+    with subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as proc:
+        try:
+            while True:
+                try:
+                    _, err = proc.communicate(timeout=_FFMPEG_POLL_SEC)
+                    return proc.returncode, err
+                except subprocess.TimeoutExpired:
+                    if cancel is not None and cancel.is_set():
+                        return -9, b"cancelled"
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(cmd, timeout) from None
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+
+async def _ffmpeg_job(function, *args):
+    """``function(*args, cancel=…)`` in a thread; a cancellation stops its
+    ffmpeg and waits for it to exit before propagating."""
+    cancel = threading.Event()
+    future = asyncio.get_running_loop().run_in_executor(None, functools.partial(function, *args, cancel=cancel))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        cancel.set()
+        with suppress(Exception):
+            await future
+        raise
 
 
 def _load_stamp(path: str) -> "Image.Image":
@@ -258,6 +302,7 @@ def remove_watermark_from_video(
     video_path: str,
     config: WatermarkConfig,
     output_path: str,
+    cancel: Optional[threading.Event] = None,
 ) -> bool:
     cap = cv2.VideoCapture(video_path)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -282,6 +327,9 @@ def remove_watermark_from_video(
     y = max(1, y - d)
     w = min(fw - x - 1, w + 2 * d)
     h = min(fh - y - 1, h + 2 * d)
+    if w <= 0 or h <= 0:  # a detection at the very edge: delogo needs a box inside the frame
+        logger.info("watermark box %s is outside the %dx%d frame — left as is", bbox, fw, fh)
+        return False
 
     delogo = f"delogo=x={x}:y={y}:w={w}:h={h},{_EVEN_CROP}"
     duration = total / fps if fps > 0 else 0.0
@@ -289,15 +337,9 @@ def remove_watermark_from_video(
         "ffmpeg", "-y", "-i", video_path, "-vf", delogo, "-c:a", "copy",
         *_FASTSTART, output_path,
     ]
-    proc = subprocess.run(
-        cmd, capture_output=True, timeout=_ffmpeg_timeout(duration), check=False
-    )
-    if proc.returncode != 0:
-        logger.error(
-            "ffmpeg delogo failed (code %d): %s",
-            proc.returncode,
-            proc.stderr.decode(errors="replace"),
-        )
+    code, err = _run_ffmpeg(cmd, _ffmpeg_timeout(duration), cancel)
+    if code != 0:
+        logger.error("ffmpeg delogo failed (code %d): %s", code, err.decode(errors="replace"))
         return False
     return True
 
@@ -306,8 +348,8 @@ async def async_remove_watermark_from_image(
     image_bytes: bytes,
     config: WatermarkConfig,
 ) -> Optional[bytes]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, remove_watermark_from_image, image_bytes, config)
+    async with _photo_jobs:
+        return await asyncio.get_running_loop().run_in_executor(None, remove_watermark_from_image, image_bytes, config)
 
 
 async def async_remove_watermark_from_video(
@@ -315,8 +357,7 @@ async def async_remove_watermark_from_video(
     config: WatermarkConfig,
     output_path: str,
 ) -> bool:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, remove_watermark_from_video, video_path, config, output_path)
+    return await _ffmpeg_job(remove_watermark_from_video, video_path, config, output_path)
 
 
 def stamp_watermark_on_image(
@@ -364,6 +405,7 @@ def stamp_watermark_on_video(
     video_path: str,
     config: WatermarkConfig,
     output_path: str,
+    cancel: Optional[threading.Event] = None,
 ) -> bool:
     cap = cv2.VideoCapture(video_path)
     fw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -403,15 +445,9 @@ def stamp_watermark_on_video(
         *_FASTSTART,
         output_path,
     ]
-    proc = subprocess.run(
-        cmd, capture_output=True, timeout=_ffmpeg_timeout(duration), check=False
-    )
-    if proc.returncode != 0:
-        logger.error(
-            "ffmpeg overlay failed (code %d): %s",
-            proc.returncode,
-            proc.stderr.decode(errors="replace"),
-        )
+    code, err = _run_ffmpeg(cmd, _ffmpeg_timeout(duration), cancel)
+    if code != 0:
+        logger.error("ffmpeg overlay failed (code %d): %s", code, err.decode(errors="replace"))
         return False
     return True
 
@@ -420,8 +456,8 @@ async def async_stamp_watermark_on_image(
     image_bytes: bytes,
     config: WatermarkConfig,
 ) -> bytes:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, stamp_watermark_on_image, image_bytes, config)
+    async with _photo_jobs:
+        return await asyncio.get_running_loop().run_in_executor(None, stamp_watermark_on_image, image_bytes, config)
 
 
 async def async_stamp_watermark_on_video(
@@ -429,5 +465,4 @@ async def async_stamp_watermark_on_video(
     config: WatermarkConfig,
     output_path: str,
 ) -> bool:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, stamp_watermark_on_video, video_path, config, output_path)
+    return await _ffmpeg_job(stamp_watermark_on_video, video_path, config, output_path)

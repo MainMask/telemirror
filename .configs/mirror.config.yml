@@ -73,7 +73,7 @@ broadcast_channel: -1003926294676
 
 # Mirror directions — donors → «⚜️ Цитадель» recipients, topic→topic by title.
 #   Batch 1: «O Λ И M П» / «🪐» / GRIND (assembled by id pairs, generator removed).
-#   Batch 2 (below): «🏴‍☠️ DÈ SKLAD», generator skylon_set/setup_mirrors.py.
+#   Batch 2 (below): «🏴‍☠️ DÈ SKLAD», generator telemirror.tasks.setup_mirrors.
 #   Every direction pulls the donor's full history at startup (past_mode: full_history).
 directions:
 - from:

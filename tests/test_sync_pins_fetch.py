@@ -5,8 +5,8 @@ import logging
 
 from telethon.tl import types
 
-from skylon_set import sync_pins as sp
-from skylon_set.sync_pins import SyncPair
+from telemirror.tasks import sync_pins as sp
+from telemirror.tasks.sync_pins import SyncPair
 from telemirror.storage import InMemoryDatabase, MirrorMessage
 from tests.conftest import run
 

@@ -13,7 +13,7 @@ from telethon import errors
 from telethon.tl import types
 
 import telemirror.mirroring as mirroring
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter, MediaDownloadError
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase, MirrorMessage
@@ -42,11 +42,7 @@ def test_insert_batch_per_successful_target(monkeypatch):
         batches.append(list(entities))
         await real_insert_batch(entities)
 
-    async def fail_insert(entity):  # must not be used
-        raise AssertionError("new_message used per-row insert()")
-
     monkeypatch.setattr(db, "insert_batch", spy_batch)
-    monkeypatch.setattr(db, "insert", fail_insert)
 
     async def fake_send_message(client, entity, message, **kw):
         return types.Message(id=555, peer_id=types.PeerChannel(1), message="x")
@@ -224,7 +220,7 @@ def test_already_mirrored_target_is_not_resent(monkeypatch):
     message is skipped, so a past_mode retry can't create a duplicate."""
     db = run(InMemoryDatabase())
     msg = make_message("hi", channel_id=1000)
-    run(db.insert(MirrorMessage(msg.id, SOURCE, 999, TARGETS[0])))
+    run(db.insert_batch([MirrorMessage(msg.id, SOURCE, 999, TARGETS[0])]))
 
     sent_to = []
 

@@ -1,8 +1,9 @@
 import asyncio
 import logging
-from typing import Optional
+import time
+from typing import Awaitable, Callable, Optional
 
-from telethon import TelegramClient
+from telethon import TelegramClient, errors, functions
 from telethon.sessions import StringSession
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,70 @@ async def cancel_and_await(task: "asyncio.Task") -> None:
         pass
     except Exception as e:
         logger.warning("cancel_and_await: task raised %s: %s", type(e).__name__, e)
+
+
+# The watchdog's connection probe (``connection_probe``):
+# how long telethon may stay disconnected (auto-reconnecting) before we stop
+# feeding systemd's watchdog and let it restart us fresh;
+WATCHDOG_DISCONNECT_GRACE_SEC = 1800
+# the bound on a single liveness round-trip — longer = the request path is
+# wedged, not slow;
+WATCHDOG_PROBE_TIMEOUT_SEC = 30
+# consecutive failed round-trips on a live connection before we let systemd
+# restart us — absorbs a lone dropped packet / brief DC hiccup.
+WATCHDOG_PROBE_FAIL_STREAK = 3
+
+
+def connection_probe(
+    client: TelegramClient,
+    log: logging.Logger,
+    *,
+    grace_sec: float = WATCHDOG_DISCONNECT_GRACE_SEC,
+    timeout_sec: float = WATCHDOG_PROBE_TIMEOUT_SEC,
+    fail_streak: int = WATCHDOG_PROBE_FAIL_STREAK,
+    on_healthy: Optional[Callable[[], None]] = None,
+) -> Callable[[], Awaitable[bool]]:
+    """Liveness check for ``sdnotify.watchdog_loop`` (the live mirror and the
+    history replay). Healthy = connected *and* a bounded ``updates.GetState``
+    round-trip succeeds (catches a dead receive loop a bare ``is_connected()``
+    would miss). A few round-trips may fail in a row (``fail_streak``) and a
+    FloodWait counts as healthy — both are back-off situations, not hangs.
+    While disconnected we stay 'healthy' for ``grace_sec`` so telethon's
+    auto-reconnect gets a chance before a restart. ``on_healthy``: called
+    after each successful round-trip."""
+    disconnected_since: Optional[float] = None
+    failures = 0
+
+    async def probe() -> bool:
+        nonlocal disconnected_since, failures
+        if client.is_connected():
+            disconnected_since = None
+            try:
+                await asyncio.wait_for(client(functions.updates.GetStateRequest()), timeout=timeout_sec)
+            except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+                log.warning("watchdog: rate-limited (%ss), still healthy", e.seconds)
+                failures = 0
+                return True
+            except Exception as e:  # noqa: BLE001 - transient until the streak runs out
+                failures += 1
+                log.warning(
+                    "watchdog: GetState probe failed %d/%d (%s: %s)",
+                    failures, fail_streak, type(e).__name__, e,
+                )
+                return failures < fail_streak
+            failures = 0
+            if on_healthy is not None:
+                on_healthy()
+            return True
+        now = time.monotonic()
+        if disconnected_since is None:
+            disconnected_since = now
+        within_grace = now - disconnected_since < grace_sec
+        if not within_grace:
+            log.error("watchdog: disconnected > %ds, giving up on this process", grace_sec)
+        return within_grace
+
+    return probe
 
 
 async def connect_with_timeout(client: TelegramClient, timeout_sec: float = 30.0) -> None:
@@ -78,11 +143,10 @@ async def connect_with_timeout(client: TelegramClient, timeout_sec: float = 30.0
                 connection_task,
                 timeout=max(0.0, deadline - loop.time()),
             )
-        except asyncio.TimeoutError as e:
-            connection_task.cancel()
+        except asyncio.TimeoutError as e:  # wait_for has cancelled the task
             raise RuntimeError(
                 "Timeout error while connecting to Telegram server, "
-                "try restart or get a new session key (run login.py)"
+                "try restart or sign in again (python -m telemirror.login)"
             ) from e
 
 
@@ -92,6 +156,21 @@ def apply_lang_pack(client: TelegramClient, lang_pack: Optional[str]) -> None:
     fingerprint (``.jsession`` ``application.lang_pack``) needs the real value."""
     if lang_pack:
         client._init_request.lang_pack = lang_pack
+
+
+def new_tdesktop_client() -> TelegramClient:
+    """A fresh, signed-out client with the Telegram Desktop fingerprint new
+    sessions are created with (``jsession.TDESKTOP_APP``): the sign-in by phone
+    of ``telemirror.login`` and of the panel's 👤 Аккаунты."""
+    from telemirror.misc.jsession import TDESKTOP_APP
+
+    client = TelegramClient(
+        StringSession(), TDESKTOP_APP["api_id"], TDESKTOP_APP["api_hash"],
+        device_model=TDESKTOP_APP["device_name"], system_version=TDESKTOP_APP["sdk"],
+        app_version=TDESKTOP_APP["app_version"], system_lang_code=TDESKTOP_APP["system_lang_code"],
+    )
+    apply_lang_pack(client, TDESKTOP_APP["lang_pack"])
+    return client
 
 
 def build_telegram_client(
@@ -115,7 +194,7 @@ def build_telegram_client(
     loop are built to handle only the larger ones themselves.
     ``connection_retries``/``retry_delay`` are left to the caller since the
     live mirror retries indefinitely through an outage while operator scripts
-    (``past_mode.py``) give up after a bounded window.
+    (``telemirror.past``) give up after a bounded window.
     """
     lang_kwargs = {"system_lang_code": system_lang_code} if system_lang_code else {}
     client = TelegramClient(

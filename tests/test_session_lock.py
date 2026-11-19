@@ -45,6 +45,7 @@ def test_second_process_on_the_same_session_is_refused(tmp_path):
     finally:
         holder.kill()
         holder.wait()
+        holder.stdout.close()
     # The lock dies with its process — the session is free again.
     assert _run(TRY, session).strip() == "ok"
 
@@ -63,6 +64,7 @@ def test_a_starting_process_waits_for_the_previous_one_to_exit(tmp_path):
     finally:
         holder.kill()
         holder.wait()
+        holder.stdout.close()
 
 
 def test_locking_twice_in_one_process_is_fine(tmp_path):

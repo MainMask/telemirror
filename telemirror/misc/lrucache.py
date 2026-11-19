@@ -7,21 +7,15 @@ V = TypeVar("V")
 
 class LRUCache(Generic[K, V], collections.OrderedDict[K, V]):
     """
-    Dict with a limited length, ejecting LRUs as needed.
-
-    Args:
-        capacity (int): Maximum number of items the cache can hold.
-        free_factor (float, optional): Fraction of items *evicted* on a purge
-            (default: 0.5 — a full cache is trimmed back to half capacity).
+    Dict with a limited length, ejecting LRUs as needed: once it holds more
+    than ``capacity`` items, it is trimmed back to the newest half.
     """
 
-    def __init__(self, *args, capacity: int, free_factor: float = 0.5, **kwargs):
+    def __init__(self, *args, capacity: int, **kwargs):
         if capacity <= 0:
             raise ValueError("capacity must be > 0")
-        if not 0.1 < free_factor <= 1.0:
-            raise ValueError("free_factor must be in (0.1, 1.0]")
         self.capacity = capacity
-        self.keep_last = max(1.0, capacity * (1.0 - free_factor))
+        self.keep_last = max(1.0, capacity / 2)
 
         super().__init__(*args, **kwargs)
 

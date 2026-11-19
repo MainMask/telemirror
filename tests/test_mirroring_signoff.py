@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from telethon.tl import types
 
 import telemirror.mirroring as mirroring
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventHandlers, EventProcessor
 from telemirror.storage import InMemoryDatabase

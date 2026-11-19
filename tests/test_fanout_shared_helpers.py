@@ -5,7 +5,7 @@ the fan-out logic new_message and new_album share (extracted to remove the
 import logging
 from collections import Counter
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase
 from tests.conftest import run

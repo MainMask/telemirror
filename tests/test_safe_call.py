@@ -3,7 +3,7 @@ retrying forever."""
 
 import pytest
 
-from skylon_set._common import safe_call
+from telemirror.tasks._common import safe_call
 from tests.conftest import run
 
 
@@ -43,3 +43,31 @@ def test_success_returns_result(monkeypatch):
         return 42
 
     assert run(safe_call(_Client(), ok)) == 42
+
+
+def test_flood_wait_is_waited_out_without_a_reconnect(monkeypatch):
+    from telethon.errors import FloodWaitError
+
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", sleep)
+    client = _Client()
+    disconnects = []
+
+    async def disconnect():
+        disconnects.append(1)
+
+    client.disconnect = disconnect
+    answers = iter([FloodWaitError(request=None, capture=42), "ok"])
+
+    async def fn():
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    assert run(safe_call(client, fn)) == "ok"
+    assert slept[0] == 42 and disconnects == []

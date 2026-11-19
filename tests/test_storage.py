@@ -27,9 +27,9 @@ def test_insert_batch_and_get_messages_roundtrip():
 
 def test_source_topic_id_roundtrips():
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(
+    run(db.insert_batch([MirrorMessage(
         1, SRC, 100, DST_A, mirror_topic_id=5, source_topic_id=20
-    )))
+    )]))
     got = run(db.get_messages(1, SRC))[0]
     assert (got.mirror_topic_id, got.source_topic_id) == (5, 20)
 
@@ -87,15 +87,15 @@ def test_delete_messages_for_channels_batch_covers_multiple_channels_in_one_call
 def test_capacity_evicts_oldest_mapping():
     db = run(InMemoryDatabase(max_capacity=4))
     for i in range(10):
-        run(db.insert(_mm(i, i * 10)))
+        run(db.insert_batch([_mm(i, i * 10)]))
     assert run(db.get_messages(0, SRC)) == []      # evicted
     assert run(db.get_messages(9, SRC))[0].mirror_id == 90  # newest kept
 
 
 def test_get_messages_for_channel_pair_is_prefix_exact_not_substring():
     db = run(InMemoryDatabase())
-    run(db.insert(_mm(5, 55, ochan=100)))
-    run(db.insert(_mm(5, 66, ochan=1000)))
+    run(db.insert_batch([_mm(5, 55, ochan=100)]))
+    run(db.insert_batch([_mm(5, 66, ochan=1000)]))
     got = run(db.get_messages_for_channel_pair(100, DST_A))
     assert [m.mirror_id for m in got] == [55]
 
@@ -156,3 +156,13 @@ def test_source_media_id_roundtrips_and_updates_only_its_mirror():
     run(db.update_source_media_id(SRC, 1, DST_A, 100, 6))
     got = {m.mirror_channel: m.source_media_id for m in run(db.get_messages(1, SRC))}
     assert got == {DST_A: 6, DST_B: 5}
+
+
+def test_memory_broadcast_sync_is_bounded():
+    """One entry per broadcast post, removed only on a source deletion — in
+    memory it must not grow without bound over a long run."""
+    db = run(InMemoryDatabase(max_capacity=10))
+    for mid in range(100):
+        run(db.set_broadcast_sync(-1009, mid, None))
+    synced = run(db.get_broadcast_sync(-1009))
+    assert len(synced) <= 10 and 99 in synced

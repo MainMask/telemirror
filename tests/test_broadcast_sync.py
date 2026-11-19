@@ -29,10 +29,15 @@ def _msg(mid, edit_ts=None, grouped_id=None):
 
 
 class FakeClient:
-    """Serves messages as a streaming async iterator (never a list)."""
+    """Serves messages as a streaming async iterator (never a list); by id,
+    ``exists`` too (a post the history walk skipped)."""
 
-    def __init__(self, messages):
+    def __init__(self, messages, exists=()):
         self._messages = messages
+        self._exists = {m.id: m for m in [*messages, *exists]}
+
+    async def get_messages(self, entity, ids):
+        return [self._exists.get(i) for i in ids]
 
     def iter_messages(self, entity, reverse=False):
         ordered = sorted(self._messages, key=lambda m: m.id, reverse=not reverse)
@@ -65,8 +70,7 @@ def _mirroring(db, messages):
     m = Mirroring(
         chat_mapping={BC: {}},
         database=db,
-        receiver=object(),
-        sender=object(),
+        client=object(),
         logger=logging.getLogger("test"),
         broadcast_channel=BC,
     )
@@ -108,7 +112,7 @@ def test_cleared_target_gets_broadcast_posts_back_other_target_is_skipped(monkey
     """clear_channels wiped target B (binding_id + broadcast_sync), target A
     was left alone: the next startup sync re-sends to B only."""
     import telemirror.mirroring as mirroring
-    from config import DirectionConfig
+    from telemirror.directions import DirectionConfig
     from telemirror.messagefilters import EmptyMessageFilter
     from telemirror.mirroring import EventProcessor
 
@@ -176,7 +180,7 @@ def test_albums_are_grouped():
 
 class _ConnectedClient:
     """Just enough of a TelegramClient for `Mirroring.__connect_client`'s happy
-    path: already connected, authorized, no tech_channel/watchdog env set."""
+    path: already connected, authorized, no notifier/watchdog env set."""
 
     def is_connected(self):
         return True
@@ -216,8 +220,7 @@ def test_handlers_registered_before_broadcast_sync(monkeypatch):
     m = Mirroring(
         chat_mapping={BC: {}},
         database=db,
-        receiver=client,
-        sender=client,
+        client=client,
         logger=logging.getLogger("test"),
         broadcast_channel=BC,
     )
@@ -232,7 +235,7 @@ def test_empty_sync_does_not_duplicate_into_uncleared_forum_with_legacy_rows(mon
     toward one topic config's skip — collapsing them into one key re-sent the
     post into every topic but one."""
     import telemirror.mirroring as mirroring
-    from config import DirectionConfig
+    from telemirror.directions import DirectionConfig
     from telemirror.messagefilters import EmptyMessageFilter
     from telemirror.mirroring import EventProcessor
 
@@ -265,3 +268,16 @@ def test_empty_sync_does_not_duplicate_into_uncleared_forum_with_legacy_rows(mon
     run(m._sync_broadcast_channel(client))
 
     assert sent == []
+
+
+def test_a_post_the_history_walk_skipped_is_not_deleted():
+    """An API hiccup can leave a post out of a history page: it's asked again
+    by id, and only the really gone one loses its mirrors."""
+    db = run(InMemoryDatabase())
+    for mid in (1, 2, 3):
+        run(db.set_broadcast_sync(BC, mid, None))
+    m, _ = _mirroring(db, [])
+    client = FakeClient([_msg(1)], exists=[_msg(2)])  # 2 skipped by the walk, 3 deleted
+    run(m._sync_broadcast_channel(client))
+    assert m._processor.calls == [("delete", (3,))]
+    assert set(run(db.get_broadcast_sync(BC))) == {1, 2}

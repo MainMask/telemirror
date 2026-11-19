@@ -1,4 +1,4 @@
-"""Phase 4 DRY cleanup: mirroring.py's Telemirror and past_mode.py's _run built
+"""Phase 4 DRY cleanup: mirroring.py's Telemirror and telemirror.past's _run built
 almost identical TelegramClient instances (differing only in connection_retries/
 retry_delay) — build_telegram_client is the shared factory both now call."""
 

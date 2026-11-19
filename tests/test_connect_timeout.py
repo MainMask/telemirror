@@ -30,8 +30,7 @@ def test_connect_times_out(monkeypatch):
     m = Mirroring(
         chat_mapping={},
         database=db,
-        receiver=object(),
-        sender=object(),
+        client=object(),
         logger=logging.getLogger("test"),
     )
 

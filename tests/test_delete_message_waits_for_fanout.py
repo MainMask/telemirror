@@ -10,7 +10,7 @@ import logging
 from telethon.tl import types
 
 import telemirror.mirroring as mirroring
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase
@@ -91,3 +91,33 @@ def test_delete_message_waits_for_in_progress_new_message(monkeypatch):
     # got a chance to bite.
     assert {c for c, _ in client.deleted} == {TARGET_A, TARGET_B}
     assert db_read_order == ["delete_read_db"]
+
+
+def test_a_cancelled_waiter_leaves_the_fan_out_intact():
+    """The futures in _fanout_inflight are shared by the fan-out and every
+    edit/delete waiting on it: one waiter cancelled (shutdown, a dropped
+    update) must not cancel them — the fan-out's own set_result would then
+    raise InvalidStateError, and the other waiters would get CancelledError."""
+
+    async def scenario():
+        processor = EventProcessor({}, InMemoryDatabase(), object(), logging.getLogger("t"))
+        key = (SOURCE, 1)
+        release = asyncio.Event()
+
+        async def fan_out():
+            async with processor._track_fanout([key]):
+                await release.wait()
+
+        fan = asyncio.create_task(fan_out())
+        await asyncio.sleep(0)
+        doomed = asyncio.create_task(processor._await_fanouts(SOURCE, [1]))
+        other = asyncio.create_task(processor._await_fanouts(SOURCE, [1]))
+        await asyncio.sleep(0)
+        doomed.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        await fan  # no InvalidStateError
+        await other  # not cancelled
+        return doomed.cancelled()
+
+    assert run(scenario()) is True

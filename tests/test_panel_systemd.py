@@ -2,8 +2,8 @@
 
 import pytest
 
+from bot.systemd import Systemd, SystemdError, parse_show
 from telemirror import projects
-from telemirror.panel.systemd import Systemd, SystemdError, parse_show
 from tests.conftest import run
 
 
@@ -42,7 +42,7 @@ def test_parse_show_active():
     st = parse_show(SHOW_ACTIVE)
     assert st.running and st.active == "active" and st.sub == "running"
     assert st.since == 1763380000  # ActiveEnterTimestamp while active
-    assert st.restarts == 3 and st.memory == 524288000 and st.loaded
+    assert st.restarts == 3 and st.memory == 524288000
     assert st.invocation == "0123456789abcdef0123456789abcdef"
 
 

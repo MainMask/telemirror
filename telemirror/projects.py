@@ -11,6 +11,7 @@ session — see ``telemirror.misc.session_lock``).
     python -m telemirror.projects migrate   # one-time: projects for the old units
 """
 
+import json
 import logging
 import os
 import re
@@ -20,7 +21,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import yaml
 
@@ -90,8 +91,60 @@ def _file(key: str) -> Path:
 
 
 def access_report_path(key: str) -> Path:
-    """Written by ``skylon_set/check_access.py``, shown by the panel's 🛂 Доступ."""
+    """Written by ``telemirror.tasks.check_access``, shown by the panel's 🛂 Проверка доступа."""
     return PROJECTS_DIR / key / "access.json"
+
+
+def chat_names_path(key: str) -> Path:
+    """{chat id: title} of the project's chats — written by its mirror at start,
+    by ``check_access`` and by the panel (a forwarded post); the panel shows
+    channels by these names."""
+    return PROJECTS_DIR / key / "chats.json"
+
+
+def failed_path(key: str) -> Path:
+    """The posts the live mirror couldn't copy (``telemirror.failed``) — written
+    by the mirror only, shown by the panel's ❗ Не скопировано."""
+    return PROJECTS_DIR / key / "failed.json"
+
+
+def requests_dir(key: str) -> Path:
+    """The panel's requests to the live mirror: one file per request (a post
+    to copy again, ``all``, ``clear``) — the mirror handles and removes them."""
+    return PROJECTS_DIR / key / "requests"
+
+
+def stats_path(key: str) -> Path:
+    """Per-day counters of the live mirror (``telemirror.stats``), read by the
+    weekly report (``telemirror.report``)."""
+    return PROJECTS_DIR / key / "stats.json"
+
+
+def write_json(path: Path, data) -> None:
+    """Atomically (a temp file, then rename); nothing when the project's folder is gone.
+    The temp file is the writer's own (its pid): ``chats.json`` has several
+    writers (the mirror, check_access, the panel), and two writing one temp
+    file at once could rename the other's half-written one into place."""
+    if not path.parent.is_dir():
+        return
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(path)
+
+
+def load_chat_names(key: str) -> Dict[int, str]:
+    """{} when the file is missing or broken."""
+    try:
+        data = json.loads(chat_names_path(key).read_text(encoding="utf-8"))
+        return {int(k): str(v) for k, v in data.items() if v}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {}
+
+
+def save_chat_names(key: str, names: Dict[int, str]) -> None:
+    """Merge ``names`` into the file (atomically); empty titles are skipped."""
+    merged = {**load_chat_names(key), **{int(k): str(v) for k, v in names.items() if v}}
+    write_json(chat_names_path(key), {str(k): v for k, v in merged.items()})
 
 
 def load_project(key: str) -> Project:
@@ -114,7 +167,7 @@ def load_project(key: str) -> Project:
 def list_projects() -> List[Project]:
     """All projects by name; a broken ``project.yml`` is skipped (logged) — one
     hand-broken file must not hide the others. Its mirror refuses to start on
-    its own (config.py's ``load_project``), which systemd reports."""
+    its own (telemirror.config's ``load_project``), which systemd reports."""
     found = []
     for path in sorted(PROJECTS_DIR.glob("*/project.yml")) if PROJECTS_DIR.is_dir() else []:
         try:

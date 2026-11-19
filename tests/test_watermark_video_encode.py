@@ -38,20 +38,16 @@ class _Cap:
         pass
 
 
-class _Proc:
-    returncode = 0
-
-
 def _capture_cmd(monkeypatch):
     seen = {}
 
-    def _fake_run(cmd, **kw):
+    def _fake_run(cmd, timeout, cancel=None):
         seen["cmd"] = cmd
-        seen["timeout"] = kw["timeout"]
-        return _Proc()
+        seen["timeout"] = timeout
+        return 0, b""
 
     monkeypatch.setattr(processor.cv2, "VideoCapture", _Cap)
-    monkeypatch.setattr(processor.subprocess, "run", _fake_run)
+    monkeypatch.setattr(processor, "_run_ffmpeg", _fake_run)
     return seen
 
 
@@ -283,3 +279,80 @@ def test_delogo_output_is_faststart(tmp_path, monkeypatch):
 
     assert remove_watermark_from_video(_odd_clip(tmp_path), WatermarkConfig(), out) is True
     assert _moov_before_mdat(out)
+
+
+# ── a cancelled or stuck encode (pass 27) ───────────────────────────────────
+
+
+def test_a_cancelled_encode_kills_ffmpeg_before_returning(monkeypatch):
+    """Cancelling the coroutine used to leave ffmpeg running in its thread
+    (the core busy for minutes, writing into files about to be deleted)."""
+    import threading
+    import time
+
+    monkeypatch.setattr(processor, "_FFMPEG_POLL_SEC", 0.02)
+    started, done = threading.Event(), {}
+
+    def job(*, cancel):
+        started.set()
+        t0 = time.monotonic()
+        done["code"] = processor._run_ffmpeg(["sleep", "30"], 60, cancel)[0]
+        done["took"] = time.monotonic() - t0
+
+    async def scenario():
+        task = asyncio.create_task(processor._ffmpeg_job(job))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    run(scenario())
+    assert done["code"] == -9 and done["took"] < 5  # killed, and awaited before the cancel propagated
+
+
+def test_a_stuck_encode_times_out(monkeypatch):
+    monkeypatch.setattr(processor, "_FFMPEG_POLL_SEC", 0.02)
+    with pytest.raises(subprocess.TimeoutExpired):
+        processor._run_ffmpeg(["sleep", "30"], 0.1)
+
+
+def test_photos_are_processed_one_at_a_time(monkeypatch):
+    import threading
+    import time
+
+    active, peak, lock = [0], [0], threading.Lock()
+
+    def slow(image_bytes, config):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.05)
+        with lock:
+            active[0] -= 1
+        return None
+
+    monkeypatch.setattr(processor, "remove_watermark_from_image", slow)
+    monkeypatch.setattr(processor, "_photo_jobs", asyncio.Semaphore(1))
+
+    async def scenario():
+        await asyncio.gather(*(processor.async_remove_watermark_from_image(b"", WatermarkConfig()) for _ in range(4)))
+
+    run(scenario())
+    assert peak[0] == 1
+
+
+def test_a_watermark_box_at_the_frame_edge_skips_ffmpeg(monkeypatch):
+    """Right at the edge the clamped box is empty: no ffmpeg run (it would only
+    fail), the video is left as is."""
+    seen = _capture_cmd(monkeypatch)
+    monkeypatch.setattr(_Cap, "set", lambda self, prop, value: None, raising=False)
+
+    class _Frame:
+        shape = (1080, 1920)  # fh, fw
+
+    monkeypatch.setattr(_Cap, "read", lambda self: (True, _Frame()), raising=False)
+    monkeypatch.setattr(processor, "_detect_watermark", lambda frame, config: (1919, 10, 5, 20))
+    # no dilation: x stays 1919 — nothing of the box fits before the frame's last column
+    assert remove_watermark_from_video("in.mp4", WatermarkConfig(inpaint_dilate_px=0), "out.mp4") is False
+    assert "cmd" not in seen

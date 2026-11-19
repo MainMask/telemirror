@@ -10,7 +10,7 @@ from telethon import utils
 from telethon.tl import types
 
 import telemirror.mirroring as mirroring
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventProcessor
 from telemirror.misc.links import private_message_link
@@ -77,7 +77,7 @@ def test_edit_keeps_the_rewritten_mirror_link(monkeypatch):
     monkeypatch.setattr(mirroring, "send_message", fake_send_message)
 
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(5, REF, 500, TARGET)))
+    run(db.insert_batch([MirrorMessage(5, REF, 500, TARGET)]))
     client = _Client()
     proc = _processor(db, client, {SOURCE: {TARGET: [_cfg()]}, REF: {TARGET: [_cfg()]}})
 
@@ -91,8 +91,8 @@ def test_edit_keeps_the_rewritten_mirror_link(monkeypatch):
 
 def test_edit_uses_fallback_when_target_has_no_mirror_of_the_referenced_post():
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(5, REF, 500, OTHER)))  # referenced post lives elsewhere
-    run(db.insert(MirrorMessage(7, SOURCE, 900, TARGET)))
+    run(db.insert_batch([MirrorMessage(5, REF, 500, OTHER)]))  # referenced post lives elsewhere
+    run(db.insert_batch([MirrorMessage(7, SOURCE, 900, TARGET)]))
     client = _Client()
     proc = _processor(db, client, {SOURCE: {TARGET: [_cfg()]}, REF: {OTHER: [_cfg()]}})
 

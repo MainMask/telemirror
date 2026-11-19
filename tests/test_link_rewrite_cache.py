@@ -13,7 +13,7 @@ from telethon import utils
 from telethon.tl import types
 
 import telemirror.mirroring as mirroring
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventProcessor
 from telemirror.misc.links import private_message_link
@@ -49,7 +49,7 @@ class _CountingDB(InMemoryDatabase):
 
 def test_link_resolution_is_cached_across_fanout(monkeypatch):
     db = run(_CountingDB())
-    run(db.insert(MirrorMessage(5, REF, 500, REF_MIRROR)))
+    run(db.insert_batch([MirrorMessage(5, REF, 500, REF_MIRROR)]))
 
     async def fake_send_message(client, entity, message, **kw):
         return types.Message(id=1, peer_id=types.PeerChannel(1), message="x")
@@ -90,8 +90,8 @@ def test_ambiguous_topic_mirrors_are_not_guessed():
     instead, same "leave out rather than guess" rule as _reply_target_mirrors.
     """
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(5, REF, 500, REF_MIRROR)))
-    run(db.insert(MirrorMessage(5, REF, 501, REF_MIRROR)))
+    run(db.insert_batch([MirrorMessage(5, REF, 500, REF_MIRROR)]))
+    run(db.insert_batch([MirrorMessage(5, REF, 501, REF_MIRROR)]))
 
     proc = EventProcessor(
         chat_mapping={REF: {REF_MIRROR: [_cfg()]}},
@@ -117,8 +117,8 @@ def test_topic_scoped_mirror_is_resolved_when_mirror_topic_is_known():
     post-fix) — the link must now be rewritten to the mirror matching the
     requested `to_topic_id` instead of falling back."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(5, REF, 500, REF_MIRROR, mirror_topic_id=10)))
-    run(db.insert(MirrorMessage(5, REF, 501, REF_MIRROR, mirror_topic_id=20)))
+    run(db.insert_batch([MirrorMessage(5, REF, 500, REF_MIRROR, mirror_topic_id=10)]))
+    run(db.insert_batch([MirrorMessage(5, REF, 501, REF_MIRROR, mirror_topic_id=20)]))
 
     proc = EventProcessor(
         chat_mapping={REF: {REF_MIRROR: [_cfg()]}},
@@ -145,7 +145,7 @@ def test_legacy_untagged_mirror_resolved_for_a_topic_scoped_request():
     or every already-mirrored pre-migration link would fall back to
     `fallback_link_url` the moment a topic-scoped direction rewrites it."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(5, REF, 500, REF_MIRROR)))  # mirror_topic_id=None
+    run(db.insert_batch([MirrorMessage(5, REF, 500, REF_MIRROR)]))  # mirror_topic_id=None
 
     proc = EventProcessor(
         chat_mapping={REF: {REF_MIRROR: [_cfg()]}},
@@ -175,8 +175,8 @@ def test_each_fanout_target_gets_its_own_mirror_link():
     ref_mirror_a = REF_MIRROR
     ref_mirror_b = -1002000000088
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(5, REF, 500, ref_mirror_a)))
-    run(db.insert(MirrorMessage(5, REF, 600, ref_mirror_b)))
+    run(db.insert_batch([MirrorMessage(5, REF, 500, ref_mirror_a)]))
+    run(db.insert_batch([MirrorMessage(5, REF, 600, ref_mirror_b)]))
 
     proc = EventProcessor(
         chat_mapping={REF: {ref_mirror_a: [_cfg()], ref_mirror_b: [_cfg()]}},

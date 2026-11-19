@@ -251,3 +251,32 @@ def test_cached_media_result_applies_cached_media_and_continues():
     assert result.action is FilterAction.CONTINUE
     assert result.entity.media == "UPLOADED"
     assert msg.media == "UPLOADED"
+
+
+def test_a_failure_nobody_awaits_any_more_is_not_logged_as_unretrieved():
+    """Every awaiter cancelled, then the factory fails: asyncio must not log
+    "Task exception was never retrieved" for the shared task."""
+    import gc
+
+    unretrieved = []
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+        cache = ReuploadCache()
+        gate = asyncio.Event()
+
+        async def factory():
+            await gate.wait()
+            raise RuntimeError("download failed")
+
+        waiter = asyncio.create_task(cache.get_or_create(1, factory))
+        await asyncio.sleep(0)
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        gate.set()
+        await asyncio.sleep(0.01)
+        gc.collect()
+
+    run(scenario())
+    assert unretrieved == []

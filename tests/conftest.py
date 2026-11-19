@@ -5,11 +5,44 @@ so coroutines are driven synchronously with ``run()``.
 """
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Optional
 
 import pytest
 from telethon.tl import types
 
 from telemirror.messagefilters import strict_media_mode
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ONE_DIRECTION = "directions:\n  - from: [-1001]\n    to: [-1002]\n"
+
+
+def import_config(
+    tmp_path: Path,
+    code: str,
+    mirror_config: str = ONE_DIRECTION,
+    session: Optional[str] = None,
+    cwd: Optional[Path] = None,
+) -> subprocess.CompletedProcess:
+    """Run ``code`` in a fresh interpreter (``telemirror.config`` resolves
+    everything at import time) as a throwaway project with ``mirror_config``
+    and ``session`` (default: the session's placeholder .jsession)."""
+    projects = tmp_path / "projects"
+    (projects / "p").mkdir(parents=True)
+    (projects / "p" / "mirror.config.yml").write_text(mirror_config, encoding="utf-8")
+    default_session = Path(os.environ["TELEMIRROR_PROJECTS_DIR"]) / "test.jsession"
+    (projects / "p" / "project.yml").write_text(json.dumps({
+        "name": "P", "session": session or str(default_session),
+        "config": str(projects / "p" / "mirror.config.yml"), "port": 8123,
+    }), encoding="utf-8")
+    env = {**os.environ, "TELEMIRROR_PROJECTS_DIR": str(projects), "TELEMIRROR_PROJECT": "p",
+           "PYTHONPATH": str(REPO_ROOT)}
+    return subprocess.run([sys.executable, "-c", code], cwd=cwd or REPO_ROOT, env=env,
+                          capture_output=True, text=True)
 
 
 @pytest.fixture

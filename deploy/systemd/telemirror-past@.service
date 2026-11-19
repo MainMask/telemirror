@@ -12,13 +12,27 @@ StartLimitIntervalSec=600
 StartLimitBurst=3
 
 [Service]
-Type=simple
+# Type=notify + WatchdogSec: telemirror.past sends READY=1 at start and, once
+# signed in, WATCHDOG=1 while the account's connection answers
+# (telegram_client.connection_probe — FloodWaits count as healthy, so a
+# replay's hours-long waits don't trip it). A dead connection longer than
+# WatchdogSec → systemd restarts it (Restart=on-failure counts a watchdog
+# timeout) and the replay resumes from its checkpoints. Without it a hung
+# replay would keep the live mirror (Conflicts= above) stopped for good.
+Type=notify
+NotifyAccess=main
+WatchdogSec=600
+WatchdogSignal=SIGTERM
 WorkingDirectory=/root/telemirror
 Environment=TELEMIRROR_PROJECT=%i
 # Same config the live mirror reads; only directions with past_mode: are
 # replayed, already-mirrored messages are deduped by the DB.
-ExecStart=/root/telemirror/.venv/bin/python -u past_mode.py
-# Survives a network drop (past_mode resumes from its checkpoint).
+ExecStart=/root/telemirror/.venv/bin/python -u -m telemirror.past
+# A replay stopped by SIGTERM (⏹, Conflicts=) exits 143 (telemirror.past's
+# STOPPED_EXIT): a clean stop, not a failure — and not 0, so the panel doesn't
+# report it as finished.
+SuccessExitStatus=143
+# Survives a network drop (the replay resumes from its checkpoint).
 Restart=on-failure
 RestartSec=60
 

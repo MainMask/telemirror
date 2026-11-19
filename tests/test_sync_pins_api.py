@@ -1,4 +1,4 @@
-"""Guards the telethon pinned-message API used by skylon_set/sync_pins.py:
+"""Guards the telethon pinned-message API used by telemirror.tasks.sync_pins:
 ``SearchRequest`` / ``UpdatePinnedMessageRequest`` live in the ``messages``
 namespace (not ``channels``), and ``InputMessagesFilterPinned`` in ``tl.types``.
 A wrong namespace or arg name silently breaks pin sync and nothing else covers it.
@@ -7,7 +7,7 @@ A wrong namespace or arg name silently breaks pin sync and nothing else covers i
 from telethon.tl import types
 from telethon.tl.functions import channels, messages
 
-from skylon_set import sync_pins as sp
+from telemirror.tasks import sync_pins as sp
 
 
 def test_pin_requests_come_from_messages_namespace():

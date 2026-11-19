@@ -1809,7 +1809,7 @@ three more issues in the same `FileReferenceExpiredError` machinery.
 
 ---
 
-# Pass 16 — token-limited-pass findings, verified and fixed (`skylon_set/telemirror-bugfix-review-prompt.md`)
+# Pass 16 — token-limited-pass findings, verified and fixed
 
 Picked up 10 candidate findings left by an earlier, deliberately cheap review
 pass (3 parallel agents scoped to disjoint file groups, one manual
@@ -3617,3 +3617,607 @@ reproduced before being fixed.
   only in the journal (by design: the bot comes first).
 
 Full suite 744 passed, 4 skipped; `pyflakes`, `ruff` and `mypy .` green.
+
+---
+
+# Pass 27 — architecture: one layout, one way per operation (core + panel)
+
+A restructuring on the owner's request ("logical, structured, uniform; no dead
+code, no leaks"). The mirror's behaviour is unchanged: the core got cleanup
+only (mirroring.py was deliberately not split). Not committed.
+
+## Layout
+
+- Every entry point is `python -m telemirror.<name>`: `live` (was `main.py`),
+  `past` (`past_mode.py`), `login` (`login.py`), the panel (`bot.py` removed;
+  later moved to `python -m bot`, see 27b),
+  `tasks.<module>` (`skylon_set/*` moved to `telemirror/tasks/`); `config.py`
+  is `telemirror/config.py`. No `sys.path` hacks are left. The systemd units,
+  `TASK_MODULES` and the panel's validator (`import telemirror.config`) follow.
+- `DirectionConfig` / `PastModeConfig` live in `telemirror/directions.py`: the
+  core (`mirroring.py`) no longer imports the whole config at import time; the
+  tests import it without any env.
+- Legacy removed: Heroku (`Procfile`, `app.json`), Docker (`Dockerfile`,
+  `docker-compose.yaml`, `.dockerignore`) — neither knew projects; the env
+  mirror config (`CHAT_MAPPING`, `REMOVE_URLS*`, `DISABLE_*`, `PAST_MODE`,
+  `YAML_CONFIG_ENV`): the mirror config is a YAML file only (a project's, else
+  `.configs/mirror.config.yml`; missing → a clear error). `DB_URL` is None with
+  `USE_MEMORY_DB` (no fake DSN). The LLM prompt files in `skylon_set/` are gone.
+- The tests run as a throwaway project (`conftest.py`, via the existing
+  `TELEMIRROR_PROJECTS_DIR`); `tests/conftest.import_config` loads a given YAML
+  in a subprocess.
+
+## One way per operation
+
+- `telemirror/account.py` `open_account`: lock → client with the session's
+  fingerprint → bounded connect → `get_me` → disconnect, for the replay and every
+  task (`tasks/_common.make_client`/`open_client` gone; scripts had no
+  `flood_sleep_threshold` and an unbounded connect outside the `try`).
+- `storage.open_database`: Postgres at `DB_URL`, else InMemory (4 copies).
+- `telegram_client.new_tdesktop_client`: the sign-in client of `telemirror.login`
+  and the panel.
+- Panel: the project of a screen, a button, a confirmation or a typed value is
+  looked up in one place (`screens.open_screen`, `_common.with_project`,
+  `menu.on_confirm` / `on_input`) — a deleted one always shows 📁 Проекты
+  (there were four behaviours, some dead ends). A refused typed value raises
+  `ConfigError`; `on_input` answers it once. `writes.save` reopens the screen
+  by `NavCB`. Starting/stopping units is `routers/_units.py` only (three copies
+  in projects/tasks/replay; generic `unit_start/unit_stop/unit_restart`
+  confirmations). Routers no longer import each other. `configstore.py` is split
+  into `configparse` (input, `ConfigError`), `configedit` (changes to the data),
+  `filtercatalog` (filters, their args and Russian names — were in two files)
+  and `configstore` (read, validate, write).
+
+## Menu
+
+- Every label is in `registry` (`TITLES` for form choices, list rows, the notice
+  button); the 📌 Закрепы flags and limits are registry buttons. Tests check the
+  emoji rule on all of them and handlers ↔ buttons both ways (startup too).
+- One emoji, one meaning: a filter row 🧹 (was ✏️ = Правки), a value to remove
+  🗑 (was ✖️ = Отмена), the page counter without 📄 (= Журнал), the notice
+  button 📊 Задача, «👤 На этой же сессии» (was 🔁). Mode — копия/пересылка with
+  📋/↪️ choices everywhere; one set of history choices; ⏪ Догрузка's delay is
+  «⏱ Задержка догрузки» like the direction's.
+- Confirmations only for what can't be undone, deletes, or stops something on
+  the session: a check (dry run) and ⏪ ▶️ Начать on a free session just run.
+- ⬅️ Назад keeps the list page (`Screen.paged`); a direction's filter card shows
+  «🧹 Фильтры направления › 🧹 Фильтр»; ✖️ on deleting a filter returns to its
+  card (`fv` opens by NavCB too); 📄 Журнал of a maintenance screen goes back
+  there; 📊 Задачи is paged.
+
+## Fixed
+
+- **Cancelling an edit/delete waiting on a fan-out broke the fan-out**
+  (`EventProcessor._await_fanouts`): `gather` cancelled the shared futures —
+  `set_result` then raised `InvalidStateError` in `new_message`, other waiters
+  got `CancelledError`. Shielded. Test:
+  `test_a_cancelled_waiter_leaves_the_fan_out_intact`.
+- `live.py`: the health endpoint's runner was never cleaned up; a failing
+  `Telemirror(...)` left the DB open. `past.py`: the DB and the client were
+  opened before the `try`. Tests in `tests/test_main_startup.py`.
+
+## Leaks
+
+- Panel FSM: aiogram's `MemoryStorage` created a record on every read — for
+  every stranger's update (FSM runs before `AdminOnly`) and every cleared form.
+  `states.PanelStorage` keeps only chats in a form.
+- A sign-in by phone left unanswered kept its Telethon client connected until
+  the next navigation (or forever); uploaded session files sat in FSM data.
+  `panel/pending.py` (was `logins.py`): one item per chat, dropped on leaving
+  the form, after `PENDING_TTL_SEC`, and on shutdown.
+- `AlbumMiddleware` kept a bucket whose wait was cancelled; `Runtime` and the
+  watcher kept a deleted project's units (a new project could inherit its key's
+  cooldown, flags and dry-run); `systemctl`/validator subprocesses survived a
+  cancellation. All fixed.
+- Core: `TelegramLogHandler` stayed attached after `run()` with pending timers,
+  and its send tasks were unbounded under a burst; `InMemoryDatabase`'s
+  broadcast-sync map grew per post. Bounded / detached.
+
+## Dead code removed
+
+`Database.insert` (production uses `insert_batch` only), `LRUCache(free_factor)`,
+`PostgresDatabase(min_conn, max_conn, **kwargs)`, `MediaDownloadError(failed_message_id=)`,
+the sender/receiver split and `_handlers` in `Mirroring`, `check_access.READ_ROLES`,
+`_common.require_text`, `ProjectInfo.replaceable`, `UploadConfig.confirm`,
+`configstore.editable_args`, `read_only_reason`, `UnitState.loaded`, duplicate
+`screens.find_project` / settings' `_timer`/`_active`, redundant `suppress()`
+around edits `SafeEdit` already handles.
+
+## Deliberately not touched
+
+Splitting `mirroring.py` (and its inner duplicates: the file-reference refresh,
+the caption-split calls), the `misc/` and `mixins.py` layout, `_patch/sending.py`;
+`setup_mirrors` stays tied to `.configs/` (its main + courses pair); `projects/`
+stays out of git (the owner's call: it's deployment data).
+
+## Pass 27b — the follow-ups
+
+- **📄 Журнал of a maintenance screen** is shown on that screen (its 🔄 and ⬅️
+  stay its own; it used to open 📊 Задача's card, whose 🔄 turned it into one).
+- **Watermark load:** photos are processed one at a time process-wide
+  (`processor._photo_jobs` — LaMa holds its model, the host has one core);
+  ffmpeg runs under `_run_ffmpeg`/`_ffmpeg_job`: killed past its timeout or as
+  soon as the awaiting coroutine is cancelled, which waits for it to exit
+  before the caller deletes its temp files. Tests in
+  `tests/test_watermark_video_encode.py`.
+- **`telemirror.alert`** falls back to the account when the bot reached nobody
+  (pass 26's deferred P3), and the account is the failed unit's project's
+  (`.jsession` + its config's `tech_channel`; `.env` only for other units) —
+  the old fallback read a bare `SESSION_STRING`, dead with `.jsession`. A busy
+  session is never used (`lock_session(wait=0)`); the unit argument is required
+  (no hard-coded `telemirror@live`).
+- **Filter buttons of a direction** carry the direction's channels in their
+  fingerprint (`configedit.filter_fp`): pass 26's other deferred P3.
+- `ReuploadCache`: a failure no awaiter is left for is retrieved (no "Task
+  exception was never retrieved" noise).
+- `install.sh` installs torch (CPU) on Linux; the CLIs' `--help` names
+  `python -m …`; a test walks every registry screen and its navigation.
+- ⬅️ from a direction's filter card reaches the 🔀 Направления page that
+  direction is on (its page follows from its index — no room in FltCB);
+  `alert` / `health` log through `telemirror` loggers instead of `print`; CI
+  installs ffmpeg, so the real-encode watermark tests run there.
+
+- The panel is a package of its own, `bot/` at the repo root (as in
+  teleharvester): `python -m bot`; was `telemirror/panel/`. Its modules log as
+  `bot.*` (the entry point sets that logger up next to `telemirror`).
+
+Full suite 780 passed, 4 skipped locally (no ffmpeg here); `pyflakes`, `ruff` and `mypy .` green.
+
+# Pass 28 — the panel's menu: one structure, one style
+
+Asked for: the menu looked scattered — group it logically, one style, no
+duplicates, using what the current aiogram (3.32, Bot API 10.4) offers;
+teleharvester as the model. Decisions taken with the user: five sections in a
+project's card, colours by a strict rule, unavailable buttons stay hidden (no
+`DisabledButton`), short texts with the rest folded.
+
+- **The tree.** A project's card opens 🔀 Направления, 🧹 Фильтры, ⏪ История
+  (was ⏪ Копирование истории), 🛠 Инструменты, ⚙️ Настройки проекта (was
+  🧰). 🔧 Общие параметры is gone: its buttons are on ⚙️ Настройки проекта
+  under «Копирование», the project's own (🏷 Имя — was 🏷 Переименовать —,
+  🎨, 👤, 🗑) under «Проект», 💾 Файл настроек (was 🗂) below. 🛂 Проверка
+  доступа moved from 🔀 Направления to 🛠 Инструменты, next to the other
+  tools. 🧰 / 🔧 / 🗂 / 🎛 are no longer used.
+- **Subheadings** (`registry.Button.group`, as teleharvester's): a group's
+  lines under `<i>its name</i>` in the text, its buttons on rows of their own
+  in the keyboard (`screens.screen_text`, `keyboards.menu.screen_kb`); used on
+  ⚙️ Настройки проекта, ⏪ История, 📌 Закрепы («Настройки запуска»),
+  ⚙️ Настройки («Присмотр за зеркалами»). The add-filter list is split into
+  «Отсеять посты» / «Изменить посты» (`filtercatalog.EARLY_FILTERS`).
+- **Colours** (Bot API 9.4 `style`): `registry.PRIMARY` — at most one per
+  screen, picked by its view (`show(..., primary=)`: ▶️ Запустить when
+  stopped and ready, 🔁 Перезапустить with unapplied changes, ▶️ Начать with a
+  history chosen); `DANGER` on `Button.style` (🗑 deletions, 🧨's ▶️ Выполнить)
+  and alone on its row; `SUCCESS` / `DANGER` for labels off a screen's buttons
+  (`registry.LABEL_STYLES`: ✅ Да, ✅ Готово, 🗑 Да, удалить, 🗑 Удалить фильтр),
+  applied by `keyboards.common.button` / `choice_kb` wherever they appear.
+- **Folded details**: `texts.more()` — `<blockquote expandable>` at the end of
+  a screen (`show(..., more=)`): how a tool / the history / the broadcast /
+  the filters work, an account's technical details, the admins list, the
+  /start «Как начать». What must be seen stays visible (🧨's warning).
+- **No duplicates**: ⚙️ Настройки no longer repeats the timers' states shown on
+  their buttons; 📊 Задачи no longer repeats its rows in the text (only a
+  running replay's progress); the link on ⚙️ Настройки проекта is on its
+  button («задана» / «нет»), its URL in the text only when set. A unit's card
+  opens where it is run by a button named after that screen (`📁 Проект ›`,
+  `⏪ История ›`, a tool's) instead of «🎛 Управление».
+- One tool layout for all five: 🔍 Проверить, ▶️ Выполнить, ⏹ Остановить,
+  📄 Журнал, then the run's settings (`registry._tool`).
+
+Tests: registry — one place per group, the colour rule, the primary / danger
+buttons, a group starting its own row, the new menu paths; end to end — the
+colours on the card and the delete confirmation, the folded block, the new
+paths. Full suite 814 passed, 4 skipped; `ruff` clean. `mypy .` reports 8
+errors, all in code this pass didn't touch (`telemirror/mirroring.py`,
+`bot/routers/filters.py` card, `bot/routers/directions.py`,
+`tests/test_panel_bot.py:502`) — the same count as at HEAD.
+
+## Pass 28b — the follow-ups
+
+- **A regression of the rename fixed**: ➕ Добавить's steps were headed
+  «➕ Добавить — шаг 2 из 3»; now `TITLES["dir_new"]` «➕ Новое направление».
+- **📇 Выбрать из списка** (Bot API `request_chat`): under every prompt that
+  takes a channel (➕ Добавить's steps, 📨 Откуда / 🎯 Куда, 🔎 Найти, 📢
+  Рассылка's two, 📍 Только источники, a filter's channel list) —
+  `keyboards.common.pick_kb`. It shows 📺 Канал · 👥 Группа at the bottom
+  above the main menu (`keyboards.menu.chat_picker`, the form stays: a
+  ChoiceCB). The pick (`chat_shared`) is read where a forwarded post is
+  (`_common.remember_chat`, its title saved to chats.json), so every channel
+  input takes it; `middlewares.ChatPicked` answers it first with the main menu
+  alone at the bottom, and with no form under way only says it isn't applied.
+  A form left without a pick (✖️, /cancel, a main-menu button, any other tap)
+  puts the main menu back by one short message: the open picker is a
+  `pending.Picker`, closed by `leave_form` like a sign-in's client — quietly
+  after a pick (its answer already did it), on the picker shown again, on
+  /start (its answer does it) and when the panel stops; it doesn't expire.
+- The filter card no longer says a list's count twice; its class name is folded.
+- 📁 Проекты / 👤 Аккаунты: their explanation shown only while the list is
+  empty, folded after.
+- Prompts that start a paragraph start with a capital (the pause, 📌's two,
+  📢 / 🔗).
+- 🩺 / 🔁 timers are switches like every other one: no confirmation (the rule:
+  only what can't be undone, deletes, or stops something else); turning one
+  off says what changes in its note.
+- No CLI in user texts (🔑 Войти по номеру); a refused upload says /cancel; the
+  channel-names note gives the full path to 🛂 Проверка доступа.
+- `mypy .` clean: the 8 errors fixed (asserts on the two guarded Optionals in
+  `mirroring.py`, a tuple annotation, `str()` of a State, a reused variable in
+  the filter card renamed, an enum default in a test).
+
+822 passed, 4 skipped; `ruff`, `mypy .` green.
+
+## Pass 29 — not-copied posts, the weekly report, repeats
+
+Three features from the improvements list (1, 2, 5), agreed beforehand.
+
+- **Fan-out outcomes** (`telemirror/outcomes.py`): every new post's fan-out
+  (`EventProcessor.new_message` / `new_album` → `_recording`) tracks each
+  channel it was meant for — sent, filtered, repeat, failed (with the
+  reason) — in an `Outcomes` held by a ContextVar while the fan-out runs, and
+  hands it to the processor's optional `sink` however the fan-out ends
+  (FloodWait, an error swallowed by `__handle_exceptions`, cancellation: the
+  channels left are failed with that reason; broken off before any — one
+  entry for «все каналы»). The send paths' "this channel won't get it" log
+  lines go through `_target_failed`: with a sink their record carries
+  `notice=False` and `NoticeLogHandler` skips it. History replay passes no
+  sink — unchanged.
+- **Not-copied posts** (`telemirror/failed.py`, `telemirror/sink.py`): the
+  live mirror's `LiveSink` keeps `projects/<key>/failed.json` (mirror-only
+  writer; 300 posts / 14 days) and sends one summary notice a minute at most
+  with ♻️ Повторить все / ❗ Не скопировано (`notify.failed_buttons`, packed by
+  hand like `unit_button`; a test keeps them equal to `ActCB` / `NavCB`). The
+  panel's ❗ Не скопировано (card) lists them; its buttons only drop a request
+  file into `projects/<key>/requests/` (panel-only writer); the mirror's
+  `_sink_loop` (every 15 s) takes them, refetches the post and runs the
+  ordinary fan-out — `already_mirrored` skips the channels that have it.
+  Relies on the DB rows: with the in-memory DB a retry after a restart may
+  duplicate (README says so).
+- **Weekly report** (`telemirror/stats.py`, `telemirror/report.py`): per-day
+  counters by (source, target) in `projects/<key>/stats.json` (written every
+  10 min and on stop; 35 days; the configured pairs too, so silent directions
+  show). `telemirror-report.timer` (Mon 10:00, `Persistent=true`) — totals,
+  directions with nothing, top failing, ≥90% filtered; a switch in
+  ⚙️ Настройки (`settings.REPORT_TIMER`, part of `TIMERS`).
+- **Repeats** (`telemirror/dedup.py`): `dedup_hours` (YAML, project-wide or
+  per direction → `DirectionConfig.dedup_hours`; ⚙️ Настройки проекта →
+  🧬 Без повторов). A parameter, not a filter: a filter doesn't know the
+  target, and shared filters are one instance for all directions. Checked
+  per target before the filters, remembered only after a successful send, in
+  the new `post_fingerprint` table (`Database.seen_fingerprint` /
+  `remember_fingerprint` / `prune_fingerprints`, both DBs); the same source
+  post again (a retry, another topic) isn't a repeat. Fingerprint: media ids
+  + text when there's media, else the text from 20 characters.
+
+Not verifiable here: the timer under systemd, the new table on the live
+Postgres, real notices.
+
+850 passed, 4 skipped; `ruff`, `mypy .` green.
+
+## Pass 30 — the installation self-check
+
+Item 1 of the second improvements list, agreed beforehand (config loads
+included; `bootstrap.sh` only prints the hint — on its first run there are no
+projects and no panel yet).
+
+- `telemirror/selfcheck.py` (`python -m telemirror.selfcheck`, exit 1 on ❌):
+  `.env` (`PANEL_BOT_TOKEN`, `PANEL_ADMIN_IDS`), the bot (`getMe`; the token
+  never in the output), the database (connect, `to_regclass` of the four
+  tables; `USE_MEMORY_DB` → ⚠️), the unit links (`UNITS` = bootstrap's list,
+  a test keeps them equal; a link to another copy → ⚠️), the timers (off → ⚪,
+  the admin's choice), the panel, a broken `project.yml` (`list_projects`
+  skips it silently), and per project: the session file (`load_jsession`),
+  the config (`import telemirror.config` in a subprocess, as the unit does),
+  the live mirror (enabled + active + its health port answers 204; paused by
+  `projects/.resume.json` → ⚪). No systemd (a dev machine) → one ⚠️, those
+  checks skipped. Reads `.env` itself, never imports `telemirror.config`.
+- Sessions are never connected: the running mirror holds the same one
+  (AUTH_KEY_DUPLICATED).
+- `build_dsn` moved to `telemirror/misc/dsn.py` (`telemirror.config` imports
+  it from there) so the check builds the DSN the mirror's way.
+- Panel: ⚙️ Настройки → 🧾 Проверка установки (`chk`, refresh): ⏳ in the
+  message's place, `selfcheck.run` in a thread, the summary and the lines.
+
+Not verifiable here: the real run on the VPS (systemd, Postgres, the port).
+
+864 passed, 4 skipped; `ruff`, `mypy .` green.
+
+## Pass 31 — the deferred P3s of the recent passes
+
+On request ("fix them all"): the Deferred lists of pass 7's #7/#12, pass 25
+and the one before pass 27. Each was checked against the current code first.
+
+Fixed:
+- **A check stopped halfway unlocked ▶️ Выполнить** (pass 25). The tasks don't
+  handle SIGTERM, and systemd counts a SIGTERM stop (⏹, a mirror started over
+  the task via `Conflicts=`) as `Result=success`. `UnitState` now carries
+  `ExecMainCode` / `ExecMainStatus`; `completed` = exited 0 by itself;
+  `maintenance.can_run_real` requires it, and «Последний запуск» says
+  «прервано» for such a run. Test:
+  `test_a_check_stopped_halfway_does_not_unlock_the_real_run`.
+- **#7: the replay's progress after a resume / since a date** counted against
+  the whole channel. `past._remaining`: the id span from the checkpoint (or
+  the last message before `since_date`) to the newest one, capped by the
+  channel's total — log-only, a failed estimate falls back to the total. The
+  progress line counts messages (`messages_done`), the unit of `iter_total`:
+  an album is several. Tests: `test_replay_progress_after_a_resume_counts_what_is_left`,
+  `test_replay_progress_since_a_date_counts_from_the_date`. Still
+  approximate: the cross-pair «overall» line keeps the channels' totals
+  (it would need every pair's checkpoint before the first one starts).
+- **#12's class, where it lives now**: the tech-channel summary is gone, but
+  `notify._payload` cut notices by codepoints. `notify.cut` counts UTF-16
+  units (Telegram's), also used by the weekly report's own cut. Test:
+  `test_cut_counts_utf16_units`.
+
+Already fixed, the lists were stale: `LOGIN_TIMEOUT_SEC` (used by the sign-in
+since pass 26), a `[]` `.jsession` (refused plainly since pass 26), the
+panel unit's comment (pass 26), `FltCB` reaching an identical filter of the
+next direction (`configedit.filter_fp` includes the direction's channels).
+
+Obsolete: `alert` → TECH_CHANNEL fallback (the tech channel was removed).
+
+The Deferred lists of passes 1–24 were not part of this pass.
+
+868 passed, 4 skipped; `ruff`, `mypy .` green.
+
+## Pass 32 — the deferred P3s of passes 1–24
+
+On request: every "Deferred" item of passes 1–24 (55 after de-duplication)
+checked against the current code.
+
+Fixed:
+- **Broadcast sync deleted mirrors of posts a history page skipped**
+  (`_sync_broadcast_channel`): the ids missing from the walk are asked again
+  by `get_messages(ids=…)`; only the gone ones (None / MessageEmpty) are
+  deleted. Test: `test_a_post_the_history_walk_skipped_is_not_deleted`.
+- **`KeywordReplaceFilter`**: a keyword with an emoji outside the BMP never
+  matched (the text is in the surrogate form, the pattern wasn't —
+  `_compile_keyword(surrogate=True)`); a plain keyword's replacement went
+  through `match.expand` (`\1`, a backslash refused or reinterpreted) — now
+  literal; case transfer on the plain text (a letter outside the BMP has a
+  case). An empty keyword (`""`, `r''`) is refused (it matched between any
+  two non-letters). Keywords that compile alone but not together
+  (`SkipWith`/`AllowWith`) are a `ValueError` with context.
+- **`ForwardFormatFilter`**: an edit of the album item that got the header
+  (a caption-less album's first item) erased it; `_carries_header` asks for
+  the items around it (one request, only for such an edit).
+- **`config.py`**: a file without a `directions:` list (empty, a comment, a
+  top-level list, `directions:` with nothing) is a clear error, not a
+  `KeyError`/`TypeError`; a filter list item with two names (a mis-indented
+  next filter) is refused, not half-dropped. Broadcast posts being copied
+  without the YAML filters/mode is now in README and both example files.
+- **`copy_message`** copies every constructor field of Telethon's Message
+  (the fixed list missed ~15: offline, factcheck, rich_message…).
+- **`_edit_links_pass`**: a FloodWait over Telethon's threshold is waited out
+  once, not the edit skipped for good.
+- **`safe_call`**: no reconnect on a FloodWait (transport errors only).
+- **`fetch_all_topics`**: a page with no topic not seen before ends the
+  paging — a cursor taken from an all-tombstone page can't loop.
+- **Watermark video**: a box clamped to nothing at the frame edge skips
+  ffmpeg (it would only fail).
+- **`alert.journal_tail`**: an unreadable journal says so, not «пуст».
+- **`telemirror-alert@.service`**: `TimeoutStartSec=120` (10 s journal + 20 s
+  per admin, sent one by one, + start-up — 60 was not enough for two).
+- `InMemoryDatabase.get_messages` returns a copy; `__pg_cursor` re-raises bare.
+
+Already fixed by later passes: `_sync_broadcast_channel` before the handlers
+(they're registered first), `delete_message` dropping rows on failure (kept
+per failed channel), a re-sent album after a crash before `set_broadcast_sync`
+(`already_mirrored` skips the targets that have it), `login` needing a full
+`.env`, the health site / DB before `try/finally` (`live.run_telemirror`),
+`past._run`'s unbounded connect and cleanup (`open_account`), `config.py`'s
+non-Optional annotations, `www.` in `SkipWithUrlFilter`, `links.py` untested.
+
+Obsolete: the env `CHAT_MAPPING` trailing comma and `RepositoryMultilineEnv`
+(env mode removed), `alert`'s TECH_CHANNEL, `set_anonymous` / `rename_emoji`.
+
+Not a defect, no change: `LRUCache.setdefault` does refresh recency (an
+OrderedDict subclass's `setdefault` goes through `__getitem__` — checked);
+album send results are in request order (Telethon maps them by random_id);
+a forwarded album is always a list (a list in → a list out); edits swallowing
+a FloodWait is the tested contract (`test_edit_delete_flood_propagates`);
+`DocumentFilenameFilter` / watermark degrading on a flood (the post still
+goes); `EmptyMessageFilter`'s `NotImplementedError`; the operator's own regex
+(ReDoS); strip-all `UrlMessageFilter` and `file.ext`; carried document
+attributes; the caches without a lock (a redundant recompute);
+`setup_mirrors`' `full_id` (only channels there) and its fail-fast
+`KeyError` on a hand-broken file; tasks needing the project's config;
+`_patch.send_file` without `mime_type` (nothing passes one); readability of
+`original_id=filtered_message.id`. Not testable offline: Postgres, cv2/ffmpeg.
+
+Left for the owner: a history replay that hangs without exiting isn't noticed
+(health watches the live mirrors; a replay's FloodWaits can last hours, so
+only a connection probe — the live mirror's watchdog, moved into a shared
+helper, with `Type=notify` on `telemirror-past@` — could tell); links across
+two projects' configs (a post the other project mirrored keeps the donor's
+link — a fix was tried and reverted in pass 23).
+
+890 passed, 4 skipped; `ruff`, `mypy .` green.
+
+## Pass 33 — the replay's watchdog
+
+The first of pass 32's two owner questions, agreed (the second — links
+across projects — declined: the two projects share no channel at all).
+
+- `telegram_client.connection_probe` (+ its three limits): the live
+  mirror's connection check moved out of `Mirroring.__watchdog_probe`
+  unchanged; the mirror keeps its long-silence warning on top
+  (`on_healthy`) and its class limits (they alias the module's). The
+  existing `tests/test_mirroring_watchdog.py` passes as it was.
+- `telemirror.past._run`: `READY=1` at once (a run with nothing to replay
+  ends before signing in — under `Type=notify` that must not be a failed
+  start), the watchdog loop with that probe once signed in, `STOPPING=1`.
+- `telemirror-past@.service`: `Type=notify`, `NotifyAccess=main`,
+  `WatchdogSec=600`, `WatchdogSignal=SIGTERM`. Why it matters: the replay
+  stops the project's live mirror (`Conflicts=`), so a hung replay kept it
+  stopped silently. Only the connection is judged, not progress (FloodWaits
+  last hours); a restart resumes from the checkpoints.
+- Tests: `tests/test_past_watchdog.py` (pings while connected, none on a
+  dead connection, a run with nothing to replay is a clean start).
+
+Not verifiable here: the unit under systemd (`systemctl show
+telemirror-past@<key>.service -p Type -p WatchdogUSec` after
+`daemon-reload`, then one real replay).
+
+893 passed, 4 skipped; `ruff`, `mypy .` green.
+
+## Pass 34 — the source's signature, the last post
+
+Ideas 3 and 4 of the third top-5 list, agreed with the owner (the automatic
+rule as proposed; 🔇 at a fixed 7 days, as the weekly report's section).
+
+- `StripFooterFilter(max_lines=3)` («Убрать подпись источника»): bottom up,
+  cuts at most `max_lines` short lines (≤ 100 characters) with a link or an
+  @mention (a text link counts), the separator lines (no letters or digits)
+  and blank lines around them; stops at the first other line. Entities past
+  the cut go, the ones crossing it are trimmed (UTF-16). The link preview
+  goes when its URL (or `@name` for `t.me/name`) was in the tail. A post
+  without media that would end up empty is left as it is; a caption of only
+  a link under a photo is cut. Content-mutating (refused with
+  `mode: forward`). The panel adds it right after the skip filters
+  (`filtercatalog.AFTER_EARLY_FILTERS`): before UrlMessageFilter hides the
+  links it looks for and ForwardFormatFilter adds ours. Known: a skip filter
+  on links (SkipUrlFilter, SkipWithUrlFilter) still sees the tail — it runs
+  first; move the filter up by hand if that's wanted.
+- `stats.quiet_days`: days since a direction's pairs last counted a post
+  (any outcome) — `None` when the mirror hasn't run with them, `KEEP_DAYS+1`
+  when none in the days kept. 🔀 Направления: 🔇 on a row silent 7+ days and
+  the count above the list; the card: «🕰 Последний пост: …». No Telegram
+  requests, no notices; a stopped mirror makes a source look silent too
+  (said in the card's note).
+- Tests: `tests/test_strip_footer_filter.py`, `test_quiet_days`, the panel's
+  list/card, the panel's placement, the forward-mode refusal.
+
+910 passed, 4 skipped; `ruff`, `mypy .` green.
+
+## Pass 35 — review of the uncommitted passes 27–34
+
+A full review of the working tree by the owner's request; two defects found,
+both reproduced before the fix and fixed with a regression test.
+
+- **P2 — `dedup_hours` pruned another project's fingerprints.** The database
+  is shared by every project (`DATABASE_URL` in the one `.env`), but
+  `prune_fingerprints(before)` deleted every row older than the caller's
+  window: a project with 1 h pruned a 48 h project's rows, and its repeats got
+  through. Now `prune_fingerprints(before, sources, targets)` deletes only the
+  rows the caller could have written — its dedup directions' sources into
+  their targets (`EventProcessor._dedup_sources` / `_dedup_targets`). No
+  schema change. Postgres SQL reviewed by reading (`= ANY(%s)` as elsewhere in
+  storage.py). Test: `test_prune_keeps_what_another_project_remembered`.
+- **P3 — `KeywordReplaceFilter` rules split emoji.** Rules ran on Telethon's
+  surrogate form: `.` matched half of an emoji (already in the last commit),
+  and the uncommitted change that made the regex surrogate too turned `r'[🔥💥]'` into a
+  class of half-emoji — any post with 😀/👍/… raised `UnicodeDecodeError` and
+  the target was skipped. Now every rule runs on the plain text and the
+  entity offsets are converted to UTF-16 (`_utf16_len`); `_compile_keyword`
+  lost its `surrogate` flag. Tests: `test_a_regex_class_of_emoji_replaces_whole_emoji_only`,
+  `test_a_regex_dot_takes_a_whole_emoji`; the existing emoji/BMP tests still pass.
+
+Checked and not defects: `_target_failed` (new posts only — edits and
+deletes still notify), `NoticeLogHandler.emit` from executor threads
+(`call_soon_threadsafe`), `connect_with_timeout` without the explicit
+`cancel()` (`wait_for` cancels), the replay's watchdog before sign-in
+(`WatchdogSec=600` covers it).
+
+913 passed, 4 skipped; `ruff`, `pyflakes`, `mypy .` green.
+
+## Pass 35b — the minor findings of pass 35
+
+- **One notice per failure.** A mirror entering `failed` was told three times
+  (`OnFailure=` → `telemirror.alert`, `telemirror.health` on the transition,
+  the panel's watcher «🔴 сбой»), a replay / a task twice. Now only
+  `OnFailure=` tells it: at once, with the journal and the 📊 Задача button,
+  and even when the panel is down. The watcher keeps 🟢 back, ⚠️ restarted and
+  ✅ finished; `health` keeps flapping and stuck (its own job — `OnFailure=`
+  never sees a slow crash-loop). This replaces the pass-24 choice "health alerts
+  once on the transition". A failed maintenance task gets its own wording
+  (one-shot: not "won't start again by itself"). Tests:
+  `test_entering_failed_is_left_to_on_failure`, `test_task_finished_ok_and_failed`,
+  `test_mirror_failed_back_and_crash_cooldown`,
+  `test_a_failed_task_is_not_said_to_have_given_up_restarting`.
+- **The panel's requests in the order they were made.** `take_requests` sorted
+  by name, so 🗑 clear then ♻️ all ran as all then clear: the posts just
+  forgotten were copied again first. Now by mtime (a repeated request counts
+  from its last time). Test: `test_requests_are_taken_in_the_order_they_were_made`.
+
+Left as is, on purpose: a FloodWait during a retry stops it and drops the
+remaining request files — re-queueing them would retry every 15 s into the
+same flood; the admins get the warning and the posts stay listed.
+`StripFooterFilter` cutting a short last line with a link is its documented
+rule.
+
+915 passed, 4 skipped; `ruff`, `pyflakes`, `mypy .` green.
+
+## Pass 36 — a second review of the uncommitted tree, and its fixes
+
+A full re-read of the working tree by the owner's request ("check, and only
+then call it a bug"); everything below was reproduced before the fix and has
+a regression test that fails without it.
+
+- **P3 — a run stopped from outside was reported «✅ закончилось успешно».**
+  systemd counts a SIGTERM stop (⏹, the mirror started over a task via
+  `Conflicts=`) as `Result=success`; pass 31 taught the task screen
+  (`UnitState.completed`), not the watcher. `Watcher._task` now says
+  «⏹ прервано, не закончив работу» when the run didn't exit 0 by itself.
+  The replay caught SIGTERM and exited 0, so not even `completed` could tell
+  it: `telemirror.past` now re-raises the cancellation and exits
+  `STOPPED_EXIT` (143, as if killed by SIGTERM), and
+  `telemirror-past@.service` has `SuccessExitStatus=143` — still a clean stop
+  (no `failed`, no `OnFailure=`, no restart). Tests:
+  `test_a_run_stopped_from_outside_is_not_reported_as_finished`,
+  `test_a_stopped_replay_exits_143_not_0`.
+- **P3 — a quiet week read «Зеркало всю неделю не работало».** `stats.json`
+  only got a day with a post, so a running mirror whose sources were silent
+  looked stopped, and the 🔇 section that was true never showed. `Stats.flush`
+  now keeps the day it runs on (`{}` without a post). Test:
+  `test_a_quiet_week_is_not_a_stopped_mirror`.
+- **Leaks behind `pytest -W error`** (CI runs plain `pytest`, so it was
+  green): `session_import.read_session_key` let Telethon's `SQLiteSession`
+  open a non-SQLite file, which fails with its sqlite3 connection left open —
+  the SQLite header is checked first (test:
+  `test_a_file_that_is_not_sqlite_is_refused_before_sqlite_opens_it`);
+  `watermark.processor._run_ffmpeg` left ffmpeg's stderr pipe open after a
+  cancel / a timeout — `Popen` is a context manager now (covered by the
+  existing cancel / timeout encode tests under `-W error`); the two
+  `test_session_lock` holders closed their stdout pipe.
+- `deploy/README.md`: the health timer's "stuck" rule as the code has it
+  since pass 35b.
+
+Checked and not defects: `FailedQueue.entries` is a copy (a ♻️ all retry
+doesn't mutate what it walks); `dict(LRUCache)` copies by a key list;
+`StripFooterFilter` trims per-target deep copies of the entities; the moved
+`telemirror.tasks` scripts keep markdown via `build_telegram_client`; a task
+stopped halfway still can't unlock ▶️ Выполнить (tasks don't catch SIGTERM).
+
+919 passed, 4 skipped (also under `-W error`); `ruff`, `pyflakes`, `mypy .` green.
+
+## Pass 36b — the minor findings of pass 36
+
+- **A retried post counted twice in the weekly report.** Its first failure
+  stayed in «ошибок отправки», its retry added a copy (or another failure).
+  `LiveSink.retrying` (from `Mirroring._retry`) takes the post's last
+  counted failure back (`Stats.remove`, on the day it was counted) before
+  the retry's own outcome is counted: one post, counted once, as it ended up.
+  A post gone from the source keeps its failure (it was one). Test:
+  `test_a_retried_post_is_counted_once_as_it_ended_up`.
+- **Two notices for one broken-off fan-out.** `__handle_exceptions` logged
+  the error as a notice, and the sink's «❗ Не скопировано» told the same
+  post with that error as its reason. With a sink and a fan-out under way
+  the log line is no longer a notice (edits and deletes still notify). Test:
+  `test_a_fanout_broken_off_is_one_notice_with_a_sink`.
+- **A burst's held-back notices could go untold.** The count was told only
+  by the next notice — none after a burst: never; and a notice dropped for
+  the in-flight cap wasn't counted at all. Both are held back now, and told
+  by a notice of its own `_HELD_BACK_SEC` later when none comes. Test:
+  `test_a_burst_with_no_notice_after_it_still_says_how_many_were_held_back`.
+- **`chats.json`'s writers shared one temp file** (the mirror at start,
+  check_access, the panel): `write_json`'s temp file is the writer's own
+  (its pid); `save_chat_names` writes through it instead of its own copy.
+- **`ForwardFormatFilter._carries_header`** asked for ids ≤ 0 around a
+  channel's first posts (a refused request: the header would be erased by
+  an edit). Test: `test_an_edit_among_a_channels_first_posts_asks_for_existing_ids_only`.
+
+Left as is: `Mirroring._save_chat_names`' `get_dialogs()` at every start —
+the same call fills Telethon's entity cache the mirror relies on, and asking
+chat by chat would be more requests, not fewer.
+
+923 passed, 4 skipped (also under `-W error`); `ruff`, `pyflakes`, `mypy .` green.

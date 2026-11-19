@@ -14,6 +14,8 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+      # the real-encode watermark tests (tests/test_watermark_video_encode.py) skip without it
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: pip install -r requirements-dev.txt
       - run: python -m pyflakes $(git ls-files '*.py')
       - run: python -m ruff check

@@ -15,7 +15,7 @@ from telethon.tl.functions.channels import (
 )
 from telethon.tl.types import ChannelParticipantAdmin, ChatAdminRights
 
-from skylon_set import anonymize_groups
+from telemirror.tasks import anonymize_groups
 from tests.conftest import run
 
 
@@ -31,7 +31,7 @@ def test_get_rights_preserves_flags_and_sets_anonymous():
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    import skylon_set._common as common
+    import telemirror.tasks._common as common
 
     async def _noop(*_a, **_kw):
         pass

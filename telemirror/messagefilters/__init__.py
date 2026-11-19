@@ -21,6 +21,7 @@ from .messagefilters import (
     SkipUrlFilter,
     SkipWithKeywordsFilter,
     SkipWithUrlFilter,
+    StripFooterFilter,
     UrlMessageFilter,
 )
 from .restrictsavingfilter import RestrictSavingContentBypassFilter
@@ -43,6 +44,7 @@ __all__ = [
     "SkipUrlFilter",
     "SkipWithKeywordsFilter",
     "SkipWithUrlFilter",
+    "StripFooterFilter",
     "UrlMessageFilter",
     "WatermarkRemovalFilter",
     "fetch_fresh_media",

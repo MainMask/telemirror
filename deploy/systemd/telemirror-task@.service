@@ -12,13 +12,13 @@ OnFailure=telemirror-alert@%n.service
 Type=simple
 WorkingDirectory=/root/telemirror
 Environment=TELEMIRROR_PROJECT=%i
-# Written by the panel right before the start: TASK_MODULE (a skylon_set
+# Written by the panel right before the start: TASK_MODULE (a telemirror.tasks
 # module from its whitelist) and TASK_ARGS (flags from its whitelist only).
 # No "-" prefix on purpose: without that file (a manual `systemctl start`) the
 # unit fails instead of running a script for real with no arguments.
 EnvironmentFile=/run/telemirror-panel/%i.env
 # $TASK_ARGS unquoted = split on whitespace into separate argv words.
-ExecStart=/root/telemirror/.venv/bin/python -u -m skylon_set.${TASK_MODULE} $TASK_ARGS
+ExecStart=/root/telemirror/.venv/bin/python -u -m telemirror.tasks.${TASK_MODULE} $TASK_ARGS
 # No Restart=: a maintenance run is one-shot; the panel shows its result.
 
 MemoryHigh=1100M

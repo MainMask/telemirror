@@ -17,16 +17,26 @@ from .base import FilterAction, FilterResult, MessageFilter
 
 def _compile_keyword(keyword: str) -> re.Pattern[str]:
     """Compile one keyword rule: ``r'...'`` is a raw regex, anything else is a
-    word-boundary literal match. Raises ``ValueError`` (not a bare ``re.error``)
-    on a broken pattern so config mistakes fail fast with context."""
+    whole-word literal match — no letter or digit right before or after it.
+    (Not a regex word boundary: it needs a word character on one side, so a
+    keyword like ``@name`` never matched after a space or at the start.) Raises ``ValueError`` (not a bare
+    ``re.error``) on a broken pattern so config mistakes fail fast with context."""
     if keyword.startswith("r'"):
         src = keyword.removeprefix("r'").removesuffix("'")
     else:
-        src = rf"\b{re.escape(keyword)}\b"
+        src = rf"(?<!\w){re.escape(keyword)}(?!\w)"
+    if not src or src == r"(?<!\w)(?!\w)":
+        # matches between any two non-letters: an erratic rule, not a keyword
+        raise ValueError(f"empty keyword {keyword!r}")
     try:
         return re.compile(src, flags=re.IGNORECASE)
     except re.error as e:
         raise ValueError(f"invalid keyword pattern {keyword!r}: {e}") from e
+
+
+def _utf16_len(text: str) -> int:
+    """Length in UTF-16 code units — Telegram's entity offsets count them."""
+    return len(text) + sum(1 for ch in text if ord(ch) > 0xFFFF)
 
 
 class EmptyMessageFilter(MessageFilter):
@@ -294,11 +304,13 @@ class ForwardFormatFilter(ChannelName, MessageLink, UpdateEntitiesParams, Messag
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]
     ) -> FilterResult[EventMessage]:
-        # Skip format editing for empty album's items
+        # Skip format editing for empty album's items — except the one that
+        # got the header when the album was sent (an edit would erase it)
         if (
             event_type is events.MessageEdited.Event
             and message.grouped_id
             and not message.message
+            and not await self._carries_header(message)
         ):
             return FilterResult(FilterAction.CONTINUE, message)
 
@@ -376,6 +388,26 @@ class ForwardFormatFilter(ChannelName, MessageLink, UpdateEntitiesParams, Messag
 
         return FilterResult(FilterAction.CONTINUE, message)
 
+    @staticmethod
+    async def _carries_header(message: EventMessage) -> bool:
+        """Whether this empty album item got the header at send time: the
+        album's first item when no item has text (``_process_album``). One
+        request for the items around it (an album is at most 10); False when
+        it can't tell — the item is then left as it is."""
+        client = getattr(message, "_client", None)
+        if client is None:
+            return False
+        try:
+            around = await client.get_messages(
+                # ids start at 1: the first posts of a channel have no 9 before them
+                message.chat_id, ids=list(range(max(1, message.id - 9), message.id + 10))
+            )
+        except Exception:  # noqa: BLE001 - a best-effort guess, never fatal to the edit
+            return False
+        album = [m for m in around if m is not None and m.grouped_id == message.grouped_id]
+        return (bool(album) and not any(m.message for m in album)
+                and min(m.id for m in album) == message.id)
+
     async def _process_album(
         self, album: EventAlbumMessage, event_type: Type[EventLike]
     ) -> FilterResult[EventAlbumMessage]:
@@ -423,11 +455,16 @@ class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
     """
 
     def __init__(self, keywords: dict[str, str]) -> None:
-        # (compiled pattern, surrogate replacement, is_regex)
+        # (compiled pattern, replacement, is_regex) — applied to the plain text,
+        # not Telethon's surrogate form: there `.` or `[🔥]` could match half of
+        # an emoji and leave a broken string behind.
         self._rules: list[tuple[re.Pattern[str], str, bool]] = []
         for k, v in keywords.items():
             pattern = _compile_keyword(k)
-            replacement = utils.add_surrogate(v)
+            is_regex = k.startswith("r'")
+            if not is_regex:  # a plain keyword's replacement is inserted as is
+                self._rules.append((pattern, v, False))
+                continue
             try:
                 # `Pattern.sub` validates the replacement template (group
                 # references included) up front, even against an empty
@@ -435,14 +472,12 @@ class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
                 # contract as `_compile_keyword` for the pattern itself,
                 # instead of a bare `re.error` the first time a real message
                 # happens to match.
-                pattern.sub(replacement, "")
+                pattern.sub(v, "")
             except re.error as e:
                 raise ValueError(
                     f"invalid replacement {v!r} for keyword pattern {k!r}: {e}"
                 ) from e
-            self._rules.append(
-                (pattern, replacement, k.startswith("r'"))  # is_regex: keeps configured casing
-            )
+            self._rules.append((pattern, v, True))  # a regex: keeps configured casing
 
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]
@@ -450,7 +485,7 @@ class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
         if not message.message:
             return FilterResult(FilterAction.CONTINUE, message)
 
-        filtered_text = utils.add_surrogate(message.message)
+        filtered_text = message.message
         filtered_entities = message.entities or []
 
         for regex, replacement, is_regex in self._rules:
@@ -459,7 +494,7 @@ class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
             )
 
         message.entities = filtered_entities
-        message.message = utils.del_surrogate(filtered_text)
+        message.message = filtered_text
 
         return FilterResult(FilterAction.CONTINUE, message)
 
@@ -477,24 +512,27 @@ class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
 
         def repl(match: re.Match[str]) -> str:
             nonlocal offset_error
-            expanded = match.expand(replacement)
+            # `\1` / `\g<0>` only in a regex rule's replacement: a plain
+            # keyword's is literal text (a backslash in it stays a backslash).
+            result = match.expand(replacement) if is_regex else replacement
 
             # Case-transfer only for plain word keywords; an explicit `r'...'`
             # replacement keeps its configured casing.
-            result = expanded
             if not is_regex:
                 full_match = match.group()
                 if full_match.islower():
-                    result = expanded.lower()
+                    result = result.lower()
                 elif full_match.istitle():
-                    result = expanded.title()
+                    result = result.title()
                 elif full_match.isupper():
-                    result = expanded.upper()
+                    result = result.upper()
 
-            # Shift by the final string's length: case transfer can change it
-            # (e.g. "ß".upper() == "SS").
-            match_start, match_end = match.span()
-            diff = len(result) - (match_end - match_start)
+            # Entities count UTF-16 units (an emoji outside the BMP is two),
+            # the match counts characters. Shift by the final string's length:
+            # case transfer can change it (e.g. "ß".upper() == "SS").
+            match_start = _utf16_len(text[: match.start()])
+            match_end = match_start + _utf16_len(match.group())
+            diff = _utf16_len(result) - (match_end - match_start)
             self.update_entities_params(
                 entities,
                 match_start + offset_error,
@@ -505,6 +543,90 @@ class KeywordReplaceFilter(UpdateEntitiesParams, MessageFilter):
             return result
 
         return regex.sub(repl, text)
+
+
+_FOOTER_LINK = re.compile(r"t\.me/|telegram\.me/|https?://|www\.|@\w{4,}", re.IGNORECASE)
+_FOOTER_ENTITIES = (
+    types.MessageEntityUrl,
+    types.MessageEntityTextUrl,
+    types.MessageEntityMention,
+    types.MessageEntityMentionName,
+)
+_FOOTER_LINE_MAX = 100  # characters: a longer line is content, not a signature
+
+
+def _bare_url(url: str) -> str:
+    """``https://www.T.me/x/`` → ``t.me/x``: to tell a preview's URL in a text."""
+    url = url.strip().lower().removeprefix("https://").removeprefix("http://")
+    return url.removeprefix("www.").rstrip("/")
+
+
+class StripFooterFilter(MessageFilter):
+    """Cut the source's promo tail («Подпишись на @channel») off a post: bottom
+    up, at most ``max_lines`` short lines (≤ 100 characters) with a link or an
+    @mention (a text link counts), with the separator lines (no letters or
+    digits: ``➖➖➖``, ``👇``) and blank lines around them. Stops at the first
+    other line. The link preview goes too when its link was in the tail. A post
+    without media that would end up empty stays as it is.
+
+    Args:
+        max_lines (`int`, optional): Lines with links to cut, at most. Defaults to 3.
+    """
+
+    def __init__(self, max_lines: int = 3) -> None:
+        if int(max_lines) < 1:
+            raise ValueError(f"StripFooterFilter: max_lines must be 1 or more, got {max_lines!r}")
+        self._max_lines = int(max_lines)
+
+    async def _process_message(
+        self, message: EventMessage, event_type: Type[EventLike]
+    ) -> FilterResult[EventMessage]:
+        if not message.message:
+            return FilterResult(FilterAction.CONTINUE, message)
+        text = utils.add_surrogate(message.message)  # the entities' UTF-16 coordinates
+        entities = message.entities or []
+        cut, links, pos = len(text), 0, len(text)
+        while pos > 0 and links < self._max_lines:
+            start = text.rfind("\n", 0, pos) + 1
+            line = utils.del_surrogate(text[start:pos])
+            has_link = bool(_FOOTER_LINK.search(line)) or any(
+                isinstance(e, _FOOTER_ENTITIES) and e.offset < pos and e.offset + e.length > start
+                for e in entities
+            )
+            if has_link and len(line.strip()) <= _FOOTER_LINE_MAX:
+                links += 1
+                cut = start
+            elif any(ch.isalnum() for ch in line):
+                break
+            elif links and line.strip():  # a separator above a cut line goes with it
+                cut = start
+            pos = start - 1
+        keep = len(text[:cut].rstrip())
+        no_media = message.media is None or isinstance(message.media, types.MessageMediaWebPage)
+        if cut == len(text) or (keep == 0 and no_media):
+            return FilterResult(FilterAction.CONTINUE, message)
+
+        if isinstance(message.media, types.MessageMediaWebPage) and isinstance(
+            message.media.webpage, types.WebPage
+        ):
+            tail = utils.del_surrogate(text[keep:]).lower()
+            tail_urls = {
+                e.url for e in entities
+                if isinstance(e, types.MessageEntityTextUrl) and e.offset + e.length > keep
+            }
+            preview = _bare_url(message.media.webpage.url)
+            mention = "@" + preview.removeprefix("t.me/") if preview.startswith("t.me/") else None
+            if preview in tail or (mention and mention in tail) or any(_bare_url(u) == preview for u in tail_urls):
+                message.media = None
+        kept = []
+        for e in entities:
+            if e.offset >= keep:
+                continue
+            e.length = min(e.length, keep - e.offset)
+            kept.append(e)
+        message.entities = kept
+        message.message = utils.del_surrogate(text[:keep])
+        return FilterResult(FilterAction.CONTINUE, message)
 
 
 class SkipWithKeywordsFilter(MessageFilter):
@@ -522,10 +644,13 @@ class SkipWithKeywordsFilter(MessageFilter):
             raise ValueError(
                 f"{type(self).__name__} requires a non-empty keywords set"
             )
-        self._lookup_regex = re.compile(
-            "|".join(_compile_keyword(k).pattern for k in keywords),
-            flags=re.IGNORECASE,
-        )
+        try:
+            self._lookup_regex = re.compile(
+                "|".join(_compile_keyword(k).pattern for k in keywords),
+                flags=re.IGNORECASE,
+            )
+        except re.error as e:  # each compiles alone, not together (a group name used twice…)
+            raise ValueError(f"keywords {sorted(keywords)!r} don't combine into one pattern: {e}") from e
 
     async def _process_message(
         self, message: EventMessage, event_type: Type[EventLike]

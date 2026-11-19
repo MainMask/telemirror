@@ -53,9 +53,8 @@ class Database(ABC):
     """
     Base database class
 
-    Provides two user functions that work messages mapping data:
-    - Add new `MirrorMessage` object to database
-    - Get `MirrorMessage` object from database by original message ID
+    Where the mirror keeps what it has sent (``MirrorMessage`` rows), the
+    history replay's checkpoints and the broadcast-sync state.
     """
 
     @abstractmethod
@@ -66,14 +65,6 @@ class Database(ABC):
     def __await__(self):
         return self._async__init__().__await__()
 
-    @abstractmethod
-    async def insert(self: "Database", entity: MirrorMessage) -> None:
-        """Inserts `MirrorMessage` object into database
-
-        Args:
-            entity (`MirrorMessage`): `MirrorMessage` object
-        """
-        raise NotImplementedError
 
     @abstractmethod
     async def insert_batch(self: "Database", entity: List[MirrorMessage]) -> None:
@@ -216,6 +207,34 @@ class Database(ABC):
         """Removes broadcast-sync rows for messages deleted from the source."""
         raise NotImplementedError
 
+    @abstractmethod
+    async def seen_fingerprint(
+        self: "Database", target: int, topic: Optional[int], fingerprint: str, since: int,
+        original_channel: int, original_id: int,
+    ) -> bool:
+        """True when `target` (`topic`) got a post with this fingerprint at or
+        after `since` (unix time) from another source post than this one — a
+        repeat (``dedup_hours``). The same post again (a retry, another topic)
+        isn't one."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def remember_fingerprint(
+        self: "Database", target: int, topic: Optional[int], fingerprint: str,
+        original_channel: int, original_id: int, at: int,
+    ) -> None:
+        """`target` (`topic`) got this post at `at` (unix time)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def prune_fingerprints(
+        self: "Database", before: int, sources: List[int], targets: List[int]
+    ) -> None:
+        """Forgets the fingerprints remembered before `before` (unix time) of
+        posts from `sources` to `targets` — only the caller's own: the database
+        is shared by every project, and another one may keep its longer."""
+        raise NotImplementedError
+
     async def close(self: "Database") -> None:  # noqa: B027 - intentional no-op default
         """Release any held resources (connection pool). No-op by default."""
 
@@ -223,10 +242,12 @@ class Database(ABC):
         return self.__class__.__name__
 
 
-def warn_memory_db_limits(logger: logging.Logger) -> None:
-    """Log InMemoryDatabase's process-wide capacity limit. Shared by
-    main.py/past_mode.py so the warning text (and the capacity number, if
-    InMemoryDatabase.MAX_CAPACITY ever changes) is maintained in one place."""
+async def open_database(db_url: Optional[str], logger: logging.Logger) -> "Database":
+    """The configured database, opened: Postgres at ``db_url`` (the config's
+    ``DB_URL``), else — ``USE_MEMORY_DB`` — an InMemoryDatabase, with a
+    warning about its process-wide capacity."""
+    if db_url is not None:
+        return await PostgresDatabase(connection_string=db_url)
     logger.warning(
         f"USE_MEMORY_DB=true: InMemoryDatabase holds at most "
         f"{InMemoryDatabase.MAX_CAPACITY} tracked messages for the WHOLE "
@@ -235,15 +256,14 @@ def warn_memory_db_limits(logger: logging.Logger) -> None:
         "messages — not just broadcast-channel resync on restart. Use "
         "PostgreSQL for a 24/7 deployment."
     )
+    return await InMemoryDatabase()
 
 
 class InMemoryDatabase(Database):
     """
-    In-memory database class messages mapping implementation.
-
-    Provides two user functions that work with 'binding_id' table:
-    - Add new `MirrorMessage` object to database
-    - Get `MirrorMessage` object from database by original message ID
+    In-memory database: process-lifetime, bounded (``MAX_CAPACITY`` source
+    messages, and as many broadcast-sync entries per source) — for tests and
+    short manual runs.
     """
 
     MAX_CAPACITY = 100
@@ -253,20 +273,14 @@ class InMemoryDatabase(Database):
     ) -> None:
         self.__storage = LRUCache[str, List[MirrorMessage]](capacity=max_capacity)
         self.__checkpoints: Dict[Tuple[int, int], int] = {}
-        self.__broadcast_sync: Dict[int, Dict[int, Optional[int]]] = {}
+        self.__capacity = max_capacity
+        self.__broadcast_sync: Dict[int, LRUCache[int, Optional[int]]] = {}
+        # (target, topic, fingerprint) → [(original_channel, original_id, at)]
+        self.__fingerprints: Dict[Tuple[int, Optional[int], str], List[Tuple[int, int, int]]] = {}
 
     async def _async__init__(self: "InMemoryDatabase") -> "InMemoryDatabase":
         return self
 
-    async def insert(self: "InMemoryDatabase", entity: MirrorMessage) -> None:
-        """Inserts `MirrorMessage` object into database
-
-        Args:
-            entity (`MirrorMessage`): `MirrorMessage` object
-        """
-        self.__storage.setdefault(
-            self.__build_message_key(entity.original_id, entity.original_channel), []
-        ).append(entity)
 
     async def insert_batch(
         self: "InMemoryDatabase", entity: List[MirrorMessage]
@@ -294,9 +308,10 @@ class InMemoryDatabase(Database):
         Returns:
             List[MirrorMessage]
         """
-        return self.__storage.get(
+        # a copy: a caller's change must not reach the stored list
+        return list(self.__storage.get(
             self.__build_message_key(original_id, original_channel), []
-        )
+        ))
 
     async def get_messages_batch(
         self: "InMemoryDatabase", original_ids: List[int], original_channel: int
@@ -402,7 +417,9 @@ class InMemoryDatabase(Database):
     async def set_broadcast_sync(
         self: "InMemoryDatabase", source: int, message_id: int, edit_ts: Optional[int]
     ) -> None:
-        self.__broadcast_sync.setdefault(source, {})[message_id] = edit_ts
+        self.__broadcast_sync.setdefault(
+            source, LRUCache[int, Optional[int]](capacity=self.__capacity)
+        )[message_id] = edit_ts
 
     async def delete_broadcast_sync(
         self: "InMemoryDatabase", source: int, message_ids: List[int]
@@ -411,6 +428,33 @@ class InMemoryDatabase(Database):
         if bucket:
             for mid in message_ids:
                 bucket.pop(mid, None)
+
+    async def seen_fingerprint(
+        self: "InMemoryDatabase", target: int, topic: Optional[int], fingerprint: str, since: int,
+        original_channel: int, original_id: int,
+    ) -> bool:
+        return any(
+            at >= since and (channel, mid) != (original_channel, original_id)
+            for channel, mid, at in self.__fingerprints.get((target, topic, fingerprint), [])
+        )
+
+    async def remember_fingerprint(
+        self: "InMemoryDatabase", target: int, topic: Optional[int], fingerprint: str,
+        original_channel: int, original_id: int, at: int,
+    ) -> None:
+        self.__fingerprints.setdefault((target, topic, fingerprint), []).append(
+            (original_channel, original_id, at)
+        )
+
+    async def prune_fingerprints(
+        self: "InMemoryDatabase", before: int, sources: List[int], targets: List[int]
+    ) -> None:
+        for key in [k for k in self.__fingerprints if k[0] in targets]:
+            kept = [row for row in self.__fingerprints[key] if row[2] >= before or row[0] not in sources]
+            if kept:
+                self.__fingerprints[key] = kept
+            else:
+                del self.__fingerprints[key]
 
     def __build_message_key(
         self: "InMemoryDatabase", original_id: int, original_channel: int
@@ -445,66 +489,26 @@ class PostgresDatabase(Database):
                 source_media_id bigint)
     ```
 
-    Provides two user functions that work with 'binding_id' table:
-    - Add new `MirrorMessage` object to database
-    - Get `MirrorMessage` object from database by original message ID
-
     Args:
         connection_string (`str`): Postgres connection URL
-        min_conn (`int`, optional): Min amount of connections. Defaults to MIN_CONN (1).
-        max_conn (`int`, optional): Max amount of connections. Defaults to MAX_CONN (10).
     """
 
     MIN_CONN = 1
     MAX_CONN = 10
 
-    def __init__(
-        self,
-        connection_string: str,
-        min_conn: int = MIN_CONN,
-        max_conn: int = MAX_CONN,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, connection_string: str) -> None:
         self.__conn_info = connection_string
-        self.__min_conn = min_conn
-        self.__max_conn = max_conn
-        self.__kwargs = kwargs
 
     async def _async__init__(self: "PostgresDatabase") -> "PostgresDatabase":
         self.connection_pool = AsyncConnectionPool(
             conninfo=self.__conn_info,
-            min_size=self.__min_conn,
-            max_size=self.__max_conn,
+            min_size=self.MIN_CONN,
+            max_size=self.MAX_CONN,
             open=False,
-            **self.__kwargs,
         )
         await self.connection_pool.open()
         await self.__create_tables_if_not_exists()
         return self
-
-    async def insert(self: "PostgresDatabase", entity: MirrorMessage) -> None:
-        """Inserts `MirrorMessage` object into database
-
-        Args:
-            entity (`MirrorMessage`): `MirrorMessage` object
-        """
-        async with self.__pg_cursor() as cursor:
-            await cursor.execute(
-                """
-                INSERT INTO binding_id
-                (original_id, original_channel, mirror_id, mirror_channel, mirror_topic_id, source_topic_id, source_media_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    entity.original_id,
-                    entity.original_channel,
-                    entity.mirror_id,
-                    entity.mirror_channel,
-                    entity.mirror_topic_id,
-                    entity.source_topic_id,
-                    entity.source_media_id,
-                ),
-            )
 
     async def insert_batch(
         self: "PostgresDatabase", entity: List[MirrorMessage]
@@ -691,6 +695,21 @@ class PostgresDatabase(Database):
                     synced_edit_ts BIGINT,
                     PRIMARY KEY (source_channel, message_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS post_fingerprint (
+                    target_channel   BIGINT NOT NULL,
+                    target_topic     BIGINT,
+                    fingerprint      TEXT   NOT NULL,
+                    original_channel BIGINT NOT NULL,
+                    original_id      BIGINT NOT NULL,
+                    created_at       BIGINT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS post_fingerprint_lookup_idx
+                ON post_fingerprint (target_channel, fingerprint);
+
+                CREATE INDEX IF NOT EXISTS post_fingerprint_created_idx
+                ON post_fingerprint (created_at);
                 """
             )
 
@@ -765,6 +784,41 @@ class PostgresDatabase(Database):
                 (source, message_id, edit_ts),
             )
 
+    async def seen_fingerprint(
+        self: "PostgresDatabase", target: int, topic: Optional[int], fingerprint: str, since: int,
+        original_channel: int, original_id: int,
+    ) -> bool:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "SELECT 1 FROM post_fingerprint "
+                "WHERE target_channel = %s AND target_topic IS NOT DISTINCT FROM %s "
+                "AND fingerprint = %s AND created_at >= %s "
+                "AND NOT (original_channel = %s AND original_id = %s) LIMIT 1",
+                (target, topic, fingerprint, since, original_channel, original_id),
+            )
+            return await cursor.fetchone() is not None
+
+    async def remember_fingerprint(
+        self: "PostgresDatabase", target: int, topic: Optional[int], fingerprint: str,
+        original_channel: int, original_id: int, at: int,
+    ) -> None:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "INSERT INTO post_fingerprint (target_channel, target_topic, fingerprint, "
+                "original_channel, original_id, created_at) VALUES (%s, %s, %s, %s, %s, %s)",
+                (target, topic, fingerprint, original_channel, original_id, at),
+            )
+
+    async def prune_fingerprints(
+        self: "PostgresDatabase", before: int, sources: List[int], targets: List[int]
+    ) -> None:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "DELETE FROM post_fingerprint WHERE created_at < %s "
+                "AND original_channel = ANY(%s) AND target_channel = ANY(%s)",
+                (before, sources, targets),
+            )
+
     async def delete_broadcast_sync(
         self: "PostgresDatabase", source: int, message_ids: List[int]
     ) -> None:
@@ -793,11 +847,11 @@ class PostgresDatabase(Database):
             try:
                 async with con.cursor() as cur:
                     yield cur
-            except errors.OperationalError as e:
+            except errors.OperationalError:
                 # If we get an operational error check the pool
                 await self.connection_pool.check()
-                raise e
-            except errors.DatabaseError as e:
+                raise
+            except errors.DatabaseError:
                 if con is not None:
                     await con.rollback()
-                raise e
+                raise

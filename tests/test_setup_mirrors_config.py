@@ -3,7 +3,7 @@
 import pytest
 import yaml
 
-from skylon_set import setup_mirrors
+from telemirror.tasks import setup_mirrors
 
 
 def test_write_directions_preserves_other_keys_and_backs_up(tmp_path):

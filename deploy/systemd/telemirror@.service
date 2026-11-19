@@ -17,7 +17,7 @@ StartLimitBurst=15
 OnFailure=telemirror-alert@%n.service
 
 [Service]
-# Type=notify + WatchdogSec: main.py sends READY=1 after login and WATCHDOG=1
+# Type=notify + WatchdogSec: telemirror.live sends READY=1 after login and WATCHDOG=1
 # while the client is connected. Hung / disconnected longer than WatchdogSec
 # → systemd kills and restarts it (Restart=always wouldn't see this on its
 # own — the process is alive).
@@ -31,7 +31,7 @@ TimeoutStartSec=300
 WorkingDirectory=/root/telemirror
 # projects/%i/project.yml: session, mirror config, health port.
 Environment=TELEMIRROR_PROJECT=%i
-ExecStart=/root/telemirror/.venv/bin/python -u main.py
+ExecStart=/root/telemirror/.venv/bin/python -u -m telemirror.live
 Restart=always
 RestartSec=10
 # Exponential backoff 10s → 120s; retries are unlimited within the burst

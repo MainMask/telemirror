@@ -11,8 +11,8 @@ import logging
 
 from telethon.tl import types
 
-import past_mode
-from config import DirectionConfig, PastModeConfig
+from telemirror import past as past_mode
+from telemirror.directions import DirectionConfig, PastModeConfig
 from telemirror.messagefilters import EmptyMessageFilter, MediaDownloadError
 from telemirror.storage import InMemoryDatabase
 from tests.conftest import run
@@ -80,7 +80,7 @@ def test_give_up_on_stuck_album_advances_checkpoint_past_whole_album(monkeypatch
 
     notified = []
 
-    async def fake_notify(client, src, mid, log):
+    async def fake_notify(src, mid, log):
         notified.append(mid)
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)

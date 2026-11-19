@@ -1,5 +1,6 @@
-"""L5: a DM sender's display name is attacker-controlled and must be collapsed /
-capped before it goes into the tech channel."""
+"""A private message to the account is reported to the panel's admins; the
+sender's display name is attacker-controlled and must be collapsed / capped
+(the notice is plain text — see test_notify for no markup)."""
 
 import logging
 
@@ -14,103 +15,63 @@ class FakeClient:
         pass
 
 
-class FakeSender:
+class FakeNotifier:
     def __init__(self):
         self.sent = []
-        self.kwargs = []
 
-    async def send_message(self, channel, text, **kw):
-        self.sent.append((channel, text))
-        self.kwargs.append(kw)
+    async def send(self, body):
+        self.sent.append(body)
+        return True
 
 
-def _handlers(sender):
-    return EventHandlers(
-        client=FakeClient(),
-        chats=[],
-        processor=object(),
-        sender=sender,
-        tech_channel=-100999,
-    )
+def _event(user):
+    class Event:
+        async def get_sender(self):
+            return user
+    return Event()
 
 
 def test_sender_name_is_sanitized():
-    sender = FakeSender()
-    h = _handlers(sender)
-
+    notifier = FakeNotifier()
+    h = EventHandlers(client=FakeClient(), chats=[], processor=object(), notifier=notifier)
     user = types.User(
         id=1, first_name="evil\n\n\n💥 FAKE ALERT " + "x" * 500, last_name=None,
         username="mallory",
     )
-
-    class Event:
-        async def get_sender(self):
-            return user
-
-    run(h.on_private_message(Event()))
-
-    (_, text) = sender.sent[0]
+    run(h.on_private_message(_event(user)))
+    (text,) = notifier.sent
+    assert text.startswith("📩 Аккаунту написали в личку:")
     assert "\n" not in text
     assert "@mallory" in text
     assert len(text) < 200  # capped, not a 500-char blob
 
 
+def test_no_notifier_no_private_message_handler():
+    added = []
+
+    class Recording(FakeClient):
+        def add_event_handler(self, callback, *a, **kw):
+            added.append(callback.__name__)
+
+    EventHandlers(client=Recording(), chats=[], processor=object())
+    assert "on_private_message" not in added
+
+
 def test_notification_failure_is_logged_not_left_unhandled(caplog):
     """Unlike every other event handler in this module (all routed through
-    EventProcessor.__handle_exceptions or an explicit try/except),
-    on_private_message had no error handling at all — a failure notifying
-    TECH_CHANNEL (e.g. FloodWait, bot removed from the channel) must be
-    logged through the same logger the rest of the module uses, not left to
-    propagate into Telethon's own default per-handler logging (a different
-    logger, never reaching TECH_CHANNEL via TelegramLogHandler)."""
+    EventProcessor.__handle_exceptions or an explicit try/except), a failure
+    here must be logged through the same logger the rest of the module uses,
+    not left to propagate into Telethon's own default per-handler logging."""
 
-    class FailingSender:
-        async def send_message(self, channel, text, **kw):
+    class FailingNotifier:
+        async def send(self, body):
             raise RuntimeError("boom")
 
     class ProcessorStub:
         logger = logging.getLogger("test.on_private_message")
 
-    h = EventHandlers(
-        client=FakeClient(),
-        chats=[],
-        processor=ProcessorStub(),
-        sender=FailingSender(),
-        tech_channel=-100999,
-    )
-
+    h = EventHandlers(client=FakeClient(), chats=[], processor=ProcessorStub(), notifier=FailingNotifier())
     user = types.User(id=1, first_name="X", last_name=None, username=None)
-
-    class Event:
-        async def get_sender(self):
-            return user
-
     with caplog.at_level(logging.ERROR, logger="test.on_private_message"):
-        run(h.on_private_message(Event()))  # must not raise
-
-    assert any(
-        "private message" in r.message.lower() and "boom" in r.message
-        for r in caplog.records
-    )
-
-
-def test_sender_name_is_not_markdown_parsed():
-    """The display name is sender-controlled: sent through the client's
-    markdown parse_mode, `[Support](https://evil.example)` would render in
-    TECH_CHANNEL as "Support" with a hidden link."""
-    sender = FakeSender()
-    h = _handlers(sender)
-    user = types.User(
-        id=1, first_name="[Support](https://evil.example)", last_name=None,
-        username=None,
-    )
-
-    class Event:
-        async def get_sender(self):
-            return user
-
-    run(h.on_private_message(Event()))
-
-    (_, text) = sender.sent[0]
-    assert "[Support](https://evil.example)" in text
-    assert sender.kwargs[0].get("parse_mode", ()) is None
+        run(h.on_private_message(_event(user)))  # must not raise
+    assert any("private message" in r.message.lower() and "boom" in r.message for r in caplog.records)

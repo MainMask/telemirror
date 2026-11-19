@@ -1,5 +1,5 @@
 """telemirror.projects: projects = independent mirrors (projects/<key>/project.yml);
-config.py's TELEMIRROR_PROJECT picks one's session, mirror config and port."""
+telemirror.config's TELEMIRROR_PROJECT picks one's session, mirror config and port."""
 
 import json
 import os
@@ -133,7 +133,7 @@ def test_migrate_turns_a_session_string_into_a_jsession(pdir, monkeypatch):
 
 
 def test_config_runs_as_a_project(tmp_path):
-    """config.py with TELEMIRROR_PROJECT: session, mirror config and port all
+    """telemirror.config with TELEMIRROR_PROJECT: session, mirror config and port all
     come from the project — not from SESSION_FILE / .configs / PORT."""
     pdir = tmp_path / "projects"
     session = tmp_path / "s.jsession"
@@ -149,23 +149,20 @@ def test_config_runs_as_a_project(tmp_path):
     }, allow_unicode=True))
     env = {k: v for k, v in os.environ.items()
            if k not in ("API_ID", "API_HASH", "SESSION_STRING", "SESSION_FILE", "PORT")}
-    env.update(
-        TELEMIRROR_PROJECT="demo", TELEMIRROR_PROJECTS_DIR=str(pdir),
-        USE_MEMORY_DB="true", YAML_CONFIG_ENV="directions: []",
-    )
+    env.update(TELEMIRROR_PROJECT="demo", TELEMIRROR_PROJECTS_DIR=str(pdir), USE_MEMORY_DB="true")
     out = subprocess.run(
         [sys.executable, "-c", (
-            "import json, config as c; print(json.dumps([c.SESSION_STRING, c.API_ID, "
-            "c.PORT, sorted(c.CHAT_MAPPING), c.YAML_CONFIG_ENV]))"
+            "import json; from telemirror import config as c; print(json.dumps([c.SESSION_STRING, "
+            "c.API_ID, c.PORT, sorted(c.CHAT_MAPPING)]))"
         )],
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=True,
     ).stdout
-    assert json.loads(out.strip().splitlines()[-1]) == ["1PROJ", 2040, 8123, [-1001], None]
+    assert json.loads(out.strip().splitlines()[-1]) == ["1PROJ", 2040, 8123, [-1001]]
 
 
 def test_a_project_without_its_config_file_refuses_to_start(tmp_path):
-    """No fallback to .env's CHAT_MAPPING (another mirror's mapping) when the
-    project's own config file is missing."""
+    """No fallback to ./.configs/mirror.config.yml (another mirror's config)
+    when the project's own config file is missing."""
     pdir = tmp_path / "projects"
     session = tmp_path / "s.jsession"
     me = type("Me", (), {"first_name": "T", "last_name": None, "id": 1, "phone": "7", "username": None})
@@ -174,10 +171,21 @@ def test_a_project_without_its_config_file_refuses_to_start(tmp_path):
     (pdir / "demo" / "project.yml").write_text(yaml.safe_dump({
         "name": "Демо", "session": str(session), "config": str(pdir / "demo" / "gone.yml"), "port": 8123,
     }, allow_unicode=True))
-    env = {k: v for k, v in os.environ.items() if k not in ("SESSION_FILE", "PORT", "YAML_CONFIG_ENV")}
-    env.update(TELEMIRROR_PROJECT="demo", TELEMIRROR_PROJECTS_DIR=str(pdir), USE_MEMORY_DB="true",
-               CHAT_MAPPING="[-1001:-1002]")
-    out = subprocess.run([sys.executable, "-c", "import config"], cwd=REPO_ROOT, env=env,
+    env = {k: v for k, v in os.environ.items() if k not in ("SESSION_FILE", "PORT")}
+    env.update(TELEMIRROR_PROJECT="demo", TELEMIRROR_PROJECTS_DIR=str(pdir), USE_MEMORY_DB="true")
+    out = subprocess.run([sys.executable, "-c", "import telemirror.config"], cwd=REPO_ROOT, env=env,
                          capture_output=True, text=True)
     assert out.returncode != 0
     assert "ProjectError" in out.stderr and "gone.yml not found" in out.stderr
+
+
+def test_chat_names_merge_and_survive_a_broken_file(pdir):
+    p = projects.create_project("Новости", "📰", "sessions/a.jsession")
+    assert projects.load_chat_names(p.key) == {}
+    projects.save_chat_names(p.key, {-1001: "Первый", -1002: ""})  # an empty title isn't kept
+    projects.save_chat_names(p.key, {-1003: "Третий", -1001: "Первый (новое имя)"})
+    assert projects.load_chat_names(p.key) == {-1001: "Первый (новое имя)", -1003: "Третий"}
+    projects.chat_names_path(p.key).write_text("{broken", encoding="utf-8")
+    assert projects.load_chat_names(p.key) == {}
+    projects.save_chat_names("gone", {-1001: "x"})  # no such project: nothing written
+    assert not (pdir / "projects" / "gone").exists()

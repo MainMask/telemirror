@@ -6,8 +6,8 @@ backfill topics after a FloodWait abort, so re-runs must not duplicate.
 
 import pytest
 
-import skylon_set._common as common
-from skylon_set import setup_mirrors as sm
+import telemirror.tasks._common as common
+from telemirror.tasks import setup_mirrors as sm
 from tests.conftest import run
 
 

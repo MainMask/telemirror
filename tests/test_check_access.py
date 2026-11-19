@@ -6,8 +6,8 @@ import types as _t
 
 from telethon.tl.types import ChatAdminRights, ChatBannedRights
 
-from config import DirectionConfig
-from skylon_set import check_access
+from telemirror.directions import DirectionConfig
+from telemirror.tasks import check_access
 from telemirror.messagefilters import EmptyMessageFilter
 
 
@@ -22,11 +22,10 @@ def _chat(**kw):
     return _t.SimpleNamespace(**base)
 
 
-def test_roles_cover_sources_targets_broadcast_and_tech():
+def test_roles_cover_sources_targets_and_broadcast():
     mapping = {-1001: {-9001: [_cfg()]}, -1777: {-9001: [_cfg()], -9002: [_cfg()]}}
-    roles = check_access.collect_roles(mapping, broadcast=-1777, tech=-5555)
-    assert roles == {-1001: {"source"}, -1777: {"broadcast"}, -9001: {"target"}, -9002: {"target"},
-                     -5555: {"tech"}}
+    roles = check_access.collect_roles(mapping, broadcast=-1777)
+    assert roles == {-1001: {"source"}, -1777: {"broadcast"}, -9001: {"target"}, -9002: {"target"}}
 
 
 def test_can_post():

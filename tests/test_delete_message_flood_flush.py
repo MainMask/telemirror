@@ -20,7 +20,7 @@ import logging
 
 from telethon import errors
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase, MirrorMessage
@@ -54,8 +54,8 @@ def test_fully_completed_message_is_purged_even_when_another_channel_floods():
     """original_id 100 lives only in TARGET_A (successfully deleted); 200 lives
     only in TARGET_B (floods) — 100 must be purged, 200 must not."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
-    run(db.insert(MirrorMessage(200, SOURCE, 9000, TARGET_B)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
+    run(db.insert_batch([MirrorMessage(200, SOURCE, 9000, TARGET_B)]))
 
     client = _PartialFloodClient()
     proc = EventProcessor(
@@ -78,8 +78,8 @@ def test_flooded_channels_row_survives_while_succeeded_channels_purge():
     untouched on Telegram when the flood hits, so its DB row must survive for
     a future retry to find it."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
-    run(db.insert(MirrorMessage(100, SOURCE, 9000, TARGET_B)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 9000, TARGET_B)]))
 
     client = _PartialFloodClient()
     proc = EventProcessor(
@@ -106,8 +106,8 @@ def test_channel_missing_from_chat_mapping_keeps_its_row_while_others_purge():
     purged: TARGET_B's row is still the only record of that still-live
     mirror."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
-    run(db.insert(MirrorMessage(100, SOURCE, 9000, TARGET_B)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 9000, TARGET_B)]))
 
     class _SucceedsClient:
         async def delete_messages(self, entity, message_ids):
@@ -131,8 +131,8 @@ def test_disable_delete_channel_keeps_its_row_while_others_purge():
     mirror is intentionally kept forever, so its row must survive even though
     TARGET_A's delete succeeds and is purged."""
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
-    run(db.insert(MirrorMessage(100, SOURCE, 9000, TARGET_B)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 9000, TARGET_B)]))
 
     class _SucceedsClient:
         async def delete_messages(self, entity, message_ids):
@@ -167,8 +167,8 @@ class _FailingPurgeDB(InMemoryDatabase):
 
 def test_purge_db_failure_is_logged_and_does_not_raise():
     db = run(_FailingPurgeDB())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
-    run(db.insert(MirrorMessage(200, SOURCE, 9000, TARGET_B)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
+    run(db.insert_batch([MirrorMessage(200, SOURCE, 9000, TARGET_B)]))
 
     client = _PartialFloodClient()
     proc = EventProcessor(

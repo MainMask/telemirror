@@ -3,7 +3,7 @@ source messages (not the last target's mirror ids)."""
 
 import logging
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase, MirrorMessage
@@ -42,8 +42,8 @@ def _processor(db, mapping):
 def test_delete_removes_db_mapping_for_all_targets():
     db = run(InMemoryDatabase())
     # source msg 100 mirrored to two targets with different mirror ids
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
-    run(db.insert(MirrorMessage(100, SOURCE, 9000, TARGET_B)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 9000, TARGET_B)]))
 
     mapping = {SOURCE: {TARGET_A: [_direction()], TARGET_B: [_direction()]}}
     proc = _processor(db, mapping)
@@ -58,7 +58,7 @@ def test_delete_removes_db_mapping_for_all_targets():
 
 def test_delete_skips_db_purge_when_all_disabled():
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET_A)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET_A)]))
     mapping = {SOURCE: {TARGET_A: [_direction(disable_delete=True)]}}
     proc = _processor(db, mapping)
 

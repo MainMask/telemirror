@@ -1,21 +1,34 @@
-"""Pytest session defaults so ``import config`` succeeds on a fresh checkout / CI.
+"""Pytest session defaults: the tests run as a throwaway project, so
+``telemirror.config`` imports on a fresh checkout / CI and never reads the
+developer's real mirror config or database.
 
-``config.py`` reads required settings (``API_ID`` etc.) with no fallback, so any
-test that imports it — directly or via ``telemirror`` / ``past_mode`` — needs them
-present. These placeholders are applied ONLY when there is no local ``.env``; a
-developer's real ``.env`` always wins (python-decouple checks ``os.environ`` before
-the file, so we must not set anything when a real config exists).
+A minimal project (a placeholder ``.jsession`` and a one-direction config) is
+written to a temp dir and selected through ``TELEMIRROR_PROJECTS_DIR`` /
+``TELEMIRROR_PROJECT``; python-decouple reads ``os.environ`` before ``.env``,
+so these win over a local ``.env``. Subprocess tests inherit them.
 """
 
+import json
 import os
+import tempfile
 from pathlib import Path
 
-if not (Path(__file__).parent / ".env").exists():
-    os.environ.setdefault("API_ID", "12345")
-    os.environ.setdefault("API_HASH", "test")
-    os.environ.setdefault("SESSION_STRING", "test")
-    os.environ.setdefault("USE_MEMORY_DB", "true")
-    # Overrides ./.configs/mirror.config.yml so tests don't depend on the live config.
-    os.environ.setdefault(
-        "YAML_CONFIG_ENV", "directions:\n  - from: [-1001]\n    to: [-1002]\n"
-    )
+_root = Path(tempfile.mkdtemp(prefix="telemirror-tests-"))
+(_root / "test").mkdir()
+(_root / "test.jsession").write_text(
+    json.dumps({"auth_key": "test", "application": {"api_id": 12345, "api_hash": "test"}}),
+    encoding="utf-8",
+)
+(_root / "test" / "mirror.config.yml").write_text(
+    "directions:\n  - from: [-1001]\n    to: [-1002]\n", encoding="utf-8"
+)
+(_root / "test" / "project.yml").write_text(
+    json.dumps({
+        "name": "Test", "session": str(_root / "test.jsession"),
+        "config": str(_root / "test" / "mirror.config.yml"), "port": 8000,
+    }),
+    encoding="utf-8",
+)
+os.environ.update(
+    TELEMIRROR_PROJECTS_DIR=str(_root), TELEMIRROR_PROJECT="test", USE_MEMORY_DB="true",
+)

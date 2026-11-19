@@ -2,7 +2,7 @@
 
 import logging
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase

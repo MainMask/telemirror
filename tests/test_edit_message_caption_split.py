@@ -9,7 +9,7 @@ import logging
 from telethon import errors
 from telethon.tl import types
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase, MirrorMessage
@@ -50,7 +50,7 @@ def _photo():
 
 def _processor(client):
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET)]))
     return EventProcessor(
         chat_mapping={
             SOURCE: {
@@ -128,10 +128,10 @@ def test_too_long_caption_edit_without_media_change_sends_nothing_more(caplog):
     """Pass 22 self-review: with the source media unchanged (pass 22 sends no
     `file=`), re-editing the mirror with its own current caption changes
     nothing — it only drew a MessageNotModifiedError and a second WARNING to
-    the tech channel on every edit of such a post."""
+    the admins on every edit of such a post."""
     client = _TelegramLikeClient()
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET, source_media_id=1)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET, source_media_id=1)]))
     proc = EventProcessor(
         chat_mapping={
             SOURCE: {
@@ -172,7 +172,7 @@ def test_deleted_mirror_gets_no_keeping_caption_warning(caplog):
 
     client = _DeletedMirrorClient()
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET, source_media_id=4)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET, source_media_id=4)]))
     proc = EventProcessor(
         chat_mapping={
             SOURCE: {

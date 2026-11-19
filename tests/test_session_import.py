@@ -1,5 +1,5 @@
 """Accounts from other tools' files (telemirror/misc/session_import.py, the
-panel's 📤 Загрузить сессию and `login.py --import`): a Telethon .session with
+panel's 📤 Загрузить сессию and `python -m telemirror.login --import`): a Telethon .session with
 its seller's .json, a Telegram Desktop tdata — checked by connecting, saved as
 a .jsession; one account per import."""
 
@@ -121,6 +121,18 @@ def test_a_session_without_a_key_is_refused(tmp_path):
         si.read_session_key(str(tmp_path / "b.session"))
 
 
+def test_a_file_that_is_not_sqlite_is_refused_before_sqlite_opens_it(tmp_path, monkeypatch):
+    """SQLiteSession on such a file fails with its sqlite3 connection left open
+    (nothing to close it on): the header is checked first."""
+    def no_sqlite(path):
+        raise AssertionError("SQLiteSession opened a file that isn't SQLite")
+
+    monkeypatch.setattr(si, "SQLiteSession", no_sqlite)
+    (tmp_path / "b.session").write_bytes(b"not sqlite at all")
+    with pytest.raises(si.SessionImportError, match="не читается: это не база SQLite"):
+        si.read_session_key(str(tmp_path / "b.session"))
+
+
 def test_a_key_already_saved_is_not_connected_again(tmp_path, fake):
     out = tmp_path / "sessions"
     _session_file(tmp_path / "a.session")
@@ -143,7 +155,7 @@ def test_a_zip_of_a_session_and_its_json(tmp_path, fake):
 
 
 def test_the_cli_imports_a_session_file(tmp_path, fake, monkeypatch):
-    import login
+    from telemirror import login
 
     monkeypatch.setattr(login, "SESSIONS_DIR", tmp_path / "repo" / "sessions")
     monkeypatch.setattr(login, "REPO_DIR", tmp_path / "repo")

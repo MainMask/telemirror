@@ -1,9 +1,12 @@
+import inspect
 from typing import List, Optional
 
 from telethon import types, utils
 
 from .hints import EventAlbumMessage, EventMessage
 from .misc.links import private_message_link
+
+_MESSAGE_FIELDS = tuple(inspect.signature(EventMessage.__init__).parameters)[1:]  # without self
 
 
 class MappedChannelName:
@@ -47,41 +50,13 @@ class CopyEventMessage:
         """
         from copy import deepcopy
 
-        cloned = EventMessage(
-            id=message.id,
-            peer_id=message.peer_id,
-            date=message.date,
-            out=message.out,
-            mentioned=message.mentioned,
-            media_unread=message.media_unread,
-            silent=message.silent,
-            post=message.post,
-            from_id=message.from_id,
-            reply_to=message.reply_to,
-            ttl_period=message.ttl_period,
-            message=message.message,
-            fwd_from=message.fwd_from,
-            via_bot_id=message.via_bot_id,
-            media=deepcopy(message.media),
-            reply_markup=message.reply_markup,
-            entities=deepcopy(message.entities),
-            views=message.views,
-            edit_date=message.edit_date,
-            post_author=message.post_author,
-            grouped_id=message.grouped_id,
-            from_scheduled=message.from_scheduled,
-            legacy=message.legacy,
-            edit_hide=message.edit_hide,
-            pinned=message.pinned,
-            noforwards=message.noforwards,
-            reactions=message.reactions,
-            restriction_reason=message.restriction_reason,
-            forwards=message.forwards,
-            replies=message.replies,
-            action=message.action,
-            invert_media=message.invert_media,
-            effect=message.effect,
-        )
+        # Every field the constructor takes, so one Telethon adds isn't lost
+        # (a fixed list missed offline, factcheck, rich_message…).
+        cloned = EventMessage(**{
+            field: deepcopy(getattr(message, field, None)) if field in ("media", "entities")
+            else getattr(message, field, None)
+            for field in _MESSAGE_FIELDS
+        })
         cloned._chat = message._chat
         cloned._client = message._client
         return cloned

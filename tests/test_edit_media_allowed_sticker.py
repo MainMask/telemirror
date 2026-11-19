@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from telethon.tl import types
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import (
     EmptyMessageFilter,
     RestrictSavingContentBypassFilter,

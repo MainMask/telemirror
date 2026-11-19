@@ -25,6 +25,8 @@ for unit in \
     telemirror-restart.timer \
     telemirror-health.service \
     telemirror-health.timer \
+    telemirror-report.service \
+    telemirror-report.timer \
     telemirror-panel.service; do
     ln -sfn "$REPO_DIR/deploy/systemd/$unit" "/etc/systemd/system/$unit"
     echo "  /etc/systemd/system/$unit -> $REPO_DIR/deploy/systemd/$unit"
@@ -60,8 +62,8 @@ echo "  /etc/cron.d/telemirror-tmp"
 echo
 echo "== 5/5 daemon-reload + timers =="
 systemctl daemon-reload
-systemctl enable --now telemirror-restart.timer telemirror-health.timer
-echo "  telemirror-restart.timer, telemirror-health.timer enabled and started"
+systemctl enable --now telemirror-restart.timer telemirror-health.timer telemirror-report.timer
+echo "  telemirror-restart.timer, telemirror-health.timer, telemirror-report.timer enabled and started"
 
 cat <<'EOF'
 
@@ -76,6 +78,9 @@ Done. Units are installed but NOT started. Next, by hand:
   # or by hand, for a project <key>:
   systemctl enable --now telemirror@<key>.service
   journalctl -u telemirror@<key>.service -f
+
+  # then check the whole installation (or ⚙️ Настройки → 🧾 Проверка установки):
+  .venv/bin/python -m telemirror.selfcheck
 
 Details — deploy/README.md
 EOF

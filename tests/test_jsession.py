@@ -1,18 +1,17 @@
-"""login.py writes `<phone>.jsession` files (the owner's cross-project session
-format); config.py's SESSION_FILE reads the session and client fingerprint
-back from one."""
+"""telemirror.login writes `<phone>.jsession` files (the owner's cross-project
+session format); telemirror.config reads the session and client fingerprint
+back from a project's one."""
 
 import json
 import os
 import stat
-import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from telemirror.misc.jsession import TDESKTOP_APP, load_jsession, save_jsession
+from tests.conftest import import_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -81,34 +80,21 @@ def test_load_rejects_incomplete_file_naming_the_path(tmp_path, content):
         load_jsession(str(path))
 
 
-def _config_values(session_file: str, cwd: Path) -> list:
-    """Import config.py in a fresh interpreter (it resolves everything at
-    import time) with SESSION_FILE set and no API_ID/API_HASH/SESSION_STRING."""
-    env = {
-        k: v for k, v in os.environ.items()
-        if k not in ("API_ID", "API_HASH", "SESSION_STRING")
-    }
-    env.update(
-        SESSION_FILE=session_file,
-        USE_MEMORY_DB="true",
-        YAML_CONFIG_ENV="directions:\n  - from: [-1001]\n    to: [-1002]\n",
-        PYTHONPATH=str(REPO_ROOT),
-    )
-    out = subprocess.run(
-        [sys.executable, "-c", (
-            "import json, config as c; print(json.dumps([c.SESSION_STRING, c.API_ID, "
-            "c.API_HASH, c.API_DEVICE_MODEL, c.API_SYSTEM_VERSION, c.API_APP_VERSION, "
-            "c.API_LANG_PACK, c.API_SYSTEM_LANG_CODE]))"
-        )],
-        cwd=cwd, env=env, capture_output=True, text=True, check=True,
-    ).stdout
-    return json.loads(out.strip().splitlines()[-1])
+def _config_values(tmp_path: Path, session_file: str, cwd: Path) -> list:
+    """The account settings telemirror.config reads from a project's session."""
+    out = import_config(tmp_path, (
+        "import json; from telemirror import config as c; print(json.dumps([c.SESSION_STRING, c.API_ID, "
+        "c.API_HASH, c.API_DEVICE_MODEL, c.API_SYSTEM_VERSION, c.API_APP_VERSION, "
+        "c.API_LANG_PACK, c.API_SYSTEM_LANG_CODE]))"
+    ), session=session_file, cwd=cwd)
+    assert out.returncode == 0, out.stderr[-500:]
+    return json.loads(out.stdout.strip().splitlines()[-1])
 
 
 def test_config_takes_session_and_fingerprint_from_session_file(tmp_path):
     path = tmp_path / "s.jsession"
     save_jsession(str(path), "1AAAA", ME, TDESKTOP_APP)
-    assert _config_values(str(path), cwd=REPO_ROOT) == [
+    assert _config_values(tmp_path, str(path), cwd=REPO_ROOT) == [
         "1AAAA", 2040, TDESKTOP_APP["api_hash"], "PC 64bit",
         "Linux dwm X11 glibc 2.32", "3.7.3 x64", "tdesktop", "cs",
     ]
@@ -120,4 +106,4 @@ def test_relative_session_file_resolves_from_repo_root_not_cwd(tmp_path):
     relative = os.path.relpath(path, REPO_ROOT)
     other_cwd = tmp_path / "elsewhere"
     other_cwd.mkdir()
-    assert _config_values(relative, cwd=other_cwd)[0] == "1AAAA"
+    assert _config_values(tmp_path, relative, cwd=other_cwd)[0] == "1AAAA"

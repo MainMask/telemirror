@@ -9,8 +9,8 @@ import types as _t
 
 import pytest
 
-from config import DirectionConfig
-from skylon_set import clear_channels
+from telemirror.directions import DirectionConfig
+from telemirror.tasks import clear_channels
 from telemirror.messagefilters import EmptyMessageFilter
 from tests.conftest import run
 
@@ -73,7 +73,7 @@ class _FakeClient:
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    import skylon_set._common as common
+    import telemirror.tasks._common as common
 
     async def _noop(*_a, **_kw):
         pass
@@ -119,12 +119,12 @@ def test_run_only_resets_db_state_for_successfully_cleared_channels(monkeypatch)
         reset_calls.append(dict(cleared_targets))
 
     @contextlib.asynccontextmanager
-    async def fake_open_client(logger, **kw):
+    async def fake_open_account(logger, **kw):
         yield (object(), object())
 
     monkeypatch.setattr(clear_channels, "purge", fake_purge)
     monkeypatch.setattr(clear_channels, "_reset_db_state", fake_reset_db_state)
-    monkeypatch.setattr(clear_channels, "open_client", fake_open_client)
+    monkeypatch.setattr(clear_channels, "open_account", fake_open_account)
 
     # dry_run=True: purge() still runs (and can still fail) without the
     # interactive y/N confirmation prompt blocking the test on stdin.
@@ -149,10 +149,10 @@ def test_reset_db_state_resets_broadcast_sync_only_for_broadcast_targets(
     mapping = {bc: {bc_target: [_cfg()]}, -1001: {other_target: [_cfg()]}}
     monkeypatch.setattr(clear_channels, "CHAT_MAPPING", mapping)
     monkeypatch.setattr(clear_channels, "BROADCAST_CHANNEL", bc)
-    monkeypatch.setattr(clear_channels, "USE_MEMORY_DB", False)
+    monkeypatch.setattr(clear_channels, "DB_URL", "postgres://test")
 
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(1, bc, 501, bc_target)))
+    run(db.insert_batch([MirrorMessage(1, bc, 501, bc_target)]))
     run(db.set_broadcast_sync(bc, 1, None))
     run(db.set_broadcast_sync(bc, 2, 1700000000))
 
@@ -197,13 +197,13 @@ def test_yes_skips_the_prompt_without_it_a_no_cancels(monkeypatch, assume_yes, a
         pass
 
     @contextlib.asynccontextmanager
-    async def fake_open_client(logger, **kw):
+    async def fake_open_account(logger, **kw):
         yield (object(), object())
 
     monkeypatch.setattr("builtins.input", fake_input)
     monkeypatch.setattr(clear_channels, "purge", fake_purge)
     monkeypatch.setattr(clear_channels, "_reset_db_state", fake_reset_db_state)
-    monkeypatch.setattr(clear_channels, "open_client", fake_open_client)
+    monkeypatch.setattr(clear_channels, "open_account", fake_open_account)
 
     run(clear_channels._run(logging.getLogger("t"), False, assume_yes))
 

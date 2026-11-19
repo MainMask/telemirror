@@ -6,7 +6,8 @@ Description=telemirror — alert that %i entered failed state
 Type=oneshot
 WorkingDirectory=/root/telemirror
 ExecStart=/root/telemirror/.venv/bin/python -m telemirror.alert %i
-TimeoutStartSec=60
+# Budget: journalctl 10 s + 20 s per admin (sent one by one) + Python start-up.
+TimeoutStartSec=120
 NoNewPrivileges=true
 ProtectSystem=full
 Nice=10

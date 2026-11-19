@@ -78,6 +78,11 @@ def read_session_key(path: str) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         copy = os.path.join(tmp, "account.session")
         shutil.copyfile(path, copy)
+        with open(copy, "rb") as f:
+            # Not SQLite at all: refused here — SQLiteSession would fail with
+            # its sqlite3 connection left open (never closed: no object to close).
+            if f.read(16) != b"SQLite format 3\x00":
+                raise SessionImportError("файл .session не читается: это не база SQLite")
         try:
             session = SQLiteSession(copy)
         except Exception as e:  # noqa: BLE001 - sqlite3.DatabaseError and the like

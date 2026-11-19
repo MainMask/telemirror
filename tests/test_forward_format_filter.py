@@ -91,3 +91,55 @@ def test_header_entity_after_the_body_still_shifts():
         )
     )
     assert [entity_text(out, e) for e in out.entities] == ["Forwarded"]
+
+
+class _AlbumClient:
+    """The source album as Telegram has it now: id → (grouped_id, caption)."""
+
+    def __init__(self, items):
+        self.items = items
+
+    async def get_messages(self, chat, ids):
+        from telethon.tl import types
+
+        return [types.Message(id=i, peer_id=types.PeerChannel(1000), message=self.items[i][1],
+                              grouped_id=self.items[i][0]) if i in self.items else None for i in ids]
+
+
+def _edited_item(mid, client):
+    msg = make_message("")
+    msg.id, msg.grouped_id, msg._client = mid, 5, client
+    return msg
+
+
+def test_an_edit_of_the_album_item_that_got_the_header_keeps_it():
+    """A caption-less album: the header went to its first item at send time —
+    an edit of that item (a media change) must not erase it."""
+    f = ForwardFormatFilter(format="{message_text}\n\nvia Donor")
+    client = _AlbumClient({10: (5, ""), 11: (5, ""), 12: (7, "another post")})
+    _, first = run(f._process_message(_edited_item(10, client), events.MessageEdited.Event))
+    assert first.message == "\n\nvia Donor"
+    _, second = run(f._process_message(_edited_item(11, client), events.MessageEdited.Event))
+    assert second.message == ""  # never had it
+
+
+def test_an_edit_of_an_empty_item_of_a_captioned_album_stays_empty():
+    """The header went to the captioned item: the empty one must not get a second."""
+    f = ForwardFormatFilter(format="{message_text}\n\nvia Donor")
+    client = _AlbumClient({10: (5, ""), 11: (5, "caption")})
+    _, res = run(f._process_message(_edited_item(10, client), events.MessageEdited.Event))
+    assert res.message == ""
+
+
+def test_an_edit_among_a_channels_first_posts_asks_for_existing_ids_only():
+    """Ids start at 1: the album item 3 asks for 1…12, not for 0 and below."""
+    asked = []
+
+    class _Client(_AlbumClient):
+        async def get_messages(self, chat, ids):
+            asked.extend(ids)
+            return await super().get_messages(chat, ids)
+
+    f = ForwardFormatFilter(format="{message_text}\n\nvia Donor")
+    _, res = run(f._process_message(_edited_item(3, _Client({3: (5, ""), 4: (5, "")})), events.MessageEdited.Event))
+    assert min(asked) == 1 and res.message == "\n\nvia Donor"

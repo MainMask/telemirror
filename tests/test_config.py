@@ -2,9 +2,7 @@ import datetime
 
 import pytest
 
-from config import (
-    DirectionConfig,
-    PastModeConfig,
+from telemirror.config import (
     _channel_id,
     _parse_chat_topic,
     _validate_forward_filters,
@@ -18,8 +16,11 @@ from telemirror.messagefilters import (
     KeywordReplaceFilter,
     RestrictSavingContentBypassFilter,
     SkipWithKeywordsFilter,
+    StripFooterFilter,
     WatermarkRemovalFilter,
 )
+from telemirror.directions import DirectionConfig, PastModeConfig
+from tests.conftest import ONE_DIRECTION, import_config
 
 
 @pytest.mark.parametrize("unset", [None, "", "0", "  ", " 0 "])
@@ -62,9 +63,8 @@ def test_past_mode_since_date_coercion():
         assert cfg.since_date == expected
 
 
-def test_parse_chat_topic_shared_by_yaml_and_env_branches():
-    """Extracted from duplicated YAML/env parsing (Phase 4 DRY cleanup) — both
-    branches must keep exactly this behavior: plain id -> (id, None), a
+def test_parse_chat_topic():
+    """Shared by directions and broadcast_targets: plain id -> (id, None), a
     '#'-suffixed string -> (id, topic_id), and a YAML-native int passes
     through unchanged (no '#' possible on a non-string)."""
     assert _parse_chat_topic("-1001234") == (-1001234, None)
@@ -101,6 +101,8 @@ def test_validate_forward_filters_rejects_content_mutating_filter():
         )
     with pytest.raises(ValueError, match="WatermarkRemovalFilter"):
         _validate_forward_filters(WatermarkRemovalFilter(), "forward", "src->dst")
+    with pytest.raises(ValueError, match="StripFooterFilter"):
+        _validate_forward_filters(StripFooterFilter(), "forward", "src->dst")
 
 
 def test_validate_forward_filters_checks_inside_composite():
@@ -193,7 +195,7 @@ def test_validate_watermark_filter_order_rejects_in_scope_source_after_consuming
 
 def test_validate_watermark_filter_order_allows_out_of_scope_source_after_consuming_filter():
     """A multi-source direction reuses the same filter list for every source
-    (see config.py's build loop) — a channel-scoped WatermarkRemovalFilter
+    (see telemirror.config's build loop) — a channel-scoped WatermarkRemovalFilter
     that never processes THIS source is a no-op for it at runtime
     (watermarkfilter.py's `_process_message`), so a consuming filter before
     it is not a hazard for this source, regardless of filter order."""
@@ -213,18 +215,12 @@ def test_direction_config_defaults():
     assert "mode: copy" in repr(d)
 
 
-def test_direction_level_filters_are_built_once_per_direction():
+def test_direction_level_filters_are_built_once_per_direction(tmp_path):
     """A direction with its own `filters:` must share ONE filter instance across
     all its source/target pairs — the same way `default_filters` is shared —
     or each pair gets its own ReuploadCache and the same media is downloaded
-    and re-encoded once per target. Run in a subprocess: config.py builds
-    CHAT_MAPPING at import time, and reloading it here would redefine
-    DirectionConfig under every other test."""
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-
+    and re-encoded once per target. Run in a subprocess: config builds
+    CHAT_MAPPING at import time."""
     yaml_cfg = (
         "directions:\n"
         "  - from: [-1001, -1002]\n"
@@ -234,15 +230,53 @@ def test_direction_level_filters_are_built_once_per_direction():
         "          keywords: [foo]\n"
     )
     probe = (
-        "from config import CHAT_MAPPING\n"
+        "from telemirror.config import CHAT_MAPPING\n"
         "ids = {id(c.filters) for t in CHAT_MAPPING.values()"
         " for cs in t.values() for c in cs}\n"
         "print(len(ids))\n"
     )
-    env = {**os.environ, "YAML_CONFIG_ENV": yaml_cfg}
-    out = subprocess.run(
-        [sys.executable, "-c", probe],
-        cwd=Path(__file__).resolve().parent.parent,
-        env=env, capture_output=True, text=True, check=True,
-    )
+    out = import_config(tmp_path, probe, yaml_cfg)
+    assert out.returncode == 0, out.stderr[-500:]
     assert out.stdout.strip() == "1"
+
+
+def test_broadcast_targets_take_chat_and_topic(tmp_path):
+    out = import_config(tmp_path, (
+        "from telemirror.config import CHAT_MAPPING as m\n"
+        "print(sorted((t, c.to_topic_id) for t, cs in m[-1009].items() for c in cs))"
+    ), ONE_DIRECTION + "broadcast_channel: -1009\nbroadcast_targets: [-1002, '-1003#5']\n")
+    assert out.returncode == 0, out.stderr[-500:]
+    assert out.stdout.strip() == "[(-1003, 5), (-1002, None)]"
+
+
+def test_dedup_hours_project_wide_and_per_direction(tmp_path):
+    yaml_cfg = (
+        "dedup_hours: 24\n"
+        "directions:\n"
+        "  - from: [-1001]\n    to: [-1002]\n"
+        "  - from: [-1003]\n    to: [-1004]\n    dedup_hours: 0\n"
+    )
+    probe = ("from telemirror.config import CHAT_MAPPING as m; "
+             "print(m[-1001][-1002][0].dedup_hours, m[-1003][-1004][0].dedup_hours)")
+    out = import_config(tmp_path, probe, yaml_cfg)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["24.0", "0.0"]
+
+
+@pytest.mark.parametrize("text", ["", "# only a comment\n", "directions:\n", "- a list\n", "mode: copy\n"])
+def test_a_config_without_a_directions_list_is_a_clear_error(tmp_path, text):
+    out = import_config(tmp_path, "import telemirror.config", text)
+    assert out.returncode != 0 and "expected a mapping with a 'directions:' list" in out.stderr
+
+
+def test_an_empty_directions_list_loads(tmp_path):
+    out = import_config(tmp_path, "import telemirror.config", "directions: []\n")
+    assert out.returncode == 0, out.stderr
+
+
+def test_two_filters_in_one_list_item_are_refused(tmp_path):
+    """A mis-indented next filter lands in the previous one's item: refused,
+    not silently dropped."""
+    text = ("filters:\n  - SkipUrlFilter: {}\n    EmptyMessageFilter: {}\n" + ONE_DIRECTION)
+    out = import_config(tmp_path, "import telemirror.config", text)
+    assert out.returncode != 0 and "one filter per list item, got SkipUrlFilter, EmptyMessageFilter" in out.stderr

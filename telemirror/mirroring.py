@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import logging
 import re
 import time
@@ -7,9 +8,10 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 from telethon import TelegramClient, errors, events, utils
-from telethon.tl import functions, types
+from telethon.tl import types
 
-from config import DirectionConfig
+from telemirror.dedup import fingerprint
+from telemirror.directions import DirectionConfig
 from telemirror._patch import (
     forward_messages,
     send_file,
@@ -24,7 +26,7 @@ from telemirror.messagefilters import (
     strict_media_mode,
 )
 from telemirror.messagefilters.base import FilterAction
-from telemirror.misc import sdnotify
+from telemirror.misc import sdnotify, telegram_client
 from telemirror.misc.links import private_message_link
 from telemirror.misc.lrucache import LRUCache
 from telemirror.misc.message_groups import iter_message_groups
@@ -35,6 +37,12 @@ from telemirror.misc.telegram_client import (
 )
 from telemirror.misc.topics import topic_id_of
 from telemirror.mixins import CopyEventMessage, UpdateEntitiesParams
+from telemirror.failed import ALL, CLEAR, take_requests
+from telemirror.notify import BotNotifier
+from telemirror.outcomes import OutcomeSink, Outcomes
+from telemirror.outcomes import current as current_outcomes
+from telemirror.projects import save_chat_names
+from telemirror.sink import LiveSink
 from telemirror.storage import Database, MirrorMessage
 
 
@@ -118,6 +126,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         client: TelegramClient,
         logger: logging.Logger,
         strict_media_errors: bool = False,
+        sink: Optional[OutcomeSink] = None,
     ) -> None:
         """Message event processor
 
@@ -130,8 +139,22 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 logging and skipping. past_mode sets this so its retry wrapper
                 re-runs from the checkpoint; the live mirror leaves it off and
                 skips the message like any other filter failure.
+            sink (`OutcomeSink`, optional): gets what became of each new post
+                in each of its channels (the live mirror's counters and posts
+                to copy again). With one, a channel the post didn't reach is
+                its notice, not an error notice of its own.
         """
         self._chat_mapping = chat_mapping
+        self._sink = sink
+        # The longest dedup_hours of any direction (0 — no direction dedups):
+        # fingerprints older than it are pruned, at most once an hour — only
+        # those of this mirror's dedup directions (the database is shared).
+        dedup = [(source, target, c.dedup_hours) for source, targets in chat_mapping.items()
+                 for target, configs in targets.items() for c in configs if c.dedup_hours]
+        self._dedup_max_hours = max((hours for _, _, hours in dedup), default=0)
+        self._dedup_sources = sorted({source for source, _, _ in dedup})
+        self._dedup_targets = sorted({target for _, target, _ in dedup})
+        self._fingerprints_pruned_at = float("-inf")
         self._database = database
         self._client = client
         self._logger = logger
@@ -181,7 +204,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             for future in self._fanout_inflight.get((chat_id, mid), [])
         }
         if pending:
-            await asyncio.gather(*pending)
+            # shield: these futures are shared with the fan-out (and other
+            # waiters) — this waiter being cancelled must not cancel them.
+            await asyncio.gather(*(asyncio.shield(f) for f in pending))
 
     @property
     def logger(self: "EventProcessor") -> logging.Logger:
@@ -203,9 +228,87 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 # retry wrapper so the checkpoint isn't advanced past the message.
                 raise
             except Exception as e:
-                self._logger.error(e, exc_info=True)
+                outcomes = current_outcomes.get()
+                # A new post's fan-out broken off: with a sink, its «❗ Не
+                # скопировано» notice tells the admins (with this error as the
+                # reason) — not a second notice of this log line's own.
+                told_by_sink = outcomes is not None and self._sink is not None
+                self._logger.error(e, exc_info=True, extra={"notice": not told_by_sink})
+                if outcomes is not None:
+                    outcomes.error = e
 
         return wrapper
+
+    @asynccontextmanager
+    async def _recording(
+        self: "EventProcessor", chat_id: int, ids: List[int], link: str
+    ) -> AsyncIterator[None]:
+        """A new post's fan-out: its `Outcomes` (``current_outcomes`` while it
+        runs), handed to the sink at the end — however it ends."""
+        outcomes = Outcomes()
+        token = current_outcomes.set(outcomes)
+        error: Optional[BaseException] = None
+        try:
+            yield
+        except BaseException as e:
+            error = e
+            raise
+        finally:
+            current_outcomes.reset(token)
+            outcomes.finish(error)
+            if self._sink is not None:
+                try:
+                    self._sink.record(chat_id, ids, link, outcomes)
+                except Exception as e:  # noqa: BLE001 - the records never break the mirror
+                    self._logger.error(
+                        f"Could not record the outcome of {link}: {type(e).__name__}: {e}"
+                    )
+
+    async def _is_repeat(
+        self: "EventProcessor", fp: Optional[str], outgoing_chat: int, config: DirectionConfig,
+        chat_id: int, original_id: int,
+    ) -> bool:
+        """``dedup_hours``: the target already got this post from another source
+        post lately. A lookup failure isn't a repeat (better twice than lost)."""
+        if not config.dedup_hours or fp is None:
+            return False
+        try:
+            return await self._database.seen_fingerprint(
+                outgoing_chat, config.to_topic_id, fp, int(time.time() - config.dedup_hours * 3600),
+                chat_id, original_id,
+            )
+        except Exception as e:
+            self._logger.warning(f"Could not check for a repeat: {type(e).__name__}: {e}")
+            return False
+
+    async def _remember_sent(
+        self: "EventProcessor", fp: Optional[str], outgoing_chat: int, config: DirectionConfig,
+        chat_id: int, original_id: int,
+    ) -> None:
+        if not config.dedup_hours or fp is None:
+            return
+        now = time.time()
+        try:
+            await self._database.remember_fingerprint(
+                outgoing_chat, config.to_topic_id, fp, chat_id, original_id, int(now)
+            )
+            if now - self._fingerprints_pruned_at >= 3600:
+                self._fingerprints_pruned_at = now
+                await self._database.prune_fingerprints(
+                    int(now - self._dedup_max_hours * 3600), self._dedup_sources, self._dedup_targets
+                )
+        except Exception as e:
+            self._logger.warning(f"Could not remember a sent post: {type(e).__name__}: {e}")
+
+    def _target_failed(
+        self: "EventProcessor", message: str, reason: str, exc_info: bool = False
+    ) -> None:
+        """The channel the fan-out is at won't get the post: log it, and give
+        the reason to its `Outcomes`. With a sink, the sink's notice tells the
+        admins (not this log line's own)."""
+        if (outcomes := current_outcomes.get()) is not None:
+            outcomes.fail(reason)
+        self._logger.error(message, exc_info=exc_info, extra={"notice": self._sink is None})
 
     async def _resolve_username_to_channel_id(
         self: "EventProcessor",
@@ -666,9 +769,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
             except Exception as e:
                 if isinstance(e, errors.MediaCaptionTooLongError) and on_caption_too_long is not None:
                     return await on_caption_too_long()
-                self._logger.error(
+                self._target_failed(
                     f"Error while sending {log_kind} to chat#{outgoing_chat}{context_suffix} "
-                    f"after file_reference refresh. {type(e).__name__}: {e}"
+                    f"after file_reference refresh. {type(e).__name__}: {e}",
+                    f"{type(e).__name__}: {e}",
                 )
                 return None
 
@@ -689,17 +793,19 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 await flush_inserted()
                 raise
             except Exception as e:
-                self._logger.error(
+                self._target_failed(
                     f"Error while sending {kind} to chat#{outgoing_chat}. "
                     f"FileReferenceExpiredError: refetch failed. "
-                    f"{type(e).__name__}: {e}"
+                    f"{type(e).__name__}: {e}",
+                    f"{type(e).__name__}: {e}",
                 )
                 return None
             if fresh_media is None:
-                self._logger.error(
+                self._target_failed(
                     f"Error while sending {kind} to chat#{outgoing_chat}. "
                     f"FileReferenceExpiredError: source {kind} {source_link} "
-                    f"is gone, can't refresh file_reference"
+                    f"is gone, can't refresh file_reference",
+                    "пост в источнике удалён или остался без медиа",
                 )
                 return None
             apply_fresh_media(fresh_media)
@@ -707,9 +813,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         except errors.MediaCaptionTooLongError:
             raise
         except Exception as e:
-            self._logger.error(
+            self._target_failed(
                 f"Error while sending {log_kind} to chat#{outgoing_chat}{context_suffix}. "
-                f"{type(e).__name__}: {e}"
+                f"{type(e).__name__}: {e}",
+                f"{type(e).__name__}: {e}",
             )
             return None
 
@@ -793,9 +900,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         handler, via `_send_with_reference_refresh`.
         """
         if not filtered_message.media or not filtered_message.message:
-            self._logger.error(
+            self._target_failed(
                 f"Error while sending message to chat#{outgoing_chat}{context_suffix}. "
-                f"MediaCaptionTooLongError"
+                f"MediaCaptionTooLongError",
+                "MediaCaptionTooLongError",
             )
             return
         # Caption > 1024 chars: send media without caption, then text separately
@@ -981,7 +1089,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     async def new_message(
         self: "EventProcessor", chat_id: int, message: EventMessage, message_link: str
     ):
-        async with self._track_fanout([(chat_id, message.id)]):
+        async with self._track_fanout([(chat_id, message.id)]), \
+                self._recording(chat_id, [message.id], message_link):
             await self._new_message_impl(chat_id, message, message_link)
 
     @__handle_exceptions
@@ -1028,6 +1137,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         )
 
         flush_inserted = self._make_flush_inserted(inserted, message_link)
+        outcomes = current_outcomes.get() or Outcomes()
+        fp = fingerprint([message]) if self._dedup_max_hours else None
 
         for outgoing_chat, configs in outgoing_chats.items():
             matching = [c for c in configs if self._matches_from_topic(c, message)]
@@ -1039,6 +1150,13 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 if self._restricted_content_blocks(
                     config, restricted_saving_content, chat_id, outgoing_chat
                 ):
+                    continue
+                outcomes.expect(outgoing_chat, config.to_topic_id)
+                if await self._is_repeat(fp, outgoing_chat, config, chat_id, message.id):
+                    outcomes.duplicate()
+                    self._logger.info(
+                        f"[New message]: {message_link} is a repeat in chat#{outgoing_chat}, skipping"
+                    )
                     continue
 
                 message_copy = self.copy_message(message)
@@ -1066,14 +1184,16 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 except Exception as e:
                     # A bug in one target's filter chain must not abort delivery
                     # to the remaining targets in this fan-out.
-                    self._logger.error(
+                    self._target_failed(
                         f"[New message]: filter chain failed for chat#{outgoing_chat}, "
                         f"skipping this target. {type(e).__name__}: {e}",
+                        f"сбой фильтра: {type(e).__name__}: {e}",
                         exc_info=True,
                     )
                     continue
 
                 if filter_action is FilterAction.DISCARD:
+                    outcomes.filtered()
                     self._logger.info(
                         f"[New message]: Message {message_link} was skipped "
                         f"by the filter for chat#{outgoing_chat}"
@@ -1090,6 +1210,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     outgoing_chat: int = outgoing_chat,
                     config: DirectionConfig = config,
                 ) -> None:
+                    outcomes.sent()
                     inserted.append(
                         MirrorMessage(
                             original_id=filtered_message.id,
@@ -1105,6 +1226,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     # not leave an already-delivered message untracked (same
                     # write-then-sleep order as new_album).
                     await flush_inserted()
+                    await self._remember_sent(fp, outgoing_chat, config, chat_id, message.id)
 
                 def _apply_fresh_message_media(
                     fresh: List[types.TypeMessageMedia],
@@ -1226,7 +1348,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
     async def new_album(
         self: "EventProcessor", chat_id: int, album: EventAlbumMessage, album_link: str
     ) -> None:
-        async with self._track_fanout([(chat_id, m.id) for m in album]):
+        async with self._track_fanout([(chat_id, m.id) for m in album]), \
+                self._recording(chat_id, [m.id for m in album], album_link):
             await self._new_album_impl(chat_id, album, album_link)
 
     @__handle_exceptions
@@ -1265,6 +1388,8 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         )
 
         flush_inserted = self._make_flush_inserted(inserted, album_link)
+        outcomes = current_outcomes.get() or Outcomes()
+        fp = fingerprint(album) if self._dedup_max_hours else None
 
         for outgoing_chat, configs in outgoing_chats.items():
             matching = [
@@ -1279,6 +1404,13 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 if self._restricted_content_blocks(
                     config, restricted_saving_content, chat_id, outgoing_chat
                 ):
+                    continue
+                outcomes.expect(outgoing_chat, config.to_topic_id)
+                if await self._is_repeat(fp, outgoing_chat, config, chat_id, incoming_first_message.id):
+                    outcomes.duplicate()
+                    self._logger.info(
+                        f"[New album]: {album_link} is a repeat in chat#{outgoing_chat}, skipping"
+                    )
                     continue
 
                 album_copy = self.copy_album(album)
@@ -1307,14 +1439,16 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 except Exception as e:
                     # A bug in one target's filter chain must not abort delivery
                     # to the remaining targets in this fan-out.
-                    self._logger.error(
+                    self._target_failed(
                         f"[New album]: filter chain failed for chat#{outgoing_chat}, "
                         f"skipping this target. {type(e).__name__}: {e}",
+                        f"сбой фильтра: {type(e).__name__}: {e}",
                         exc_info=True,
                     )
                     continue
 
                 if filter_action is FilterAction.DISCARD:
+                    outcomes.filtered()
                     self._logger.info(
                         f"[New album]: Message {album_link} was skipped "
                         f"by the filter for chat#{outgoing_chat}"
@@ -1343,6 +1477,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     outgoing_chat: int = outgoing_chat,
                     config: DirectionConfig = config,
                 ) -> None:
+                    outcomes.sent()
                     if len(sent) != len(idxs):
                         # The positional zip below maps each sent message back to
                         # a source id; a count mismatch means we can't trust that
@@ -1375,6 +1510,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                     # not leave an already-delivered album untracked (same
                     # write-then-sleep order as new_message).
                     await flush_inserted()
+                    await self._remember_sent(fp, outgoing_chat, config, chat_id, incoming_first_message.id)
 
                 # `files` is intentionally read by name (not bound as a
                 # default arg like the other loop locals below) in `_do_send`
@@ -1924,38 +2060,51 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 )
 
 
-class TelegramLogHandler(logging.Handler):
-    """Sends WARNING+ log records to a Telegram channel.
+class NoticeLogHandler(logging.Handler):
+    """Sends WARNING+ log records to the panel's admins (``BotNotifier``).
 
     Identical messages (by text) are accumulated for _DEBOUNCE seconds,
     then sent once with ×N count. After sending, the same text is suppressed
-    for _COOLDOWN seconds (total window ~60 s).
+    for _COOLDOWN seconds (total window ~60 s). At most _PER_MINUTE notices a
+    minute (and _MAX_IN_FLIGHT sends under way): past it they're counted, and the
+    next one says how many were held back — or a notice of its own a minute
+    later when no other comes (the journal has them all). A burst can't flood
+    the panel's chat, and isn't lost from sight either.
     """
 
     _DEBOUNCE = 5   # seconds to accumulate before sending
     _COOLDOWN = 55  # seconds of suppression after send (total ~60 s)
+    _MAX_IN_FLIGHT = 10  # sends still under way; past it a burst is dropped
+    _PER_MINUTE = 10
+    _HELD_BACK_SEC = 60  # no notice after a burst: the count held back is told by itself
 
     _PREFIXES = {
-        logging.WARNING:  "⚠️ WARNING",
-        logging.ERROR:    "‼️ ERROR",
-        logging.CRITICAL: "🚨 CRITICAL",
+        logging.WARNING:  "⚠️ Предупреждение",
+        logging.ERROR:    "‼️ Ошибка",
+        logging.CRITICAL: "🚨 Критично",
     }
 
-    def __init__(self, client: TelegramClient, channel: int) -> None:
+    def __init__(self, notifier: BotNotifier, loop: asyncio.AbstractEventLoop) -> None:
         super().__init__(logging.WARNING)
-        self._client = client
-        self._channel = channel
-        self._loop = client.loop
+        self._notifier = notifier
+        self._loop = loop
         self._counts: dict = {}
         self._timers: dict = {}
         self._cooldown_until: dict = {}
         self._tasks: set = set()  # keep strong refs to in-flight send tasks
+        self._sent_at: collections.deque = collections.deque()
+        self._held_back = 0
+        self._held_timer: Optional[asyncio.TimerHandle] = None
 
     def _format_record(self, record: logging.LogRecord) -> str:
-        prefix = self._PREFIXES.get(record.levelno, "⚠️ WARNING")
+        prefix = self._PREFIXES.get(record.levelno, "⚠️ Предупреждение")
         return f"{prefix}: {record.getMessage()}"
 
     def emit(self, record: logging.LogRecord) -> None:
+        if record.name.startswith("telemirror.notify"):
+            return  # a notice's own trouble: never a notice about it
+        if getattr(record, "notice", True) is False:
+            return  # told another way (the not-copied posts' summary)
         try:
             text = self._format_record(record)
         except Exception:
@@ -1983,22 +2132,65 @@ class TelegramLogHandler(logging.Handler):
         if text not in self._timers:  # only first occurrence schedules the send
             self._timers[text] = self._loop.call_later(self._DEBOUNCE, self._send, text)
 
+    def _within_rate(self) -> bool:
+        now = self._loop.time()
+        while self._sent_at and now - self._sent_at[0] > 60:
+            self._sent_at.popleft()
+        if len(self._sent_at) >= self._PER_MINUTE:
+            return False
+        self._sent_at.append(now)
+        return True
+
+    def _can_send(self) -> bool:
+        return (not self._loop.is_closed() and len(self._tasks) < self._MAX_IN_FLIGHT
+                and self._within_rate())
+
+    def _dispatch(self, msg: str) -> None:
+        task = self._loop.create_task(self._notifier.send(msg))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _hold_back(self) -> None:
+        """Not sent (the rate, the sends still under way): counted, and told
+        with the next notice — or by itself a minute later, if none comes."""
+        self._held_back += 1
+        if self._held_timer is None and not self._loop.is_closed():
+            self._held_timer = self._loop.call_later(self._HELD_BACK_SEC, self._send_held_back)
+
+    def _send_held_back(self) -> None:
+        self._held_timer = None
+        if not self._held_back:
+            return  # a notice since has told them
+        if not self._can_send():
+            self._held_timer = self._loop.call_later(self._HELD_BACK_SEC, self._send_held_back)
+            return
+        msg = f"⚠️ Ещё {self._held_back} сообщ. не отправлено, чтобы не засыпать чат, — они в журнале."
+        self._held_back = 0
+        self._dispatch(msg)
+
     def _send(self, text: str) -> None:
         count = self._counts.pop(text, 1)
         self._timers.pop(text, None)
         self._cooldown_until[text] = self._loop.time() + self._COOLDOWN
+        if not self._can_send():
+            self._hold_back()
+            return
         msg = f"{text} (×{count})" if count > 1 else text
-        if not self._loop.is_closed():
-            task = self._loop.create_task(self._do_send(msg))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+        if self._held_back:
+            msg += f"\n\n…и ещё {self._held_back} сообщ. не отправлено, чтобы не засыпать чат, — они в журнале."
+            self._held_back = 0
+        self._dispatch(msg)
 
-    async def _do_send(self, msg: str) -> None:
-        try:
-            # parse_mode=None: log text is never authored as markdown.
-            await self._client.send_message(self._channel, msg, parse_mode=None)
-        except Exception:
-            pass  # handler must not raise; Telegram errors silently swallowed
+    def close(self) -> None:
+        """Detached (the mirror is stopping): drop the pending debounced sends."""
+        for timer in self._timers.values():
+            timer.cancel()
+        self._timers.clear()
+        self._counts.clear()
+        if self._held_timer is not None:
+            self._held_timer.cancel()
+            self._held_timer = None
+        super().close()
 
 
 class EventHandlers:
@@ -2007,17 +2199,16 @@ class EventHandlers:
         client: TelegramClient,
         chats: List[int],
         processor: EventProcessor,
-        sender: Optional[TelegramClient] = None,
-        tech_channel: Optional[int] = None,
+        notifier: Optional[BotNotifier] = None,
     ) -> None:
         """Message event handler
 
         Args:
-            client (`TelegramClient`): Message receiver client
+            client (`TelegramClient`): The client whose updates are observed
             chats (`List[int]`): List of chats to be observed
             processor (`EventProcessor`): Event processor
-            sender (`TelegramClient`, optional): Sender client for tech_channel notifications
-            tech_channel (`int`, optional): Tech monitoring channel ID
+            notifier (`BotNotifier`, optional): The panel's admins — private
+                messages to the account are reported to them
         """
         client.add_event_handler(self.on_new_message, events.NewMessage(chats=chats))
         client.add_event_handler(self.on_album, events.Album(chats=chats))
@@ -2028,10 +2219,10 @@ class EventHandlers:
             self.on_deleted_message, events.MessageDeleted(chats=chats)
         )
         self._processor = processor
+        self._client = client
+        self._notifier = notifier
 
-        if tech_channel and sender:
-            self._sender = sender
-            self._tech_channel = tech_channel
+        if notifier is not None:
             client.add_event_handler(
                 self.on_private_message,
                 events.NewMessage(incoming=True, func=lambda e: e.is_private),
@@ -2040,26 +2231,23 @@ class EventHandlers:
     async def on_private_message(
         self: "EventHandlers", event: events.NewMessage.Event
     ) -> None:
-        """Notify tech_channel about incoming private messages."""
+        """Tell the panel's admins about an incoming private message."""
         try:
             sender_obj = await event.get_sender()
             # sender-controlled — collapse whitespace and cap length so it
-            # can't break or spam the tech-channel message.
+            # can't break or spam the notice (sent as plain text: no markup).
             name = " ".join((utils.get_display_name(sender_obj) or "").split())[:100]
-            username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "none"
-            msg = f"📩 Private message from {name} ({username})"
-            # parse_mode=None: the name is sender-controlled, and markdown
-            # would let it inject formatting or a hidden link.
-            await self._sender.send_message(self._tech_channel, msg, parse_mode=None)
+            username = f"@{sender_obj.username}" if getattr(sender_obj, "username", None) else "без @имени"
+            assert self._notifier is not None  # the handler is added only with one
+            await self._notifier.send(f"📩 Аккаунту написали в личку: {name} ({username})")
         except Exception as e:
             # Unlike every other handler here, this one doesn't go through
             # EventProcessor.__handle_exceptions — log through the same
-            # logger it uses so a failure still reaches TECH_CHANNEL via
-            # TelegramLogHandler, instead of only Telethon's own default
+            # logger it uses so a failure still reaches the admins via
+            # NoticeLogHandler, instead of only Telethon's own default
             # per-handler logging (a different logger, never attached to it).
             self._processor.logger.error(
-                f"Error while notifying TECH_CHANNEL about a private message. "
-                f"{type(e).__name__}: {e}"
+                f"Error while reporting a private message. {type(e).__name__}: {e}"
             )
 
     def event_message_link(self: "EventHandlers", event: EventLike) -> str:
@@ -2141,64 +2329,66 @@ class EventHandlers:
 
 class Mirroring:
     CONNECT_TIMEOUT_SEC = 30
-    # Watchdog: how long telethon may stay disconnected (auto-reconnecting)
-    # before we stop feeding systemd's watchdog and let it restart us fresh.
-    WATCHDOG_DISCONNECT_GRACE_SEC = 1800
-    # Bound on a single liveness round-trip; longer than this = the request
-    # path is wedged, not slow.
-    WATCHDOG_PROBE_TIMEOUT_SEC = 30
-    # Consecutive failed round-trips on a live connection before we let systemd
-    # restart us — absorbs a lone dropped packet / brief DC hiccup.
-    WATCHDOG_PROBE_FAIL_STREAK = 3
-    # No update of any kind for this long (while otherwise healthy) → warn to the
-    # tech channel. Not a restart: a genuinely quiet feed looks the same.
+    # The watchdog's probe (telegram_client.connection_probe — what each means there)
+    WATCHDOG_DISCONNECT_GRACE_SEC = telegram_client.WATCHDOG_DISCONNECT_GRACE_SEC
+    WATCHDOG_PROBE_TIMEOUT_SEC = telegram_client.WATCHDOG_PROBE_TIMEOUT_SEC
+    WATCHDOG_PROBE_FAIL_STREAK = telegram_client.WATCHDOG_PROBE_FAIL_STREAK
+    # No update of any kind for this long (while otherwise healthy) → warn (the
+    # panel's admins get it). Not a restart: a genuinely quiet feed looks the same.
     WATCHDOG_SILENCE_WARN_SEC = 7200
+    # How often the sink's files are written, the panel's requests handled and
+    # the not-copied-posts notice (at most once a minute) sent.
+    SINK_TICK_SEC = 15
 
     def __init__(
         self: "Mirroring",
         chat_mapping: Dict[int, Dict[int, List[DirectionConfig]]],
         database: Database,
-        receiver: TelegramClient,
-        sender: TelegramClient,
+        client: TelegramClient,
         logger: Optional[Union[str, logging.Logger]] = None,
         broadcast_channel: Optional[int] = None,
-        tech_channel: Optional[int] = None,
+        notifier: Optional[BotNotifier] = None,
+        chat_names_key: Optional[str] = None,
+        sink: Optional[LiveSink] = None,
     ) -> None:
         """Configure channels mirroring
 
         Args:
             chat_mapping (`Dict[int, Dict[int, List[DirectionConfig]]]`): Chats mappings
             database (`Database`): Message IDs storage
-            receiver (`TelegramClient`): Message receiver client
-            sender (`TelegramClient`): Message sender client, can be same as `receiver`
+            client (`TelegramClient`): The account: receives and sends
             logger (`str` | `logging.Logger`, optional): Logger. Defaults to None.
             broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup.
-            tech_channel (`int`, optional): Technical monitoring channel ID.
+            notifier (`BotNotifier`, optional): The panel's admins: they get the
+                mirror's warnings and errors and its account's private messages.
+            chat_names_key (`str`, optional): The project whose ``chats.json``
+                gets the chats' titles at start (the panel shows them).
+            sink (`LiveSink`, optional): The project's counters and posts to
+                copy again; the panel's requests to copy them are handled here.
         """
         logger = _resolve_logger(logger)
 
         self._chat_mapping = chat_mapping
+        self._chat_names_key = chat_names_key
         self._database = database
-        self._receiver = receiver
-        self._sender = sender
+        self._client = client
         self._broadcast_channel = broadcast_channel
-        self._tech_channel = tech_channel
+        self._notifier = notifier
+        self._sink = sink
 
         self._processor = EventProcessor(
             chat_mapping=chat_mapping,
             database=database,
-            client=sender,
+            client=client,
             logger=logger,
+            sink=sink,
         )
         self._logger = logger
+        self._last_update_ts = time.monotonic()
 
     async def run(self: "Mirroring") -> None:
         self._logger.info(f"Channels mirroring config:\n{self.stringify_config()}")
-
-        if self._sender != self._receiver:
-            raise RuntimeError("Different clients are not supported now")
-
-        await self.__connect_client(self._sender)
+        await self.__connect_client(self._client)
 
     def stringify_config(self: "Mirroring") -> str:
         """Stringify mirror config"""
@@ -2222,7 +2412,8 @@ class Mirroring:
 
         - Sends messages not yet mirrored.
         - Edits mirrors whose source was edited while the bot was offline.
-        - Deletes mirrors whose source no longer exists.
+        - Deletes mirrors whose source no longer exists — asked again by id
+          first: a post a history page skipped (an API hiccup) isn't gone.
 
         Streams `iter_messages` in one pass — only message IDs are held in
         memory, never the full history.
@@ -2230,7 +2421,7 @@ class Mirroring:
         When `broadcast_sync` is empty every post goes through `new_message`,
         whose own per-target dedup (`already_mirrored`) skips targets that
         still hold a mirror — so a reset table (e.g. by
-        `skylon_set/clear_channels.py`) re-delivers posts only to the targets
+        `telemirror.tasks.clear_channels`) re-delivers posts only to the targets
         that lost them.
 
         A message is marked synced regardless of send outcome; a rare failed
@@ -2294,6 +2485,18 @@ class Mirroring:
 
         deleted = list(synced.keys() - seen)
         if deleted:
+            # get_messages(ids=…) answers None (or MessageEmpty) for a gone id.
+            found = await client.get_messages(bc, ids=deleted)
+            gone = {i for i, m in zip(deleted, found, strict=True)
+                    if m is None or isinstance(m, types.MessageEmpty)}
+            kept = [i for i in deleted if i not in gone]
+            if kept:  # harmless now: info, not a notice to the admins
+                self._logger.info(
+                    f"[Sync broadcast]: {len(kept)} message(s) missing from the history "
+                    f"walk still exist — not deleted: {kept[:10]}"
+                )
+            deleted = [i for i in deleted if i in gone]
+        if deleted:
             self._logger.info(
                 f"[Sync broadcast]: deleting {len(deleted)} removed message(s)"
             )
@@ -2305,29 +2508,108 @@ class Mirroring:
             f"{len(deleted)} deleted"
         )
 
+    async def _save_chat_names(self: "Mirroring", client: TelegramClient) -> None:
+        """The titles of the configured chats → the project's ``chats.json``,
+        from one ``get_dialogs`` (a chat the account isn't in has no title).
+        A failure is only a warning: the names are for the panel."""
+        ids = set(self._chat_mapping)
+        for targets in self._chat_mapping.values():
+            ids.update(targets)
+        if self._broadcast_channel:
+            ids.add(self._broadcast_channel)
+        try:
+            dialogs = await client.get_dialogs()
+            names = {
+                pid: utils.get_display_name(d.entity)
+                for d in dialogs
+                if (pid := utils.get_peer_id(d.entity)) in ids
+            }
+            assert self._chat_names_key  # called only with one
+            save_chat_names(self._chat_names_key, names)
+        except Exception as e:
+            self._logger.warning(
+                f"Could not save chat titles for the panel: {type(e).__name__}: {e}"
+            )
+
+    async def _sink_loop(self: "Mirroring", client: TelegramClient) -> None:
+        while True:
+            await asyncio.sleep(self.SINK_TICK_SEC)
+            try:
+                await self._handle_requests(client)
+                assert self._sink is not None  # run only with one
+                await self._sink.tick()
+            except Exception as e:  # noqa: BLE001 - try again next tick
+                self._logger.error(f"[Retry]: {type(e).__name__}: {e}", exc_info=True)
+
+    async def _handle_requests(self: "Mirroring", client: TelegramClient) -> None:
+        """The panel's requests: copy a post again, all of them, forget them."""
+        sink = self._sink
+        assert sink is not None
+        for request in take_requests(sink.key):
+            if request == CLEAR:
+                sink.failed.clear()
+                continue
+            entries = sink.failed.entries if request == ALL else [e for e in [sink.failed.get(request)] if e]
+            for entry in entries:
+                try:
+                    await self._retry(client, entry)
+                except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+                    self._logger.warning(
+                        f"[Retry]: Telegram asks to wait {e.seconds} s — stopped; "
+                        f"the posts left stay in the list, try again later"
+                    )
+                    return
+
+    async def _retry(self: "Mirroring", client: TelegramClient, entry: dict) -> None:
+        """The post again, from the source: the channels that have it already
+        are skipped (``already_mirrored``); it fails again — back in the list."""
+        assert self._sink is not None
+        chat, ids, link = entry["chat"], entry["ids"], entry["link"]
+        try:
+            messages = [m for m in await client.get_messages(chat, ids=ids) if m is not None]
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError):
+            raise
+        except Exception as e:
+            self._logger.warning(f"[Retry]: can't read {link} in the source: {type(e).__name__}: {e}")
+            return
+        if not messages:
+            self._sink.failed.drop(entry["id"])  # its failure stays counted: it was one
+            self._logger.info(f"[Retry]: {link} is gone from the source — forgotten")
+            return
+        # Its outcome adds it back if it fails again (under the id of what's
+        # left of it, for an album whose first item is gone), and counts instead
+        # of its last failure.
+        self._sink.retrying(entry)
+        self._logger.info(f"[Retry]: {link}")
+        if len(ids) > 1:
+            await self._processor.new_album(chat_id=chat, album=messages, album_link=link)
+        else:
+            await self._processor.new_message(chat_id=chat, message=messages[0], message_link=link)
+
     async def __connect_client(self: "Mirroring", client: TelegramClient) -> None:
         watchdog_task: Optional[asyncio.Task] = None
+        sink_task: Optional[asyncio.Task] = None
+        log_handler: Optional[NoticeLogHandler] = None
         try:
+            # First of all: the notices go through the panel's bot, not the
+            # account — a refused sign-in or a ban reaches the admins too.
+            if self._notifier is not None:
+                log_handler = NoticeLogHandler(self._notifier, asyncio.get_running_loop())
+                logging.getLogger("telemirror").addHandler(log_handler)
+
             await connect_with_timeout(client, self.CONNECT_TIMEOUT_SEC)
 
             me = await client.get_me()
             if me is None:
                 raise RuntimeError(
                     "There is no authorization for the user, "
-                    "try restart or get a new session key (run login.py)"
+                    "try restart or sign in again (python -m telemirror.login)"
                 )
 
             at_username = f" (@{me.username})" if getattr(me, "username", None) else ""
             self._logger.info(
                 f"Logged in as {utils.get_display_name(me)}{at_username}"
             )
-
-            # Attach before the broadcast sync so its warnings/errors also reach
-            # the tech channel.
-            if self._tech_channel:
-                logging.getLogger("telemirror").addHandler(
-                    TelegramLogHandler(client, self._tech_channel)
-                )
 
             # Auth confirmed — the service is up. Tell systemd (Type=notify) now,
             # before the potentially slow broadcast sync, and start pinging the
@@ -2346,13 +2628,18 @@ class Mirroring:
             # narrower: a live broadcast-channel post arriving mid-sync could be
             # both dispatched live and picked up by the sync's own history walk,
             # sending it twice — a visible duplicate, not a silent loss.
-            self._handlers = EventHandlers(
-                client=self._receiver,
+            EventHandlers(
+                client=client,
                 chats=list(self._chat_mapping.keys()),
                 processor=self._processor,
-                sender=self._sender,
-                tech_channel=self._tech_channel,
+                notifier=self._notifier,
             )
+
+            if self._sink is not None:
+                sink_task = asyncio.create_task(self._sink_loop(client))
+
+            if self._chat_names_key:
+                await self._save_chat_names(client)
 
             if self._broadcast_channel:
                 try:
@@ -2378,30 +2665,28 @@ class Mirroring:
         except (errors.SessionExpiredError, errors.SessionRevokedError):
             self._logger.critical(
                 "The user's session has expired, "
-                "try to get a new session key (run login.py)"
+                "sign in again (python -m telemirror.login)"
             )
         finally:
             if watchdog_task is not None:
                 await cancel_and_await(watchdog_task)
+            if sink_task is not None:
+                await cancel_and_await(sink_task)
+            if self._sink is not None:
+                self._sink.close()
             sdnotify.notify("STOPPING=1")
+            if log_handler is not None:
+                logging.getLogger("telemirror").removeHandler(log_handler)
+                log_handler.close()
             await client.disconnect()
 
     def __watchdog_probe(
         self: "Mirroring", client: TelegramClient
     ) -> Callable[[], Awaitable[bool]]:
-        """Liveness check for ``sdnotify.watchdog_loop``. Healthy =
-        connected *and* a bounded ``updates.GetState`` round-trip succeeds
-        (catches a dead receive loop a bare ``is_connected()`` would miss). A
-        few round-trips may fail in a row (``WATCHDOG_PROBE_FAIL_STREAK``) and a
-        FloodWait counts as healthy — both are back-off situations, not hangs.
-        While disconnected we stay 'healthy' for ``WATCHDOG_DISCONNECT_GRACE_SEC``
-        so telethon's auto-reconnect gets a chance before a restart.
-
-        A stalled update *dispatch* while requests still work can't be told from
-        a genuinely quiet feed, so long silence only warns (to the tech channel),
-        never restarts."""
-        disconnected_since: Optional[float] = None
-        fail_streak = 0
+        """``telegram_client.connection_probe`` with this class's limits, and
+        long silence on top: a stalled update *dispatch* while requests still
+        work can't be told from a genuinely quiet feed, so it only warns (the
+        admins get it), never restarts."""
         last_silence_warn = 0.0
         self._last_update_ts = time.monotonic()
 
@@ -2410,51 +2695,26 @@ class Mirroring:
 
         client.add_event_handler(_bump_last_update, events.Raw)
 
-        async def probe() -> bool:
-            nonlocal disconnected_since, fail_streak, last_silence_warn
-            if client.is_connected():
-                disconnected_since = None
-                try:
-                    await asyncio.wait_for(
-                        client(functions.updates.GetStateRequest()),
-                        timeout=self.WATCHDOG_PROBE_TIMEOUT_SEC,
-                    )
-                except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
-                    self._logger.warning("watchdog: rate-limited (%ss), still healthy", e.seconds)
-                    fail_streak = 0
-                    return True
-                except Exception as e:  # noqa: BLE001 - transient until the streak runs out
-                    fail_streak += 1
-                    self._logger.warning(
-                        "watchdog: GetState probe failed %d/%d (%s: %s)",
-                        fail_streak, self.WATCHDOG_PROBE_FAIL_STREAK,
-                        type(e).__name__, e,
-                    )
-                    return fail_streak < self.WATCHDOG_PROBE_FAIL_STREAK
-                fail_streak = 0
-                silent_for = time.monotonic() - self._last_update_ts
-                if (
-                    silent_for > self.WATCHDOG_SILENCE_WARN_SEC
-                    and time.monotonic() - last_silence_warn > self.WATCHDOG_SILENCE_WARN_SEC
-                ):
-                    last_silence_warn = time.monotonic()
-                    self._logger.warning(
-                        "watchdog: no update in %.0f min — feed quiet or dispatch stalled",
-                        silent_for / 60,
-                    )
-                return True
-            now = time.monotonic()
-            if disconnected_since is None:
-                disconnected_since = now
-            within_grace = now - disconnected_since < self.WATCHDOG_DISCONNECT_GRACE_SEC
-            if not within_grace:
-                self._logger.error(
-                    "watchdog: disconnected > %ds, giving up on this process",
-                    self.WATCHDOG_DISCONNECT_GRACE_SEC,
+        def warn_on_silence() -> None:
+            nonlocal last_silence_warn
+            silent_for = time.monotonic() - self._last_update_ts
+            if (
+                silent_for > self.WATCHDOG_SILENCE_WARN_SEC
+                and time.monotonic() - last_silence_warn > self.WATCHDOG_SILENCE_WARN_SEC
+            ):
+                last_silence_warn = time.monotonic()
+                self._logger.warning(
+                    "watchdog: no update in %.0f min — feed quiet or dispatch stalled",
+                    silent_for / 60,
                 )
-            return within_grace
 
-        return probe
+        return telegram_client.connection_probe(
+            client, self._logger,
+            grace_sec=self.WATCHDOG_DISCONNECT_GRACE_SEC,
+            timeout_sec=self.WATCHDOG_PROBE_TIMEOUT_SEC,
+            fail_streak=self.WATCHDOG_PROBE_FAIL_STREAK,
+            on_healthy=warn_on_silence,
+        )
 
 
 class Telemirror:
@@ -2472,7 +2732,9 @@ class Telemirror:
         api_lang_pack: Optional[str] = None,
         api_system_lang_code: Optional[str] = None,
         broadcast_channel: Optional[int] = None,
-        tech_channel: Optional[int] = None,
+        notifier: Optional[BotNotifier] = None,
+        chat_names_key: Optional[str] = None,
+        sink: Optional[LiveSink] = None,
     ):
         """Telemirror
 
@@ -2489,15 +2751,16 @@ class Telemirror:
             api_lang_pack (`str`, optional): initConnection lang_pack (from a .jsession file). Defaults to None
             api_system_lang_code (`str`, optional): initConnection system_lang_code (from a .jsession file). Defaults to Telethon's
             broadcast_channel (`int`, optional): Broadcast channel ID to sync on startup. Defaults to None.
-            tech_channel (`int`, optional): Technical monitoring channel ID. Defaults to None.
+            notifier (`BotNotifier`, optional): The panel's admins, for the mirror's notices. Defaults to None.
+            chat_names_key (`str`, optional): The project whose ``chats.json`` gets the chats' titles. Defaults to None.
+            sink (`LiveSink`, optional): The project's counters and posts to copy again. Defaults to None.
         """
         set_album_event_timeout(delay_sec=_ALBUM_EVENT_DELAY_SEC)
 
-        # Preparation for splitting receiver and sender. connection_retries=1000
-        # keeps auto-reconnecting through a long outage instead of exiting; the
-        # watchdog (Mirroring.WATCHDOG_DISCONNECT_GRACE_SEC) is what bounds how
-        # long we wait before a fresh-process restart.
-        recv_client = send_client = build_telegram_client(
+        # connection_retries=1000 keeps auto-reconnecting through a long outage
+        # instead of exiting; the watchdog (Mirroring.WATCHDOG_DISCONNECT_GRACE_SEC)
+        # is what bounds how long we wait before a fresh-process restart.
+        client = build_telegram_client(
             session_string,
             api_id,
             api_hash,
@@ -2517,11 +2780,12 @@ class Telemirror:
         self._mirroring = Mirroring(
             chat_mapping=chat_mapping,
             database=database,
-            receiver=recv_client,
-            sender=send_client,
+            client=client,
             logger=logger,
             broadcast_channel=broadcast_channel,
-            tech_channel=tech_channel,
+            notifier=notifier,
+            chat_names_key=chat_names_key,
+            sink=sink,
         )
 
     async def run(self: "Telemirror") -> None:

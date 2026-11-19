@@ -9,7 +9,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl import functions, types
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import EmptyMessageFilter
 from telemirror.mirroring import EventProcessor
 from telemirror.storage import InMemoryDatabase, MirrorMessage
@@ -34,7 +34,7 @@ def test_edit_without_entities_is_not_markdown_parsed():
     client.parse_mode = "markdown"  # as build_telegram_client sets it
 
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(100, SOURCE, 5000, TARGET)))
+    run(db.insert_batch([MirrorMessage(100, SOURCE, 5000, TARGET)]))
     proc = EventProcessor(
         chat_mapping={
             SOURCE: {

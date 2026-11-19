@@ -1,8 +1,8 @@
 # deploy/ — running telemirror on a VPS under systemd
 
 The wiring for keeping each project's mirror running 24/7, its history
-replays and maintenance runs. Built for bare-metal Ubuntu with systemd (not
-Docker; a `docker-compose.yaml` for one mirror lives at the repo root).
+replays and maintenance runs. Built for bare-metal Ubuntu with systemd — the
+only supported deployment.
 
 A **project** is an independent mirror: `projects/<key>/project.yml` names its
 session (`sessions/*.jsession`), its mirror config and its health port. Every
@@ -18,20 +18,23 @@ back).
 |---|---|
 | `bootstrap.sh` | one-time installer: swap + unit symlinks + journal + cron + `daemon-reload` |
 | `setup-swap.sh` | idempotent resize of `/swapfile` to 2 GB and `vm.swappiness=10` |
-| `systemd/telemirror@.service` | a project's live mirror (`main.py`), 24/7 |
-| `systemd/telemirror-past@.service` | a project's history replay of its `past_mode:` directions (`past_mode.py`) |
-| `systemd/telemirror-task@.service` | a project's maintenance run started by the panel (`skylon_set.<module>`) |
-| `systemd/telemirror-alert@.service` | `OnFailure=`: tells the panel's admins (or `TECH_CHANNEL`) that a unit gave up |
+| `systemd/telemirror@.service` | a project's live mirror (`python -m telemirror.live`), 24/7 |
+| `systemd/telemirror-past@.service` | a project's history replay of its `past_mode:` directions (`python -m telemirror.past`) |
+| `systemd/telemirror-task@.service` | a project's maintenance run started by the panel (`python -m telemirror.tasks.<module>`) |
+| `systemd/telemirror-alert@.service` | `OnFailure=`: tells the panel's admins (through its bot) that a unit gave up |
 | `systemd/telemirror-health.{timer,service}` | every 10 min: alerts if a mirror is flapping or stuck non-active |
 | `systemd/telemirror-restart.{timer,service}` | a clean restart of the running mirrors once a day (04:00) |
+| `systemd/telemirror-report.{timer,service}` | Mondays 10:00: each project's weekly report to the panel's admins (`python -m telemirror.report`) |
 | `systemd/telemirror-panel.service` | the Telegram control panel bot (`python -m bot`) |
 | `systemd/journald.conf.d/telemirror.conf` | `SystemMaxUse=500M` — the journal won't fill up `/var` |
-| `cron.d/telemirror-tmp` | hourly cleanup of orphaned `/tmp/tmp*.mp4` files |
+| `cron.d/telemirror-tmp` | hourly cleanup of orphaned `/tmp/telemirror-tmp-*` files |
 
 ## Requirements
 
 - Ubuntu + systemd ≥ 254 (`RestartSteps=`/`RestartMaxDelaySec=`).
-- A Python venv at `/root/telemirror/.venv` (`bash install.sh` from the repo root).
+- A Python venv at `/root/telemirror/.venv` (`bash install.sh` from the repo root;
+  on Linux it also installs the CPU build of torch — LaMa needs it to remove a
+  source's watermark from photos; without it photos keep the watermark).
 - `ffmpeg` in `PATH` (`apt install ffmpeg`) — for the video watermark.
 - PostgreSQL running locally (`postgresql.service`), with the `telemirror`
   database and role created and matching `.env` (all projects share it).
@@ -55,6 +58,15 @@ The script: grows swap, installs unit symlinks into `/etc/systemd/system/`
 runs `daemon-reload`. It does **not** start any mirror — create a project in
 the bot (📁 Проекты → ➕ Новый проект) and press ▶️ Запустить there, or by hand:
 `systemctl enable --now telemirror@<key>.service`.
+
+Then check the whole installation (also ⚙️ Настройки → 🧾 Проверка установки
+in the bot): `.env`, the bot's token, the database and its tables, the unit
+links, the timers, the panel, every project's session, config and mirror.
+Read-only; exit code 1 when something is ❌.
+
+```bash
+.venv/bin/python -m telemirror.selfcheck
+```
 
 Units are symlinks into the repo, the cron file is a copy. If you edit
 `deploy/cron.d/telemirror-tmp`, re-run `bootstrap.sh` (or copy it by hand); if
@@ -99,11 +111,11 @@ Reads the project's config (`project.yml` → `config`). Resyncs against the
 | Crash / OOM-kill / clean exit | `Restart=always`, backoff 10s → 120s |
 | Network drop / Telegram DC failure | telethon reconnects on its own (`connection_retries=1000`); the watchdog tolerates being disconnected for up to **30 min**, longer than that triggers a restart with a fresh process |
 | **Dead receive loop / hung RPC** | `Type=notify` + `WatchdogSec=600`: a watchdog task does an `updates.GetState` round-trip every 300s (tolerates 3 failures in a row, a FloodWait is fine); no response → `WATCHDOG=1` stops going out → systemd sends `SIGTERM` and restarts it |
-| Update dispatch itself is stuck (RPC still alive) | indistinguishable from a genuinely quiet feed → no auto-restart; after 2h with no update at all — a `warning` to the project's tech channel |
+| Update dispatch itself is stuck (RPC still alive) | indistinguishable from a genuinely quiet feed → no auto-restart; after 2h with no update at all — a `warning` to the panel's admins |
 | Fast crash-loop (<~4 min/iteration) | 15 crashes in an hour → `failed` → `OnFailure=telemirror-alert@` to the admins, the service stays down until `systemctl reset-failed && systemctl start` |
-| Slow crash-loop / stuck non-`active` | `telemirror-health.timer` (10 min): alerts on ≥3 restarts in the interval, or `ActiveState≠active` twice in a row |
+| Slow crash-loop / stuck non-`active` | `telemirror-health.timer` (10 min): alerts on ≥3 restarts in the interval, or stuck in a transitional state (not `active`/`inactive`/`failed`) twice in a row; `failed` itself is `OnFailure=`'s alert |
 | Session already in use by another process | the session lock refuses the start (`Session … is in use by …`) instead of splitting updates with it — stop the other one, or let the panel run them in turn |
-| Account ban / session revoked | falls into the crash-loop path above → alert; fix: a new sign-in in the bot (⚙️ Настройки → 👤 Аккаунты → 🔑 Войти по номеру), then the project's 🧰 Управление → 👤 Аккаунт |
+| Account ban / session revoked | falls into the crash-loop path above → alert; fix: a new sign-in in the bot (⚙️ Настройки → 👤 Аккаунты → 🔑 Войти по номеру), then the project's ⚙️ Настройки проекта → 👤 Аккаунт |
 | Slow memory leak | `telemirror-restart.timer` — a clean restart at 04:00 |
 
 Checks:
@@ -111,6 +123,8 @@ Checks:
 systemctl show telemirror@<key>.service -p Type -p WatchdogUSec -p NRestarts
 systemctl list-timers 'telemirror-*'
 python -m telemirror.health        # a one-off check
+python -m telemirror.selfcheck     # the whole installation, ✅ / ⚠️ / ❌
+python -m telemirror.report        # the weekly report, now
 # simulate a hang — wait ~10 min for the watchdog restart:
 systemctl kill -s STOP telemirror@<key>.service
 ```
@@ -123,15 +137,20 @@ systemctl kill -s STOP telemirror@<key>.service
   `/run/telemirror-panel/<key>.env` right before the start (a manual
   `systemctl start` without that file fails on purpose).
 - Both use the project's session: `Conflicts=telemirror@%i.service` stops its
-  mirror. The panel (⏪ Догрузка / 🛠 Обслуживание) also stops whatever else
+  mirror. The panel (⏪ История / 🛠 Инструменты) also stops whatever else
   holds that session, records it in `projects/.resume.json`, and its watcher
   starts those mirrors again once the run is over — whatever the outcome. A run
   started by hand doesn't bring anything back. A mirror started on a session
   another project's mirror holds replaces it for good (that one is disabled):
   one mirror per session.
-- `past_mode.py` keeps checkpoints in the DB — an interruption resumes from
+- The replay has the live mirror's watchdog too (`Type=notify`,
+  `WatchdogSec=600`, the same `updates.GetState` probe): only the connection
+  is checked, not progress — its FloodWaits may last hours. A dead connection
+  → restarted, resumed from its checkpoints; otherwise a hung replay would keep
+  the project's mirror stopped. Check: `systemctl show telemirror-past@<key>.service -p Type -p WatchdogUSec`.
+- The history replay keeps checkpoints in the DB — an interruption resumes from
   where it left off. A full reset of history and recipients —
-  `skylon_set/clear_channels.py` (in the bot: 🛠 Обслуживание → 🧨 Очистка каналов).
+  `telemirror.tasks.clear_channels` (in the bot: 🛠 Инструменты → 🧨 Очистка каналов).
 
 ## Control panel
 
@@ -150,7 +169,7 @@ journalctl -u telemirror-panel.service -f
 - Notifications: the panel polls `systemctl show` every 30 s and messages the
   admins about finished/failed runs and mirror crashes, and resumes paused
   mirrors.
-- Config saves validate the candidate by importing `config.py` in a child
+- Config saves validate the candidate by importing `telemirror.config` in a child
   process (cv2 included) — hence `MemoryMax=600M` on the panel unit.
 - Check on first deploy: `systemctl show telemirror@<key>.service --timestamp=unix -p
   ActiveEnterTimestamp` prints `@<unix>` (the card's "unapplied changes" hint
@@ -176,9 +195,14 @@ Don't leave the VS Code Remote Server running in production — it uses
 
 ```bash
 cd /root/telemirror && git pull
-systemctl daemon-reload            # if files under deploy/systemd/ changed
+systemctl daemon-reload            # the units are symlinks into the repo: picks up their changes
 systemctl restart 'telemirror@*.service' telemirror-panel.service
 ```
+
+A new unit in the repo (e.g. `telemirror-report.{timer,service}`) has no
+symlink yet: re-run `sudo deploy/bootstrap.sh` once (idempotent) — it links
+and enables the timers. `python -m telemirror.selfcheck` says when that's
+needed (❌ Юниты systemd: не установлены …).
 
 ## Notes
 
@@ -191,6 +215,6 @@ systemctl restart 'telemirror@*.service' telemirror-panel.service
   it breaks `__pycache__` writes under `/root/telemirror`, and the payoff for
   a solo bot is small. `PrivateTmp`, `NoNewPrivileges`, `ProtectSystem=full`
   are kept.
-- **The `/tmp` cleanup cron** mainly matters for manual `past_mode.py` runs
+- **The `/tmp` cleanup cron** mainly matters for manual `telemirror.past` runs
   outside systemd — the units themselves clean up their temp files via
   `PrivateTmp=true`.

@@ -10,7 +10,7 @@ import logging
 
 import pytest
 
-import main as main_module
+from telemirror import live
 from telemirror.storage import InMemoryDatabase
 from tests.conftest import run
 
@@ -26,13 +26,12 @@ def test_db_is_closed_when_health_endpoint_fails_after_db_opens(monkeypatch):
     async def failing_health_endpoint(host, port):
         raise RuntimeError("port already in use")
 
-    monkeypatch.setattr(main_module, "serve_health_endpoint", failing_health_endpoint)
+    monkeypatch.setattr(live, "serve_health_endpoint", failing_health_endpoint)
 
     with pytest.raises(RuntimeError, match="port already in use"):
         run(
-            main_module.run_telemirror(
-                use_memory_db=True,
-                db_uri="unused",
+            live.run_telemirror(
+                db_url=None,
                 api_id="1",
                 api_hash="x",
                 api_device_model=None,
@@ -65,14 +64,13 @@ def test_db_failure_propagates_and_health_failure_is_logged_when_both_fail(
     async def failing_health_endpoint(host, port):
         raise OSError("port already in use")
 
-    monkeypatch.setattr(main_module, "serve_health_endpoint", failing_health_endpoint)
+    monkeypatch.setattr(live, "serve_health_endpoint", failing_health_endpoint)
 
     with caplog.at_level(logging.ERROR, logger="test.mainstartup"):
         with pytest.raises(RuntimeError, match="bad DSN"):
             run(
-                main_module.run_telemirror(
-                    use_memory_db=True,
-                    db_uri="unused",
+                live.run_telemirror(
+                    db_url=None,
                     api_id="1",
                     api_hash="x",
                     api_device_model=None,
@@ -89,3 +87,57 @@ def test_db_failure_propagates_and_health_failure_is_logged_when_both_fail(
     assert any(
         "port already in use" in record.message for record in caplog.records
     )
+
+
+def _kwargs():
+    return {
+        "db_url": None, "api_id": "1", "api_hash": "x", "api_device_model": None,
+        "api_system_version": None, "api_app_version": None, "session_string": "x",
+        "chat_mapping": {}, "logger": logging.getLogger("test.mainstartup"),
+        "host": "127.0.0.1", "port": 0,
+    }
+
+
+class _Runner:
+    cleaned = 0
+
+    async def cleanup(self):
+        _Runner.cleaned += 1
+
+
+def test_db_and_health_are_closed_when_the_mirror_fails_to_build(monkeypatch):
+    """Telemirror(...) raising (a bad session string…) must still close the
+    opened database and stop the health endpoint."""
+    closed = []
+
+    async def fake_close(self):
+        closed.append(self)
+
+    async def health(host, port):
+        return _Runner()
+
+    def broken(**kwargs):
+        raise ValueError("bad session")
+
+    monkeypatch.setattr(InMemoryDatabase, "close", fake_close)
+    monkeypatch.setattr(live, "serve_health_endpoint", health)
+    monkeypatch.setattr(live, "Telemirror", broken)
+    _Runner.cleaned = 0
+    with pytest.raises(ValueError, match="bad session"):
+        run(live.run_telemirror(**_kwargs()))
+    assert len(closed) == 1 and _Runner.cleaned == 1
+
+
+def test_health_endpoint_is_stopped_when_the_database_fails(monkeypatch):
+    async def failing_init(self):
+        raise RuntimeError("bad DSN")
+
+    async def health(host, port):
+        return _Runner()
+
+    monkeypatch.setattr(InMemoryDatabase, "_async__init__", failing_init)
+    monkeypatch.setattr(live, "serve_health_endpoint", health)
+    _Runner.cleaned = 0
+    with pytest.raises(RuntimeError, match="bad DSN"):
+        run(live.run_telemirror(**_kwargs()))
+    assert _Runner.cleaned == 1

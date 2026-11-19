@@ -1,4 +1,4 @@
-"""Smoke coverage for past_mode.py: checkpoint integrity + the replay loop
+"""Smoke coverage for telemirror.past: checkpoint integrity + the replay loop
 (grouping, checkpoint advance, buffer vs streaming)."""
 
 import logging
@@ -7,8 +7,8 @@ import pytest
 from telethon import errors
 from telethon.tl import types
 
-import past_mode
-from config import DirectionConfig, PastModeConfig
+from telemirror import past as past_mode
+from telemirror.directions import DirectionConfig, PastModeConfig
 from telemirror.messagefilters import EmptyMessageFilter, MediaDownloadError
 from telemirror.storage import InMemoryDatabase, MirrorMessage
 from tests.conftest import run
@@ -53,13 +53,13 @@ def test_integrity_keeps_checkpoint_below_max_mirrored():
 
 
 def test_integrity_does_not_skip_history_after_live_mirror_ran():
-    """Backfill interrupted at 50, then main.py mirrored a new post 9000 for
+    """Backfill interrupted at 50, then the live mirror mirrored a new post 9000 for
     the same pair: resuming must continue from 50, not jump to 9000 and
     silently skip 51..8999."""
     db = run(InMemoryDatabase(max_capacity=1000))
     run(db.insert_batch([MirrorMessage(oid, SRC, oid + 1000, TGT) for oid in range(1, 51)]))
     run(db.set_past_mode_checkpoint(SRC, TGT, 50))
-    run(db.insert(MirrorMessage(9000, SRC, 5000, TGT)))  # live mirror's row
+    run(db.insert_batch([MirrorMessage(9000, SRC, 5000, TGT)]))  # live mirror's row
     assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (50, 51)
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 50
 
@@ -94,8 +94,11 @@ def _msg(mid, grouped_id=None):
     )
 
 
-class _Total:
-    def __init__(self, n):
+class _Total(list):
+    """Telethon's TotalList: the messages asked for, and the channel's count."""
+
+    def __init__(self, n, messages=()):
+        super().__init__(messages)
         self.total = n
 
 
@@ -103,8 +106,9 @@ class FakeClient:
     def __init__(self, messages):
         self._messages = sorted(messages, key=lambda m: m.id)
 
-    async def get_messages(self, entity, limit=None, **kw):
-        return _Total(len(self._messages))
+    async def get_messages(self, entity, limit=None, offset_date=None, **kw):
+        newest = [m for m in reversed(self._messages) if offset_date is None or m.date < offset_date]
+        return _Total(len(self._messages), newest[:limit or 0])
 
     def iter_messages(self, entity, limit=None, reverse=False, min_id=None, **kw):
         msgs = list(self._messages)
@@ -380,7 +384,7 @@ def test_replay_with_retry_skips_stuck_message_after_limit(monkeypatch):
     async def fake_sleep(seconds):
         pass
 
-    async def fake_notify(client, src, mid, log):
+    async def fake_notify(src, mid, log):
         notified.append(mid)
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
@@ -436,6 +440,41 @@ def test_replay_resumes_from_checkpoint(monkeypatch):
         monkeypatch, msgs, PastModeConfig(full_history=True, send_delay=0), db=db
     )
     assert calls == [("new", 3), ("new", 4), ("new", 5)]  # min_id=2 is exclusive
+
+
+def _progress(caplog):
+    return [r.getMessage() for r in caplog.records if "to process" in r.getMessage()
+            or "(" in r.getMessage() and "%)" in r.getMessage()]
+
+
+def test_replay_progress_after_a_resume_counts_what_is_left(monkeypatch, caplog):
+    """A resumed full_history pass goes through what's after the checkpoint, not
+    the whole channel; an album counts its messages (iter_total's unit)."""
+    db = run(InMemoryDatabase())
+    run(db.set_past_mode_checkpoint(SRC, TGT, 7))
+    run(db.insert_batch([MirrorMessage(7, SRC, 907, TGT)]))
+    with caplog.at_level(logging.INFO, logger=_LOG.name):
+        _run_replay(monkeypatch, [*(_msg(i) for i in range(1, 8)), _msg(8, 5), _msg(9, 5), _msg(10)],
+                    PastModeConfig(full_history=True, send_delay=0), db=db)
+    lines = _progress(caplog)
+    assert any("~3 message(s) to process" in line for line in lines)  # 8, 9, 10 — not all 10
+    assert any(": 2/3 (" in line for line in lines)  # the album first: its 2 messages
+
+
+def test_replay_progress_since_a_date_counts_from_the_date(monkeypatch, caplog):
+    from datetime import datetime, timezone
+
+    def dated(mid, day):
+        m = _msg(mid)
+        m.date = datetime(2026, 1, day, tzinfo=timezone.utc)
+        return m
+
+    msgs = [dated(1, 1), dated(2, 2), dated(3, 5), dated(4, 5), dated(5, 6)]
+    since = datetime(2026, 1, 4, tzinfo=timezone.utc)
+    with caplog.at_level(logging.INFO, logger=_LOG.name):
+        _run_replay(monkeypatch, msgs, PastModeConfig(since_date=since, send_delay=0))
+    lines = _progress(caplog)
+    assert any("~3 message(s) to process" in line for line in lines)  # 3, 4, 5 — not all 5
 
 
 def test_replay_multi_topic_single_pass(monkeypatch):
@@ -573,6 +612,36 @@ def test_edit_links_pass_rewrites_cross_message_link(monkeypatch):
     entity, message_id, _text, ents = client.edits[0]
     assert (entity, message_id) == (TGT, 910)
     assert ents[0].url == private_message_link(TGT, 907)
+
+
+def test_edit_links_pass_waits_out_a_long_flood_once(monkeypatch):
+    """Telethon sleeps through a FloodWait ≤ its threshold itself; a longer one
+    is waited out here and the edit made, not skipped for good."""
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([MirrorMessage(10, SRC, 910, TGT), MirrorMessage(7, SRC, 907, TGT)]))
+    src_peer = -SRC - 1000000000000
+    linked = types.Message(id=10, peer_id=types.PeerChannel(1), message="link", entities=[
+        types.MessageEntityTextUrl(offset=0, length=4, url=f"https://t.me/c/{src_peer}/7")])
+
+    class Flooding(_EditFakeClient):
+        floods = 1
+
+        async def edit_message(self, *a, **kw):
+            if self.floods:
+                self.floods -= 1
+                raise errors.FloodWaitError(request=None, capture=900)
+            await super().edit_message(*a, **kw)
+
+    slept = []
+
+    async def sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(past_mode.asyncio, "sleep", sleep)
+    client = Flooding([linked])
+    run(past_mode._edit_links_pass(
+        client, db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]}, _LOG))
+    assert slept == [900] and [(e, m) for e, m, _t, _ents in client.edits] == [(TGT, 910)]
 
 
 class _BatchRecordingClient(_EditFakeClient):
@@ -856,3 +925,16 @@ def test_configure_logging_covers_telemirror_modules(_restore_loggers):
     media_logger = logging.getLogger("telemirror.messagefilters._media")
     assert media_logger.isEnabledFor(logging.INFO)
     assert logging.getLogger("telemirror").handlers
+
+
+def test_a_skipped_post_is_reported_through_the_bot(monkeypatch):
+    sent = []
+
+    class Notifier:
+        async def send(self, body):
+            sent.append(body)
+            return True
+
+    monkeypatch.setattr(past_mode.BotNotifier, "from_env", classmethod(lambda cls, key=None, kind="live": Notifier()))
+    run(past_mode._notify_skipped(-1001111111111, 77, logging.getLogger("test")))
+    assert len(sent) == 1 and "пропустило пост" in sent[0] and "t.me/c/1111111111/77" in sent[0]

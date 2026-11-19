@@ -6,8 +6,8 @@ constructs these requests."""
 
 from telethon.tl.functions import channels, messages
 
-from skylon_set import _common
-from skylon_set import setup_mirrors as sm
+from telemirror.tasks import _common
+from telemirror.tasks import setup_mirrors as sm
 
 
 def test_forum_requests_come_from_messages_namespace():

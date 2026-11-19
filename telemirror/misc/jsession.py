@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Telegram Desktop fingerprint new sessions are created with (login.py).
+# Telegram Desktop fingerprint new sessions are created with (telemirror.login).
 TDESKTOP_APP: Dict[str, Any] = {
     "api_id": 2040,
     "api_hash": "b18441a1ff607e10a989891a5462e627",

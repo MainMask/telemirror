@@ -3,7 +3,7 @@ get paired / renamed / deleted, so mis-matching could mis-target a destructive o
 
 from types import SimpleNamespace
 
-from skylon_set import setup_mirrors as sm
+from telemirror.tasks import setup_mirrors as sm
 
 
 def test_has_de_sklad_variants():

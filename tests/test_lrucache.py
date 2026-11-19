@@ -12,7 +12,7 @@ def test_basic_put_get():
 def test_get_refreshes_recency():
     """A read via .get() must mark the entry recently-used, or it would be
     evicted before entries that were only ever written."""
-    c = LRUCache[str, int](capacity=10)  # free_factor 0.5 -> purge keeps 5 newest
+    c = LRUCache[str, int](capacity=10)  # purge keeps the 5 newest
     for i in range(10):
         c[f"k{i}"] = i
     c.get("k0")        # touch the oldest via .get
@@ -30,12 +30,12 @@ def test_setitem_eviction_keeps_capacity_bound():
 
 
 def test_setdefault_on_existing_key_refreshes_recency():
-    """`InMemoryDatabase.insert()` appends to a key's message list via
+    """`InMemoryDatabase.insert_batch()` appends to a key's message list via
     `setdefault`, not `__setitem__`. `setdefault` on a hit resolves through
     the overridden `__getitem__`, so it counts as a touch — a second mirror of
     an old message id must not make that key evict ahead of a genuinely
     untouched one."""
-    c = LRUCache[str, list](capacity=10)  # free_factor 0.5 -> purge keeps 5 newest
+    c = LRUCache[str, list](capacity=10)  # purge keeps the 5 newest
     for i in range(10):
         c[f"k{i}"] = [i]
     c.setdefault("k0", []).append(99)  # touch the oldest via setdefault, as insert() does

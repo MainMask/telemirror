@@ -36,3 +36,15 @@ def test_copy_message_preserves_invert_media_and_effect():
     cloned = CopyEventMessage().copy_message(msg)
     assert cloned.invert_media is True
     assert cloned.effect == 123
+
+
+def test_copy_message_carries_every_constructor_field():
+    """Fields outside the old hand-written list (offline, video_processing_pending…)
+    survive the copy; media and entities are copies, not the same objects."""
+    msg = make_message("text")
+    msg.offline = True
+    msg.video_processing_pending = True
+    msg.entities = [types.MessageEntityBold(offset=0, length=4)]
+    cloned = CopyEventMessage().copy_message(msg)
+    assert cloned.offline is True and cloned.video_processing_pending is True
+    assert cloned.entities[0].length == 4 and cloned.entities[0] is not msg.entities[0]

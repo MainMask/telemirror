@@ -1,22 +1,25 @@
-"""The menu as data (telemirror/panel/registry.py) keeps the bot uniform:
+"""The menu as data (bot/registry.py) keeps the bot uniform:
 every button handled, one emoji = one meaning, Russian labels, a sound tree."""
 
 import importlib
 import re
+from itertools import groupby
 
-from telemirror.panel import registry
-from telemirror.panel.routers._common import CONFIRMED, HANDLED, INPUTS
-from telemirror.panel.screens import VIEWS
+from bot import registry
+from bot.keyboards.menu import screen_kb
+from bot.routers._common import CONFIRMED, HANDLED, INPUTS
+from bot.screens import VIEWS
 
-importlib.import_module("telemirror.panel.app")  # registers every router's handlers
+importlib.import_module("bot.app")  # registers every router's handlers
 
 LABELS = [s.title for s in registry.SCREENS.values()] + [
     b.title for s in registry.SCREENS.values() for b in s.buttons
-]
+] + list(registry.TITLES.values())
 
 
-def test_every_button_has_a_handler():
+def test_every_button_has_a_handler_and_every_handler_a_button():
     assert registry.unhandled_actions(HANDLED) == []
+    assert registry.unknown_actions(HANDLED) == []
 
 
 def _root(label: str) -> str:
@@ -43,7 +46,7 @@ def test_labels_are_an_emoji_and_russian_words():
     for label in LABELS:
         emoji, _, words = label.partition(" ")
         assert emoji and not re.search(r"[\w]", emoji), label
-        assert re.fullmatch(r"[А-Яа-яЁё .,\-]+(\.jsession)?", words), label
+        assert re.fullmatch(r"[А-Яа-яЁё .,\-]+(\.jsession)?(N…| @…|…)?", words), label
 
 
 def test_the_tree_is_sound():
@@ -57,14 +60,54 @@ def test_the_tree_is_sound():
 
 def test_screens_opened_from_a_list_have_a_view():
     for screen_id in registry._NOT_LISTED:
-        assert screen_id in VIEWS or screen_id == "fv", screen_id  # fv: opened by the filter editor
+        assert screen_id in VIEWS, screen_id
 
 
 def test_confirmations_and_inputs_are_registered():
-    assert {"start", "stop", "restart", "delete", "dir_del", "cfg_put", "cfg_undo", "task", "acc_del"} <= set(CONFIRMED)
+    assert {"unit_start", "unit_stop", "unit_restart", "delete", "dir_del", "cfg_put", "cfg_undo", "task",
+            "acc_del", "flt_del"} <= set(CONFIRMED)
     assert {"rename", "icon", "global", "dir_src", "dir_delay", "filter_items"} <= set(INPUTS)
 
 
 def test_menu_path_names_the_way_there():
     assert registry.menu_path("dir_add") == "📁 Проекты → проект → 🔀 Направления → ➕ Добавить"
-    assert registry.menu_path("acc") == "⚙️ Настройки → 👤 Аккаунты"
+    assert registry.menu_path("p_link") == "📁 Проекты → проект → ⚙️ Настройки проекта → 🔗 Ссылка вместо чужих"
+    assert registry.menu_path("acc_login") == "⚙️ Настройки → 👤 Аккаунты → 🔑 Войти по номеру"
+    assert registry.menu_path("ca") == "📁 Проекты → проект → 🛠 Инструменты → 🛂 Проверка доступа"
+    assert registry.menu_path("cfg_get") == "📁 Проекты → проект → ⚙️ Настройки проекта → 💾 Файл настроек → 📥 Скачать"
+
+
+def test_a_screens_groups_are_each_in_one_place():
+    """A subheading once on its screen: its buttons together under it."""
+    for screen in registry.SCREENS.values():
+        groups = [g for g, _ in groupby(b.group for b in screen.buttons)]
+        assert len(groups) == len(set(groups)), screen.id
+
+
+def test_colours_follow_one_rule():
+    """Red only for what can't be undone, green only for a confirmation; blue is
+    picked by a view, one per screen (screen_kb's ``primary``)."""
+    danger = {b.action for s in registry.SCREENS.values() for b in s.buttons if b.style}
+    assert danger == {"delete", "dir_del", "acc_del", "cc_run"}
+    for s in registry.SCREENS.values():
+        for b in s.buttons:
+            assert b.style in ("", registry.DANGER), b.action
+    assert set(registry.LABEL_STYLES.values()) <= {registry.DANGER, registry.SUCCESS}
+    for label, style in registry.LABEL_STYLES.items():
+        assert (style == registry.DANGER) == label.startswith("🗑"), label
+
+
+def test_screen_kb_colours_the_primary_and_the_dangerous():
+    kb = screen_kb("card", "p", primary="restart")
+    styles = {b.text: b.style for row in kb.inline_keyboard for b in row}
+    assert styles["🔁 Перезапустить"] == registry.PRIMARY
+    assert [s for s in styles.values() if s == registry.PRIMARY] == [registry.PRIMARY]
+    assert {b.text: b.style for row in screen_kb("mng", "p").inline_keyboard for b in row}[
+        "🗑 Удалить проект"] == registry.DANGER
+
+
+def test_a_group_starts_its_own_row():
+    rows = [[b.text for b in row] for row in screen_kb("mng", "p").inline_keyboard]
+    copying = {b.title for b in registry.SCREENS["mng"].buttons if b.group == registry.COPYING}
+    for row in rows:
+        assert set(row) <= copying or not set(row) & copying, row

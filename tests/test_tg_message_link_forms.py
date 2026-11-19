@@ -14,7 +14,7 @@ import pytest
 from telethon import errors, utils
 from telethon.tl import types
 
-from config import DirectionConfig
+from telemirror.directions import DirectionConfig
 from telemirror.messagefilters import (
     EmptyMessageFilter,
     FilterAction,
@@ -55,7 +55,7 @@ def _processor(db):
 def _rewrite_text_url(url, mirrored=True):
     db = run(InMemoryDatabase())
     if mirrored:
-        run(db.insert(MirrorMessage(5, REF, 500, TARGET)))
+        run(db.insert_batch([MirrorMessage(5, REF, 500, TARGET)]))
     msg = make_message(
         "link", entities=[types.MessageEntityTextUrl(offset=0, length=4, url=url)]
     )
@@ -98,7 +98,7 @@ def test_non_message_links_are_left_alone(url):
 
 def test_bare_url_entity_text_is_replaced_and_later_entities_shift():
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(5, REF, 500, TARGET)))
+    run(db.insert_batch([MirrorMessage(5, REF, 500, TARGET)]))
     bare = f"t.me/c/{REF_RAW}/3/5"
     text = f"see {bare} now"
     msg = make_message(
@@ -174,7 +174,7 @@ def test_username_resolution_failure_kinds(failure, expected):
             return types.PeerChannel(REF_RAW)
 
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(5, REF, 500, TARGET)))
+    run(db.insert_batch([MirrorMessage(5, REF, 500, TARGET)]))
     proc = _processor(db)
     proc._client = _Client()
     msg = make_message(
@@ -200,7 +200,7 @@ def test_blacklisted_channel_outside_the_config_stays_blocked():
             return types.PeerChannel(old_raw)
 
     db = run(InMemoryDatabase())
-    run(db.insert(MirrorMessage(12, old, 777, -1003000000008)))
+    run(db.insert_batch([MirrorMessage(12, old, 777, -1003000000008)]))
     proc = _processor(db)
     proc._client = _RetiredClient()
     url = "https://t.me/openfrm/12"

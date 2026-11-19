@@ -1,0 +1,740 @@
+"""History replay: copies the history of the directions that have
+``past_mode:`` through the mirroring pipeline, resumable from a DB checkpoint.
+
+    python -m telemirror.past        # telemirror-past@<key>.service, ⏪ История
+
+Takes the project's session (the lock stops its live mirror's process from
+sharing it; the panel pauses the mirror meanwhile).
+"""
+
+import asyncio
+import logging
+import sys
+from copy import deepcopy
+from time import monotonic
+from typing import Dict, List, Optional, Tuple
+
+from telethon import TelegramClient, errors, events, utils
+from telethon.tl import types
+
+from telemirror.account import open_account
+from telemirror.config import CHAT_MAPPING, DB_URL, LOG_LEVEL, TELEMIRROR_PROJECT
+from telemirror.directions import DirectionConfig
+from telemirror.messagefilters import FilterAction, MediaDownloadError
+from telemirror.mirroring import EventProcessor
+from telemirror.misc.links import private_message_link
+from telemirror.notify import BotNotifier
+from telemirror.misc.log_setup import setup_stdout_logger
+from telemirror.misc import sdnotify
+from telemirror.misc.message_groups import iter_message_groups
+from telemirror.misc.signals import cancel_on_sigterm
+from telemirror.misc.telegram_client import cancel_and_await, connection_probe
+from telemirror.storage import Database, MirrorMessage, open_database
+
+_LOG_EVERY = 25  # log progress every N messages/albums
+# On a dropped connection: bounded (the live mirror retries forever, a replay gives up)
+_CONN_RETRIES = 20
+_RETRY_DELAY = 3  # seconds between reconnect attempts
+
+# MediaDownloadError = a transient Telegram file-serving failure that outlived
+# download_media_with_retry's own retries. Wait and re-run from the checkpoint;
+# after _MEDIA_RETRY_LIMIT consecutive attempts on the same message — skip past
+# it, tell the panel's admins, and move on (don't crash-loop under systemd, don't
+# hold the live mirror down for hours).
+_MEDIA_RETRY_WAIT = 120  # seconds between retries
+_MEDIA_RETRY_LIMIT = 5
+
+# A FloodWait that keeps recurring at the very same checkpoint (Telegram never
+# clears the throttle) would otherwise retry forever: the process stays alive
+# but makes no progress, so systemd's Restart= never sees it as a crash and
+# nothing alerts. Give up after this many consecutive same-checkpoint waits so
+# it becomes a real, detectable, alertable process exit instead of a silent
+# hang. Progress at a *different* checkpoint resets the count — normal
+# flood-limiting churn across many directions must not trip this.
+_FLOOD_RETRY_LIMIT = 20
+
+
+def _configure_logging(log_level: str) -> logging.Logger:
+    logger = setup_stdout_logger("past_mode", log_level)
+    # Telethon's reconnection messages go through its own logger — give it the
+    # same stdout format so they appear with timestamps alongside our progress logs.
+    setup_stdout_logger("telethon", logging.WARNING)
+    # The filters and media helpers log through `telemirror.*` module loggers
+    # (download retries, skipped stamps) — same format and level as ours.
+    setup_stdout_logger("telemirror", log_level)
+    return logger
+
+
+def _strategy_label(pm) -> str:
+    if pm.since_date is not None:
+        return f"since_date={pm.since_date.isoformat()}"
+    if pm.last_n is not None:
+        return f"last_n={pm.last_n}"
+    return "full_history"
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}h"
+    if seconds >= 60:
+        return f"{seconds / 60:.0f}min"
+    return f"{seconds:.0f}s"
+
+
+def _log_progress(
+    logger: logging.Logger, prefix: str, processed: int, total: int, start_time: float
+) -> None:
+    elapsed = monotonic() - start_time
+    if total > 0:
+        pct = processed / total * 100.0
+        eta = f", ETA {elapsed / processed * (total - processed):.0f}s" if processed >= 3 else ""
+        logger.info(f"{prefix}: {processed}/{total} ({pct:.1f}%){eta}")
+    else:
+        logger.info(f"{prefix}: processed {processed}")
+
+
+def _log_overall(
+    logger: logging.Logger,
+    pair_no: int,
+    pair_count: int,
+    done: int,
+    total: int,
+    run_start: float,
+) -> None:
+    """Cross-pair progress line spanning every channel pair."""
+    elapsed = monotonic() - run_start
+    if total > 0 and done > 0:
+        pct = min(100.0, done / total * 100.0)
+        eta = (
+            f" • ETA ~{_format_duration(elapsed / done * (total - done))}"
+            if done < total
+            else ""
+        )
+        tail = f"overall ~{done}/{total} ({pct:.0f}%){eta}"
+    else:
+        tail = f"overall processed {done}"
+    logger.info(
+        f"[Progress] pair {pair_no}/{pair_count} • {tail} • elapsed {_format_duration(elapsed)}"
+    )
+
+
+async def _integrity_check(
+    database: Database,
+    source_id: int,
+    target_id: int,
+    logger: logging.Logger,
+) -> tuple[Optional[int], int]:
+    """Checks the checkpoint, returns (checkpoint, mirror count in DB).
+
+    The checkpoint is never rolled forward to the highest mirrored id: rows
+    past it can come from the live mirror (telemirror.live) running between two
+    past_mode runs, and jumping over them would silently skip every
+    unreplayed message in between. Already-mirrored messages past the
+    checkpoint are skipped per target by `EventProcessor`'s own dedup.
+    """
+    prefix = f"[PastMode] {source_id}→{target_id}"
+    checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)
+    if checkpoint is None:
+        return None, 0
+
+    mirrors = await database.get_messages_for_channel_pair(source_id, target_id)
+    # Deduplicated by source message: overlapping DirectionConfigs (e.g. a
+    # catch-all from_topic_id=None config plus a topic-scoped one) can mirror
+    # the same source message to the same target twice, producing 2 rows —
+    # a raw row count would overshoot the budget used for bounded last_n resume.
+    mirror_count = len({m.original_id for m in mirrors})
+    logger.info(f"{prefix}: checkpoint={checkpoint}, mirrors in DB={mirror_count}")
+
+    if mirror_count == 0:
+        logger.warning(
+            f"{prefix}: checkpoint={checkpoint} is set, but no mirrors were found "
+            "(possibly every message was filtered out, or a DB issue)"
+        )
+        return checkpoint, 0
+
+    return checkpoint, mirror_count
+
+
+async def _remaining(
+    client: TelegramClient,
+    source_id: int,
+    after_id: Optional[int],
+    since_date,
+    total: int,
+    logger: logging.Logger,
+    prefix: str,
+) -> int:
+    """~How many messages a pass goes through, from ``after_id`` (a resume) or
+    else from ``since_date``: the id span from there to the newest message.
+    Ids of deleted and service messages count too, so it's capped by ``total``
+    (the whole channel); ``total`` when it can't tell. Only the progress log
+    uses it."""
+    try:
+        if after_id is None:
+            before = await client.get_messages(source_id, limit=1, offset_date=since_date)
+            after_id = before[0].id if before else 0
+        newest = await client.get_messages(source_id, limit=1)
+        span = max(0, newest[0].id - after_id) if newest else 0
+    except Exception as e:
+        logger.warning(f"{prefix}: failed to estimate the messages left: {e}")
+        return total
+    return min(total, span) if total > 0 else span
+
+
+async def _replay_direction(
+    client: TelegramClient,
+    database: Database,
+    source_id: int,
+    target_id: int,
+    cfgs: List[DirectionConfig],
+    logger: logging.Logger,
+    total: Optional[int] = None,
+) -> int:
+    """One pass over a channel's history for a (source, target) pair.
+
+    Every topic-direction of the pair is handled in this single pass: the
+    processor routes each message to whichever cfg's from_topic_id matches.
+    `total` (source message count) is reused from `_run` when given.
+    Returns the number of messages/albums processed.
+    """
+    pm = cfgs[0].past_mode
+    assert pm is not None, "_replay_direction requires cfgs[0].past_mode to be set"
+    prefix = f"[PastMode] {source_id}→{target_id}"
+
+    labels = {_strategy_label(c.past_mode) for c in cfgs}
+    if len(labels) > 1:
+        logger.warning(
+            f"{prefix}: the pair's topics have different past_mode strategies "
+            f"({sorted(labels)}), using the first one ({_strategy_label(pm)})"
+        )
+    topics_note = "" if len(cfgs) == 1 else f", topics={len(cfgs)}"
+    logger.info(f"{prefix}: starting (strategy={_strategy_label(pm)}{topics_note})")
+
+    checkpoint, mirrors_done = await _integrity_check(database, source_id, target_id, logger)
+    if checkpoint is not None:
+        logger.info(f"{prefix}: resuming from message_id={checkpoint}")
+
+    if total is None:
+        try:
+            total = (await client.get_messages(source_id, limit=0)).total
+        except Exception as e:
+            logger.warning(f"{prefix}: failed to get total: {e}")
+            total = 0
+
+    # last_n without a checkpoint: buffer into memory (newest first), reverse
+    use_buffer = pm.last_n is not None and checkpoint is None
+    # last_n *with* a checkpoint: resume with a raw-message budget instead of
+    # a hard iter_messages(limit=...) cutoff — see the consumption loop below.
+    bounded_resume = pm.last_n is not None and checkpoint is not None
+    if use_buffer:
+        assert pm.last_n is not None  # implied by use_buffer
+        buffer: List = []
+        # Bounded via limit=last_n plus an album margin rather than a hard
+        # iter_messages(limit=last_n) cutoff: that could land mid-album (an
+        # album is only known complete once iter_message_groups sees the
+        # next non-matching message), silently dropping its older members.
+        # +10 covers the worst case since Telegram caps albums at ~10 items.
+        # iter_message_groups (already used below for the final consumption
+        # pass) keeps each boundary album whole, so no manual grouped_id
+        # tracking is needed here.
+        async for group in iter_message_groups(
+            client.iter_messages(source_id, limit=pm.last_n + 10)
+        ):
+            items = group if isinstance(group, list) else [group]
+            buffer.extend(items)
+            if len(buffer) >= pm.last_n:
+                break
+        buffer.reverse()
+        iter_total = len(buffer)
+    else:
+        iter_kwargs: dict = {"reverse": True}
+        if checkpoint is not None:
+            iter_kwargs["min_id"] = checkpoint  # min_id is exclusive — resume from the next one
+        elif pm.since_date is not None:
+            iter_kwargs["offset_date"] = pm.since_date
+        # full_history: reverse=True only
+        if bounded_resume:
+            assert pm.last_n is not None  # implied by bounded_resume
+            iter_total = max(0, pm.last_n - mirrors_done)
+            # Not bounded here via iter_messages(limit=...): a hard cutoff
+            # could land mid-album (an album is only known complete once
+            # iter_message_groups sees the next non-matching message),
+            # splitting it across two replay passes. Bounded by `processed`
+            # in the consumption loop below instead.
+        elif checkpoint is not None or pm.since_date is not None:
+            # not the whole channel: only what's after the checkpoint / the date
+            iter_total = await _remaining(
+                client, source_id, checkpoint, pm.since_date, total, logger, prefix
+            )
+        else:
+            iter_total = total
+
+    if iter_total > 0:
+        eta_str = (
+            f", at least ≈{_format_duration(iter_total * pm.send_delay)} "
+            "(send_delay only, download time not counted)"
+            if pm.send_delay > 0
+            else ""
+        )
+        logger.info(f"{prefix}: ~{iter_total} message(s) to process{eta_str}")
+
+    # Full CHAT_MAPPING is needed so _try_rewrite_tg_link can resolve cross-channel links.
+    # Override only the current source to this single target pair to keep routing correct.
+    processor = EventProcessor(
+        chat_mapping={**CHAT_MAPPING, source_id: {target_id: cfgs}},
+        database=database,
+        client=client,
+        logger=logger,
+        strict_media_errors=True,  # exhausted transient download → retry, not degrade
+    )
+
+    processed = 0
+    # Raw source-message count, as opposed to `processed` (one per group
+    # regardless of album size): `iter_total` for a bounded resume is a
+    # last_n budget in raw messages, so the stop check below must compare
+    # against the same unit or it can overshoot by a whole album per group.
+    messages_done = 0
+    start_time = monotonic()
+
+    def _log_step() -> None:
+        # messages_done, not processed: iter_total counts messages, an album is several
+        if processed == 1 or processed % _LOG_EVERY == 0:
+            _log_progress(logger, prefix, messages_done, iter_total, start_time)
+
+    async def process_single(msg) -> None:
+        nonlocal processed, messages_done
+        link = private_message_link(source_id, msg.id)
+        await processor.new_message(source_id, msg, link)
+        await database.set_past_mode_checkpoint(source_id, target_id, msg.id)
+        processed += 1
+        messages_done += 1
+        _log_step()
+        await asyncio.sleep(pm.send_delay)
+
+    async def process_album(album: List) -> None:
+        nonlocal processed, messages_done
+        link = private_message_link(source_id, album[0].id)
+        try:
+            await processor.new_album(source_id, album, link)
+        except MediaDownloadError as e:
+            # The whole album failed together (no partial per-config send happens
+            # before this propagates) — if retries are exhausted, give up on the
+            # WHOLE album, not just the one item that failed, so earlier siblings
+            # aren't silently excluded by a checkpoint landing between them.
+            # e.message_id is overwritten for that checkpoint purpose only;
+            # e.failed_message_id (set in MediaDownloadError.__init__)
+            # still points at the item that actually failed to download, for
+            # the skip notification below.
+            e.message_id = album[-1].id
+            raise
+        await database.set_past_mode_checkpoint(source_id, target_id, album[-1].id)
+        processed += 1
+        messages_done += len(album)
+        _log_step()
+        await asyncio.sleep(pm.send_delay)
+
+    async def _aiter(seq):
+        for item in seq:
+            yield item
+
+    source = (
+        _aiter(buffer)
+        if use_buffer
+        else client.iter_messages(source_id, **iter_kwargs)
+    )
+    # Bounded resume: stop once iter_total raw messages have been processed,
+    # checked before each group so a 0 total doesn't process anything. Checked
+    # in raw-message units (messages_done), not groups, since a hard
+    # iter_messages(limit=...) cutoff could otherwise land mid-album — the
+    # budget can still overshoot by up to one album's size, but never
+    # compounds across multiple albums.
+    # iter_message_groups drops non-Message items (service messages): they produce
+    # no mirror, so they no longer advance the checkpoint (same as _sync_broadcast_channel).
+    async for group in iter_message_groups(source):
+        if bounded_resume and messages_done >= iter_total:
+            break
+        if isinstance(group, list):
+            await process_album(group)
+        else:
+            await process_single(group)
+
+    logger.info(f"{prefix}: done. Processed {processed} message(s)/album(s).")
+    return processed
+
+
+async def _notify_skipped(source_id: int, message_id: int, logger: logging.Logger) -> None:
+    """Tell the panel's admins that past_mode gave up on one message (Telegram
+    couldn't serve the file). Best effort — must not break the replay loop."""
+    notifier = BotNotifier.from_env(TELEMIRROR_PROJECT, "past")
+    if notifier is None:
+        return
+    link = private_message_link(source_id, message_id)
+    if not await notifier.send(
+        f"⚠️ Копирование истории пропустило пост {link}: Telegram так и не отдал его файл. "
+        "Перешлите его вручную, когда Telegram починится."
+    ):
+        logger.warning("could not tell the admins about the skipped post")
+
+
+async def _replay_with_retry(
+    client: TelegramClient,
+    database: Database,
+    source_id: int,
+    target_id: int,
+    cfgs: List[DirectionConfig],
+    logger: logging.Logger,
+    total: Optional[int] = None,
+) -> int:
+    """Run `_replay_direction`, retrying on a >threshold FloodWait or an
+    exhausted transient media download (`MediaDownloadError`).
+
+    Telethon auto-sleeps for waits ≤300s (flood_sleep_threshold); this loop
+    handles the larger ones — raised either from iter_messages or from a send
+    (mirroring re-raises both flood types). The checkpoint is saved as we go,
+    so after sleeping we resume from where we left off.
+    """
+    media_failures = 0
+    media_failure_checkpoint = object()  # sentinel: no stall seen yet
+    flood_failures = 0
+    flood_failure_checkpoint = object()  # sentinel: no stall seen yet
+    while True:
+        try:
+            return await _replay_direction(
+                client, database, source_id, target_id, cfgs, logger, total
+            )
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+            checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)
+            if checkpoint != flood_failure_checkpoint:
+                flood_failures = 0  # progressed since the last stall — fresh budget
+                flood_failure_checkpoint = checkpoint
+            flood_failures += 1
+            if flood_failures > _FLOOD_RETRY_LIMIT:
+                logger.error(
+                    f"FloodWait recurring at the same checkpoint after "
+                    f"{_FLOOD_RETRY_LIMIT} retries — giving up so systemd can "
+                    f"restart and alert"
+                )
+                raise
+            logger.warning(
+                f"FloodWait {e.seconds}s, waiting and retrying "
+                f"({flood_failures}/{_FLOOD_RETRY_LIMIT})..."
+            )
+            await asyncio.sleep(e.seconds)
+        except MediaDownloadError as e:
+            checkpoint = await database.get_past_mode_checkpoint(source_id, target_id)
+            if checkpoint != media_failure_checkpoint:
+                media_failures = 0  # progressed since the last stall — fresh budget
+                media_failure_checkpoint = checkpoint
+            media_failures += 1
+            if media_failures > _MEDIA_RETRY_LIMIT:
+                if e.message_id is None:
+                    raise  # can't skip what we can't name
+                # failed_message_id is the message_id as raised
+                # (see MediaDownloadError.__init__), so this is never None here.
+                assert e.failed_message_id is not None
+                logger.error(
+                    f"{e} — {_MEDIA_RETRY_LIMIT} retries didn't help, "
+                    f"skipping message {e.failed_message_id} and moving on"
+                )
+                await _notify_skipped(source_id, e.failed_message_id, logger)
+                await database.set_past_mode_checkpoint(source_id, target_id, e.message_id)
+                media_failures = 0
+                media_failure_checkpoint = e.message_id
+                continue
+            logger.warning(
+                f"{e} — waiting {_MEDIA_RETRY_WAIT}s and retrying from the checkpoint "
+                f"({media_failures}/{_MEDIA_RETRY_LIMIT})"
+            )
+            await asyncio.sleep(_MEDIA_RETRY_WAIT)
+
+
+async def _edit_links_pass(
+    client: TelegramClient,
+    database: Database,
+    pairs: Dict[Tuple[int, int], List[DirectionConfig]],
+    logger: logging.Logger,
+) -> None:
+    """Second pass: fixes cross-channel links in already-sent messages."""
+    for (source_id, target_id), cfgs in pairs.items():
+        # Work here is pair-wide (binding_id is keyed by channel pair); the
+        # pair's first copy-mode topic drives send_delay. Each mirror's own
+        # filters/fallback_link_url come from the direction that produced it
+        # (matched by its topics, see below).
+        copy_cfgs = [c for c in cfgs if c.mode == "copy"]
+        if not copy_cfgs:
+            continue
+        cfg = copy_cfgs[0]
+        assert cfg.past_mode is not None, "pairs values are pre-filtered to past_mode-configured cfgs"
+
+        prefix = f"[EditPass] {source_id}→{target_id}"
+        mirrors = await database.get_messages_for_channel_pair(source_id, target_id)
+        if not mirrors:
+            continue
+
+        processor = EventProcessor(
+            chat_mapping={**CHAT_MAPPING, source_id: {target_id: [cfg]}},
+            database=database,
+            client=client,
+            logger=logger,
+        )
+
+        # A source message can hold more than one mirror in this pair when
+        # it's reached by more than one topic-scoped config — keep every one
+        # of them, not just the last seen, or only one topic's copy would
+        # ever get its link fixed. Each mirror's own `mirror_topic_id` is
+        # used below to resolve *its* referenced-link target correctly.
+        mirror_map: Dict[int, List[MirrorMessage]] = {}
+        for m in mirrors:
+            mirror_map.setdefault(m.original_id, []).append(m)
+        _ids = list(mirror_map.keys())
+        _BATCH = 100
+        edited = 0
+        # Stream the source messages batch by batch — for a full_history replay
+        # `mirrors` can be tens of thousands, and accumulating every Message
+        # object here just to iterate it once was a needless memory spike.
+        for _i in range(0, len(_ids), _BATCH):
+            try:
+                src_batch = await client.get_messages(
+                    source_id, ids=_ids[_i : _i + _BATCH]
+                )
+            except Exception as e:
+                logger.warning(f"{prefix}: failed to fetch message batch: {e}")
+                break
+
+            # (mirror, text, entities) the mirror should now carry.
+            planned: List[Tuple[MirrorMessage, str, list]] = []
+            for src_msg in src_batch:
+                if not src_msg or not src_msg.entities:
+                    continue
+                if not any(
+                    isinstance(e, (types.MessageEntityTextUrl, types.MessageEntityUrl))
+                    for e in src_msg.entities
+                ):
+                    continue
+
+                # Rewritten per-mirror (not once per src_msg): different
+                # topics of the same channel can hold different mirrors of a
+                # referenced message, so each mirror's own `mirror_topic_id`
+                # must drive its own link resolution. The per-URL DB lookup
+                # itself is topic-independent (see `_rewrite_links`'s own
+                # docstring), so one `link_cache` is shared across every
+                # mirror of this src_msg — same reasoning as `new_message`/
+                # `new_album`'s per-event cache in mirroring.py.
+                link_cache: dict = {}
+                # Baseline for the "does this pass touch any link at all"
+                # check below — identical for every mirror of this src_msg.
+                entities_before = deepcopy(src_msg.entities)
+                text_before = src_msg.message
+                for mirror in mirror_map[src_msg.id]:
+                    mirror_cfg = EventProcessor._config_for_topic(
+                        copy_cfgs, mirror.source_topic_id, mirror.mirror_topic_id,
+                        lambda c: False,
+                    ) or cfg
+                    msg_copy = processor.copy_message(src_msg)
+                    await processor._rewrite_links(
+                        msg_copy, source_id, target_id, mirror_cfg.fallback_link_url,
+                        link_cache=link_cache, to_topic_id=mirror.mirror_topic_id,
+                    )
+
+                    text_changed = msg_copy.message != text_before
+                    url_changed = any(
+                        getattr(a, "url", None) != getattr(b, "url", None)
+                        for a, b in zip(
+                            msg_copy.entities or [], entities_before or [], strict=False
+                        )
+                    )
+                    if not text_changed and not url_changed:
+                        continue  # no link this pass rewrites
+
+                    # Same order as new_message: rewrite links, then the
+                    # direction's filters — so text filters (KeywordReplace,
+                    # UrlMessage, ForwardFormat) aren't reverted by this edit.
+                    # Media is dropped first: only text is edited here, and
+                    # every re-uploading filter is a no-op without media.
+                    msg_copy.media = None
+                    try:
+                        action, filtered = await mirror_cfg.filters.process(
+                            msg_copy, events.NewMessage.Event
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"{prefix}: filter chain failed for {mirror.mirror_id}: "
+                            f"{type(e).__name__}: {e}"
+                        )
+                        continue
+                    if action is FilterAction.DISCARD:
+                        continue
+                    # A single message in → a single message back (see
+                    # EventProcessor.edit_message).
+                    assert not isinstance(filtered, list)
+                    planned.append(
+                        (mirror, filtered.message or "", filtered.entities or [])
+                    )
+
+            if not planned:
+                continue
+
+            # Compare with what each mirror carries now: one that already has
+            # the rewritten link (resolved at send time, or fixed by an
+            # earlier run) needs no edit — it would only draw a
+            # MessageNotModifiedError and burn an edit request.
+            try:
+                current_batch = await client.get_messages(
+                    target_id, ids=[m.mirror_id for m, _t, _e in planned]
+                )
+            except Exception as e:
+                logger.warning(f"{prefix}: failed to fetch mirror batch: {e}")
+                continue
+            current = {m.id: m for m in current_batch if m}
+
+            for mirror, text, entities in planned:
+                cur = current.get(mirror.mirror_id)
+                if cur is None:
+                    continue  # mirror deleted
+                if (cur.message or "") == text and list(cur.entities or []) == entities:
+                    continue
+                if (
+                    cur.media is not None
+                    and not isinstance(cur.media, types.MessageMediaWebPage)
+                    and not cur.message
+                    and len(utils.add_surrogate(text)) > 1024
+                ):
+                    # Sent via the caption-split fallback (empty caption + an
+                    # untracked text reply): the caption can't hold this text.
+                    # A long caption sent whole (Premium account) is edited.
+                    continue
+
+                try:
+                    await _edit_waiting_out_flood(
+                        client, logger, prefix,
+                        entity=target_id,
+                        message=mirror.mirror_id,
+                        text=text,
+                        formatting_entities=entities,
+                        # Keep the mirror's own preview state: Telethon's
+                        # default (True) would add one to a mirror without it.
+                        link_preview=isinstance(cur.media, types.MessageMediaWebPage),
+                    )
+                    edited += 1
+                    logger.info(f"{prefix}: fixed link in {mirror.original_id}→{mirror.mirror_id}")
+                    if cfg.past_mode.send_delay:
+                        await asyncio.sleep(cfg.past_mode.send_delay)
+                except Exception as e:
+                    logger.warning(
+                        f"{prefix}: error editing {mirror.mirror_id}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+
+        if edited:
+            logger.info(f"{prefix}: fixed {edited} message(s)")
+
+
+async def _edit_waiting_out_flood(client: TelegramClient, logger: logging.Logger, prefix: str, **kwargs) -> None:
+    """``client.edit_message``; a FloodWait over Telethon's own threshold (it
+    sleeps through the shorter ones) is waited out once — this pass has no
+    retry of its own, and skipping would leave the link unfixed for good."""
+    try:
+        await client.edit_message(**kwargs)
+    except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+        logger.warning(f"{prefix}: FloodWait {e.seconds}s while fixing links — waiting it out")
+        await asyncio.sleep(e.seconds)
+        await client.edit_message(**kwargs)
+
+
+async def _run(logger: logging.Logger) -> None:
+    # Type=notify (telemirror-past@.service): up at once — a run with nothing
+    # to replay ends before signing in, and that's not a failed start.
+    sdnotify.notify("READY=1")
+    # Group by channel pair: every topic-direction of a pair is replayed in one pass.
+    pairs: Dict[Tuple[int, int], List[DirectionConfig]] = {}
+    for src, targets in CHAT_MAPPING.items():
+        for tgt, cfgs in targets.items():
+            pm_cfgs = [c for c in cfgs if c.past_mode is not None]
+            if pm_cfgs:
+                pairs[(src, tgt)] = pm_cfgs
+
+    if not pairs:
+        logger.warning("No directions have past_mode configured — add past_mode: to the mirror config.")
+        return
+
+    direction_count = sum(len(c) for c in pairs.values())
+    logger.info(
+        f"Found {direction_count} direction(s) across {len(pairs)} channel pair(s) "
+        "to replay."
+    )
+    logger.info(
+        f"On a dropped connection: up to {_CONN_RETRIES} attempts, {_RETRY_DELAY}s apart"
+    )
+    database = await open_database(DB_URL, logger)
+    try:
+        async with open_account(
+            logger, connection_retries=_CONN_RETRIES, retry_delay=_RETRY_DELAY
+        ) as (client, _me):
+            # A replay's own waits (FloodWait, send_delay) can last hours: the
+            # watchdog checks the connection, not progress — a dead one gets
+            # the unit restarted, and the replay resumes from its checkpoints.
+            watchdog = asyncio.create_task(sdnotify.watchdog_loop(connection_probe(client, logger)))
+            try:
+                await _replay_all(client, database, pairs, logger)
+            finally:
+                await cancel_and_await(watchdog)
+    finally:
+        sdnotify.notify("STOPPING=1")
+        await database.close()
+
+
+async def _replay_all(client, database: Database, pairs: dict, logger: logging.Logger) -> None:
+    cancel_on_sigterm()
+    try:
+        # Overall progress: the sum of source totals as the denominator (one
+        # full pass per pair, so a source with N pairs is counted N times).
+        source_total: Dict[int, int] = {}
+        for src, _ in pairs:
+            if src not in source_total:
+                try:
+                    source_total[src] = (await client.get_messages(src, limit=0)).total
+                except Exception as e:
+                    logger.warning(f"Failed to get total for {src}: {e}")
+                    source_total[src] = 0
+        overall_total = sum(source_total[src] for src, _ in pairs)
+        overall_done = 0
+        run_start = monotonic()
+
+        for pair_no, ((source_id, target_id), cfgs) in enumerate(pairs.items(), start=1):
+            overall_done += await _replay_with_retry(
+                client, database, source_id, target_id, cfgs, logger,
+                total=source_total[source_id],
+            )
+            _log_overall(
+                logger, pair_no, len(pairs), overall_done, overall_total, run_start
+            )
+
+        # Second pass: fix cross-channel links that couldn't be resolved during mirroring
+        logger.info("Second pass: fixing cross-channel links...")
+        await _edit_links_pass(client, database, pairs, logger)
+
+    except asyncio.CancelledError:
+        logger.warning(
+            "SIGTERM received, stopping the replay (resumable — already-mirrored "
+            "messages are deduped by the DB, so resuming won't re-send them even "
+            "if the checkpoint for the in-progress item wasn't reached yet)"
+        )
+        raise  # not a finished replay: main() exits STOPPED_EXIT
+
+
+# The exit status after a SIGTERM (⏹ in the panel, the mirror started over it
+# via Conflicts=): 128 + SIGTERM, as if killed by it. Not 0 — the panel tells a
+# stopped replay from a finished one by it (UnitState.completed); the unit's
+# SuccessExitStatus=143 keeps it a clean stop (no failed state, no OnFailure=).
+STOPPED_EXIT = 143
+
+
+def main() -> None:
+    try:
+        asyncio.run(_run(_configure_logging(LOG_LEVEL)))
+    except asyncio.CancelledError:
+        sys.exit(STOPPED_EXIT)
+
+
+if __name__ == "__main__":
+    main()

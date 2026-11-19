@@ -23,17 +23,19 @@ filters:
 disable_edit: true
 disable_delete: true
 mode: copy # or forward
+# (Optional) Don't copy into a channel a post it already got from another source
+# within this many hours (the same text and the same photos/videos; a post without
+# media — the same text of 20+ characters). 0 or absent — off. Per direction too.
+# dedup_hours: 24
 
 # (Optional) Admin broadcast channel: messages from this channel are sent to ALL configured targets
+# as they are (copied; the YAML filters and mode don't apply to them)
 # broadcast_channel: -100123456789
 
 # (Optional) Whitelist of targets for broadcast channel. When not set, goes to ALL configured targets.
 # broadcast_targets:
 #   - -100123456789
 #   - -100987654321#5     # topic-specific target
-
-# (Optional) Technical monitoring channel: receives log alerts (WARNING+) and DM notifications
-# tech_channel: -100123456789
 
 # (Required) Mirror directions
 directions:
@@ -68,6 +70,11 @@ directions:
           keywords: !!set
             ? "stopword"     # treat keyword as word
             ? "r'badword.*'" # treat keyword as regex expr
+      # - StripFooterFilter:     # cut the source's promo tail ("Subscribe @channel"): last
+      #                          # short lines with a link or @mention; requires mode: copy.
+      #     max_lines: 3         #   lines with links to cut, at most
+      #                          # Place right after the skip filters: before UrlMessageFilter /
+      #                          # KeywordReplaceFilter hide the links and ForwardFormatFilter adds yours.
       # - UrlMessageFilter:      # rewrites message text/entities; requires mode: copy.
       #     blacklist: !!set
       #       ? t.me
@@ -79,7 +86,7 @@ directions:
       #     keywords: !!set
       #       ? "allowed_word"
       # - WatermarkRemovalFilter:      # strip the source's watermark and/or stamp your own
-      #                                # (Linux/Docker only); requires mode: copy.
+      #                                # (Linux with torch only); requires mode: copy.
       #     remove_watermark: true     # detect + inpaint the source's mark (needs template_path)
       #     stamp_watermark: true      # overlay telemirror/watermark/my_watermark.png
       #     template_path: "/data/watermarks/channel_wm.png"

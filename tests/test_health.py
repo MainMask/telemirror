@@ -39,21 +39,23 @@ def test_flapping_alerts(monkeypatch, tmp_path):
           {"NRestarts": "9", "ActiveState": "active"},
           prev={"nrestarts": 4, "active": "active"})
     problems = _problems()
-    assert any("flapping" in p for p in problems)
+    assert any("падает по кругу" in p for p in problems)
 
 
-def test_failed_state_alerts(monkeypatch, tmp_path):
+def test_entering_failed_is_left_to_on_failure(monkeypatch, tmp_path):
+    """OnFailure= (telemirror.alert) tells it at once, with the journal: a
+    second notice about the same failure from here was noise."""
     _wire(monkeypatch, tmp_path,
           {"NRestarts": "2", "ActiveState": "failed"},
           prev={"nrestarts": 2, "active": "active"})
-    assert any("failed" in p for p in _problems())
+    assert _problems() == []
 
 
 def test_stuck_not_active_twice_alerts(monkeypatch, tmp_path):
     _wire(monkeypatch, tmp_path,
           {"NRestarts": "2", "ActiveState": "activating"},
           prev={"nrestarts": 2, "active": "activating"})
-    assert any("twice in a row" in p for p in _problems())
+    assert any("две проверки подряд" in p for p in _problems())
 
 
 def test_first_run_seeds_state_without_alerting(monkeypatch, tmp_path):
@@ -81,7 +83,7 @@ def test_deliberate_stop_for_history_replay_does_not_alert(monkeypatch, tmp_path
 def test_main_exits_nonzero_when_alert_not_delivered(monkeypatch):
     monkeypatch.setattr(health, "check", lambda: [(UNIT, ["⚠️ x: ActiveState=failed"])])
     monkeypatch.setattr(health.alert, "journal_tail", lambda unit, lines=15: "boom")
-    monkeypatch.setattr(health.alert, "send_alert", lambda text: False)
+    monkeypatch.setattr(health.alert, "send_alert", lambda text, unit: False)
     with pytest.raises(SystemExit) as exc_info:
         health.main()
     assert exc_info.value.code != 0
@@ -90,7 +92,7 @@ def test_main_exits_nonzero_when_alert_not_delivered(monkeypatch):
 def test_main_exits_zero_when_alert_delivered(monkeypatch):
     monkeypatch.setattr(health, "check", lambda: [(UNIT, ["⚠️ x: ActiveState=failed"])])
     monkeypatch.setattr(health.alert, "journal_tail", lambda unit, lines=15: "boom")
-    monkeypatch.setattr(health.alert, "send_alert", lambda text: True)
+    monkeypatch.setattr(health.alert, "send_alert", lambda text, unit: True)
     with pytest.raises(SystemExit) as exc_info:
         health.main()
     assert exc_info.value.code == 0
@@ -99,7 +101,7 @@ def test_main_exits_zero_when_alert_delivered(monkeypatch):
 def test_main_exits_zero_and_skips_alert_when_no_problems(monkeypatch):
     monkeypatch.setattr(health, "check", list)
 
-    def _no_alert(text):
+    def _no_alert(text, unit):
         raise AssertionError("must not send an alert when nothing's wrong")
 
     monkeypatch.setattr(health.alert, "send_alert", _no_alert)

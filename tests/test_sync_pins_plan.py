@@ -2,7 +2,7 @@
 
 import logging
 
-from skylon_set import sync_pins as sp
+from telemirror.tasks import sync_pins as sp
 from telemirror.storage import MirrorMessage
 
 _LOG = logging.getLogger("test.sync_pins")

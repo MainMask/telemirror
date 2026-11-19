@@ -1,4 +1,4 @@
-"""Pass 10: skylon_set._common.fetch_all_topics must page past the 100-topic
+"""Pass 10: telemirror.tasks._common.fetch_all_topics must page past the 100-topic
 API cap. The three copies it replaced in setup_mirrors passed limit=100 with no
 pagination and silently truncated forums with >100 topics.
 
@@ -8,7 +8,7 @@ the last *real* topic so a deleted tail element can't zero out the cursor.
 
 import pytest
 
-import skylon_set._common as common
+import telemirror.tasks._common as common
 from tests.conftest import run
 
 
@@ -42,7 +42,9 @@ class _FakeClient:
 
     @classmethod
     def with_sizes(cls, *sizes):
-        return cls(_Page([_Topic(i) for i in range(n)]) for n in sizes)
+        """Pages of these sizes; topic ids run on across pages, as a forum's do."""
+        starts = [sum(sizes[:k]) for k in range(len(sizes))]
+        return cls(_Page([_Topic(start + i) for i in range(n)]) for start, n in zip(starts, sizes, strict=True))
 
     async def __call__(self, request):
         self.requests.append(request)
@@ -88,3 +90,13 @@ def test_cursor_skips_deleted_tail_element():
     assert [t.id for t in topics] == list(range(99)) + [200]
     assert client.requests[1].offset_topic == 98
     assert client.requests[1].offset_id == 980  # _Topic(98).top_message
+
+
+def test_a_cursor_that_goes_round_ends_the_paging():
+    """A full page of tombstones leaves only a zero cursor: if the API then
+    serves the first page again, paging stops instead of looping forever."""
+    first = _Page([_Topic(i) for i in range(1, 101)])
+    tombstones = _Page([_Deleted(i) for i in range(101, 201)])
+    client = _FakeClient([first, tombstones, first, first])
+    topics = run(common.fetch_all_topics(client, "peer"))
+    assert [t.id for t in topics] == list(range(1, 101)) and client.calls == 3

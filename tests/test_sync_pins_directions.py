@@ -1,8 +1,8 @@
 """iter_sync_directions: CHAT_MAPPING → SyncPair list, broadcast-donor handling,
 channel vs forum classification."""
 
-from config import DirectionConfig
-from skylon_set import sync_pins as sp
+from telemirror.directions import DirectionConfig
+from telemirror.tasks import sync_pins as sp
 from telemirror.messagefilters import EmptyMessageFilter
 
 BC = -100777  # broadcast channel
