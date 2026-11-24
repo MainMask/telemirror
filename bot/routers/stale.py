@@ -25,4 +25,4 @@ async def on_no_step(message: Message) -> None:
 
 @router.message()
 async def on_button_step(message: Message) -> None:
-    await message.answer("Нажмите кнопку выше — или /cancel, чтобы выйти.")
+    await message.answer(texts.USE_BUTTONS)

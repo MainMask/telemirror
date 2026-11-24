@@ -12,7 +12,7 @@ must report); a project's config is loaded in a subprocess instead.
 
     python -m telemirror.selfcheck      # exit 1 when something is ❌
 
-The panel shows the same list (⚙️ Настройки → 🧾 Проверка установки).
+The panel shows the same list (⚙️ Настройки → 🧾 Диагностика сервера).
 """
 
 import json
@@ -46,7 +46,7 @@ UNITS = (
 )
 TIMERS = ("telemirror-health.timer", "telemirror-restart.timer", "telemirror-report.timer")
 PANEL_UNIT = "telemirror-panel.service"
-TABLES = ("binding_id", "past_mode_checkpoint", "broadcast_sync", "post_fingerprint")
+TABLES = ("binding_id", "past_mode_checkpoint", "past_mode_drip", "broadcast_sync", "post_fingerprint")
 SYSTEMD_DIR = Path("/etc/systemd/system")
 TIMEOUT_SEC = 10
 CONFIG_TIMEOUT_SEC = 120  # `import telemirror.config` loads cv2

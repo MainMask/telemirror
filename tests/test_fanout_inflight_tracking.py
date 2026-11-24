@@ -53,3 +53,35 @@ def test_delete_waits_for_every_overlapping_fanout_of_the_same_message():
         assert key not in proc._fanout_inflight
 
     run(scenario())
+
+
+def test_a_drips_processor_shares_the_live_ones_fanouts_and_dedup_turns():
+    """A drip copies the history beside the live mirror: a delete of a post the
+    drip is sending waits for it (else the copy is left behind), and the same
+    post from two sources takes one dedup turn."""
+    db = run(InMemoryDatabase())
+    logger = logging.getLogger("test.inflight")
+    live = EventProcessor(chat_mapping={}, database=db, client=object(), logger=logger)
+    drip = EventProcessor(chat_mapping={}, database=db, client=object(), logger=logger, live=live)
+
+    async def scenario():
+        order = []
+
+        async def drip_fanout():
+            async with drip._track_fanout([(SOURCE, 1)]), drip._dedup_turn("fp"):
+                await asyncio.sleep(0.05)
+                order.append("drip sent")
+
+        async def live_same_post():
+            async with live._dedup_turn("fp"):
+                order.append("live checked")
+
+        task = asyncio.ensure_future(drip_fanout())
+        await asyncio.sleep(0)
+        same = asyncio.ensure_future(live_same_post())
+        await live._await_fanouts(SOURCE, [1])
+        order.append("delete")
+        await asyncio.gather(task, same)
+        assert order[0] == "drip sent"  # both waited for the drip's send
+
+    run(scenario())

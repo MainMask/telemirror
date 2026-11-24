@@ -20,6 +20,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import (
     AnswerCallbackQuery,
     DeleteMessage,
+    EditMessageReplyMarkup,
     EditMessageText,
     SendDocument,
     SendMessage,
@@ -205,12 +206,12 @@ def test_start_screen(env):
     text = sent[0].text
     assert "👋 Здравствуйте, <b>Даниил &lt;b&gt;</b>!" in text  # the name is HTML-escaped
     assert "📁 Проектов: <b>1</b> · 🟢 зеркал работает: <b>1</b>" in text
-    for section in ("<b>📁 Проекты</b> —", "<b>📊 Задачи</b> —", "<b>⚙️ Настройки</b> —"):
+    for section in ("<b>📁 Проекты</b> —", "<b>📊 Статус</b> —", "<b>⚙️ Настройки</b> —"):
         assert section in text
     assert text.endswith("<i>Выберите раздел в меню ниже 👇</i>")
     kb = sent[0].reply_markup
     assert isinstance(kb, ReplyKeyboardMarkup) and kb.resize_keyboard
-    assert [[b.text for b in row] for row in kb.keyboard] == [["📁 Проекты", "📊 Задачи", "⚙️ Настройки"]]
+    assert [[b.text for b in row] for row in kb.keyboard] == [["📁 Проекты", "📊 Статус", "⚙️ Настройки"]]
 
 
 def test_main_menu_sends_new_buttons_edit_in_place_and_every_tap_is_answered(env):
@@ -219,7 +220,7 @@ def test_main_menu_sends_new_buttons_edit_in_place_and_every_tap_is_answered(env
     assert env.labels()[0].startswith("➕ Новый проект")
     env.press("🪞 Зеркало")
     for label in ("🔀 Направления", "1. ", "🧹 Фильтры направления", "⬅️ Назад", "⬅️ Назад", "📢 Рассылка",
-                  "⬅️ Назад", "⬅️ Назад", "⏪ История", "⬅️ Назад",
+                  "⬅️ Назад", "⬅️ Назад", "⏪ Старые посты", "⬅️ Назад",
                   "🛠 Инструменты", "🛂 Проверка доступа", "⬅️ Назад", "📌 Закрепы", "⬅️ Назад", "⬅️ Назад",
                   "⚙️ Настройки проекта", "💾 Файл настроек", "⬅️ Назад", "⬅️ Назад", "🧹 Фильтры",
                   "⬅️ Назад", "⬅️ Назад"):
@@ -259,7 +260,7 @@ def test_colours_and_folded_details(env):
     env.press("▶️ Запустить")
     env.press("⚙️ Настройки проекта")
     assert _styles(env)["🗑 Удалить проект"] == "danger"
-    assert "<i>Копирование</i>\n<b>✏️ Правки" in env.last_text()  # a group under its subheading
+    assert "<i>Копирование</i>\n<b>✏️ Повторять правки" in env.last_text()  # a group under its subheading
     assert "<blockquote expandable>" in env.last_text()  # how it works: folded
     env.press("🗑 Удалить проект")
     assert _styles(env) == {"🗑 Да, удалить": "danger", "✖️ Отмена": None}
@@ -355,7 +356,7 @@ def test_new_project_name_icon_account(env):
     env.type("📁")  # a section's emoji
     assert "раздел бота" in env.last_text()
     env.press("🚀")
-    assert "выберите аккаунт" in env.last_text()
+    assert "от имени какого аккаунта работать?" in env.last_text()
     env.press("👤 +79990000000")
     created = projects.load_project("novosti")
     assert (created.name, created.icon, created.session) == ("Новости", "🚀", SESSION)
@@ -369,20 +370,61 @@ def test_new_project_cancel_returns_to_the_list(env):
     env.type("📁 Проекты")
     env.press("➕ Новый проект")
     env.press("✖️ Отмена")
-    assert env.last_text() == "Отменено."
-    env.press("⬅️ Назад")
+    assert env.last_text().startswith("Отменено.")  # straight back, no extra ⬅️ tap
     assert "<b>📁 Проекты</b>" in env.last_text()
+    assert isinstance(env.sent()[-1], EditMessageText)  # in the prompt's place
     assert len(projects.list_projects()) == 1
 
 
-def test_cancel_command_leaves_a_form_with_a_way_back(env):
+def test_cancel_command_goes_back_to_where_the_form_began(env):
     env.type("📁 Проекты")
     env.press("➕ Новый проект")
     env.type("/cancel")
-    assert env.last_text() == "Отменено."
-    assert env.labels() == ["⬅️ Назад"]
+    assert env.last_text().startswith("Отменено.")
+    assert "<b>📁 Проекты</b>" in env.last_text()
+    assert "➕ Новый проект" in env.labels()
     env.type("Не имя")  # out of the form: no project is made
     assert len(projects.list_projects()) == 1
+
+
+def test_cancel_with_nothing_to_cancel_says_where_runs_are_stopped(env):
+    env.type("/cancel")
+    assert "Сейчас нечего отменять" in env.last_text()
+    assert "на их экране в проекте" in env.last_text()
+
+
+def test_an_answered_prompt_loses_its_buttons(env):
+    def dropped():
+        return [r for r in env.session.of(EditMessageReplyMarkup) if r.reply_markup is None]
+
+    env.type("📁 Проекты")
+    env.press("➕ Новый проект")
+    env.type("x" * (settings.PROJECT_NAME_MAX + 1))  # refused: the same step, its ✖️ Отмена stays
+    assert dropped() == []
+    env.type("Новости")  # the next step's prompt: the name's one is spent
+    assert len(dropped()) == 1
+    assert "✖️ Отмена" in env.labels()  # the new prompt has its own
+
+
+def test_a_finished_form_leaves_one_live_screen(env):
+    _open_card(env)
+    env.press("⚙️ Настройки проекта")  # the screen: message 77 (tests' callbacks)
+    env.press("🏷 Переименовать")
+    env.type("Новое имя")
+    dropped = {r.message_id for r in env.session.of(EditMessageReplyMarkup) if r.reply_markup is None}
+    assert 77 in dropped and len(dropped) == 2  # the screen above and the prompt; the outcome below is live
+    assert "✅ Проект переименован" in env.last_text()
+
+
+def test_button_hints_are_folded_under_the_screen(env):
+    _open_card(env)
+    env.press("⚙️ Настройки проекта")
+    assert "<blockquote expandable><i>Копирование</i>\n<b>✏️ Повторять правки" in env.last_text()
+
+
+def test_a_long_label_is_cut_with_an_ellipsis():
+    assert texts.cut("короткий", 10) == "короткий"
+    assert texts.cut("очень длинная подпись", 10) == "очень дли…"
 
 
 def test_starting_an_empty_project_is_refused(env):
@@ -465,7 +507,7 @@ def test_stop_needs_a_fresh_confirmation(env, monkeypatch):
 def test_rename_icon_and_delete_project(env):
     _open_card(env)
     env.press("⚙️ Настройки проекта")
-    env.press("🏷 Имя")
+    env.press("🏷 Переименовать")
     env.type("Цитадель")
     assert projects.load_project(env.live.key).name == "Цитадель"
     env.press("🎨 Значок")
@@ -571,15 +613,16 @@ def test_a_direction_card_shows_the_shared_settings_and_its_own(env):
     env.press("🔀 Направления")
     assert "1. -1001111111111 → -1002222222222 ✳️" in env.labels()
     env.press("1. ")
+    assert {"📨 Откуда: 1", "🎯 Куда: 1"} <= set(env.labels())  # how many channels, on the buttons
     text = env.last_text()
     assert "общие для всех направлений" in text and "свои: режим «пересылка»" in text
     assert not any(b.startswith(("✏️", "↔️", "📜")) for b in env.labels())  # set once, for the project
-    env.press("⏱ Пауза между постами")
+    env.press("⏱ Пауза между отправками")
     env.type("abc")
-    assert "Неверное число" in env.last_text()
+    assert "Нужно число секунд от 0 до 60" in env.last_text()  # what to send instead
     env.type("1.5")
     assert env.data()["directions"][0]["send_delay"] == 1.5
-    assert "⏱ Пауза между постами: 1.5 с" in env.labels()
+    assert "⏱ Пауза между отправками: 1.5 с" in env.labels()
     env.press("🗑 Удалить")
     env.press("✖️ Отмена")
     assert len(env.data()["directions"]) == 1
@@ -671,11 +714,11 @@ def test_a_channel_picked_from_the_list_is_taken_like_a_forwarded_post(env):
     bottom = [[(b.text, b.request_chat.chat_is_channel if b.request_chat else None) for b in row]
               for row in picker.keyboard]
     assert bottom == [[("📺 Канал", True), ("👥 Группа", False)],
-                      [("📁 Проекты", None), ("📊 Задачи", None), ("⚙️ Настройки", None)]]  # the menu stays
+                      [("📁 Проекты", None), ("📊 Статус", None), ("⚙️ Настройки", None)]]  # the menu stays
     env.feed(chat_shared_update(-1003333333333, "Донор <b>"))
     ack, step = env.sent()[-2:]
     assert ack.text == "📇 Выбрано: <b>Донор &lt;b&gt;</b>"
-    assert [[b.text for b in row] for row in ack.reply_markup.keyboard] == [["📁 Проекты", "📊 Задачи", "⚙️ Настройки"]]
+    assert [[b.text for b in row] for row in ack.reply_markup.keyboard] == [["📁 Проекты", "📊 Статус", "⚙️ Настройки"]]
     assert "шаг 2 из 3" in step.text and "Донор &lt;b&gt;" in step.text  # its title is known now
     env.feed(chat_shared_update(-1004444444444, "Моё"))
     env.press("✅ Готово")
@@ -687,7 +730,7 @@ def _bottom(sent) -> list:
     return [[b.text for b in row] for row in sent.reply_markup.keyboard]
 
 
-MENU = [["📁 Проекты", "📊 Задачи", "⚙️ Настройки"]]
+MENU = [["📁 Проекты", "📊 Статус", "⚙️ Настройки"]]
 
 
 def _open_picker(env):
@@ -743,15 +786,15 @@ def test_navigating_away_leaves_the_input(env):
         env.press("📢 Рассылка")
 
     open_broadcast()
-    env.press("📢 Рассылка из канала")
+    env.press("📢 Рассылать из канала")
     env.feed(callback_update(NavCB(s="tsk").pack()))  # e.g. a notification's button
     env.type("-1007777777777")  # out of the form: nothing is written
     assert "broadcast_channel" not in env.data()
     open_broadcast()
-    env.press("📢 Рассылка из канала")
+    env.press("📢 Рассылать из канала")
     env.type("-1007777777777")
     assert env.data()["broadcast_channel"] == -1007777777777
-    env.press("📢 Рассылка из канала")
+    env.press("📢 Рассылать из канала")
     env.type("-")
     assert "broadcast_channel" not in env.data()
 
@@ -759,17 +802,17 @@ def test_navigating_away_leaves_the_input(env):
 def test_params_toggles(env):
     _open_card(env)
     env.press("⚙️ Настройки проекта")
-    assert "✏️ Правки: выкл" in env.labels()
-    env.press("✏️ Правки")
+    assert "✏️ Повторять правки: выкл" in env.labels()
+    env.press("✏️ Повторять правки")
     assert env.data()["disable_edit"] is False
-    env.press("↔️ Режим")
+    env.press("↔️ Как публиковать")
     assert env.data()["mode"] == "forward"
 
 
 def test_filter_editor_add_and_remove(env):
     _open_card(env)
     env.press("🧹 Фильтры")
-    env.press("🧹 1. Пропускать посты со словами")
+    env.press("1. Пропускать посты со словами")
     assert "реклама" in env.last_text()
     env.press("➕ Добавить")
     env.type("спам\nказино")
@@ -800,7 +843,7 @@ def test_filter_card_toggles_moves_and_deletes(env):
     env.press("🧹 Фильтры")
     env.press("➕ Добавить фильтр")
     env.press("Пропускать посты с любыми ссылками")
-    env.press("🧹 2. Пропускать посты с любыми ссылками")
+    env.press("2. Пропускать посты с любыми ссылками")
     env.press("☑️ и с @упоминаниями")
     assert env.data()["filters"][1] == {"SkipUrlFilter": {"skip_mention": False}}
     assert "⬜ и с @упоминаниями" in env.labels()
@@ -816,7 +859,7 @@ def test_mention_names_and_watermark_args(env):
     env.press("🧹 Фильтры")
     env.press("➕ Добавить фильтр")
     env.press("Прятать ссылки")
-    env.press("🧹 2. Прятать ссылки")
+    env.press("2. Прятать ссылки")
     env.press("📝 Только эти @…")
     assert "с <code>@</code>" in env.last_text()
     env.type("@spam\n@ads")
@@ -828,7 +871,7 @@ def test_mention_names_and_watermark_args(env):
     env.press("⬅️ Назад")
     env.press("➕ Добавить фильтр")
     env.press("Водяной знак")
-    env.press("🧹 3. Водяной знак")
+    env.press("3. Водяной знак")
     assert "свой знак: прозрачность: по умолчанию (0.55)" in env.last_text()
     env.press("📝 свой знак: прозрачность")
     env.type("0,4")
@@ -847,19 +890,32 @@ def test_a_directions_first_own_filter_keeps_the_projects(env):
     assert "скопированы" in env.last_text()
 
 
+def test_history_from_a_date_written_as_in_russia(env):
+    _open_card(env)
+    env.press("⏪ Старые посты")
+    env.press("📜 Что копировать")
+    env.press("📅 С даты")
+    env.type("31.02.2024")  # no such day: refused, asked again
+    assert "Нужна дата <code>31.01.2024</code>" in env.last_text()
+    env.type("31.01.2024")
+    # Moscow midnight, its offset kept: a bare date would be UTC to Telethon, 3 hours off
+    assert env.data()["directions"][0]["past_mode"]["since_date"] == "2024-01-31T00:00:00+03:00"
+    assert "📜 Что копировать: с 31.01.2024" in env.labels()  # shown as typed
+
+
 def test_one_history_and_one_pause_for_every_direction(env):
     cfg = env.data()
     cfg["directions"].append({"from": [-1003333333333], "to": [-1004444444444]})
     env.live.config_path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
     _open_card(env)
-    env.press("⏪ История")
+    env.press("⏪ Старые посты")
     assert "📜 Что копировать: нет" in env.labels()
     assert not any(b.startswith("⏱") for b in env.labels())  # nothing to pause yet
     env.press("📜 Что копировать")
     env.press("📚 Вся история")
     assert [d["past_mode"] for d in env.data()["directions"]] == [{"full_history": True}] * 2
     assert "📜 Что копировать: вся история" in env.labels()
-    env.press("⏱ Пауза при копировании")
+    env.press("⏱ Пауза для старых постов")
     env.type("2")
     assert [d["past_mode"] for d in env.data()["directions"]] == [{"full_history": True, "send_delay": 2}] * 2
     env.press("📜 Что копировать")
@@ -873,18 +929,149 @@ def test_one_history_and_one_pause_for_every_direction(env):
     assert "📜 Что копировать: разное (у 1 из 2 направлений)" in env.labels()
 
 
-# ── ⏪ История, 🛠 Инструменты, 📊 Задачи ────────────────────────
+# ── ⏪ Старые посты, 🛠 Инструменты, 📊 Статус ────────────────────────
+
+
+def test_a_paced_history_is_the_mirrors_and_stops_nothing(env):
+    _open_card(env)
+    env.press("⏪ Старые посты")
+    assert not any(b.startswith("🐢") for b in env.labels())  # nothing to pace yet
+    env.press("📜 Что копировать")
+    env.press("📚 Вся история")
+    assert "🐢 Темп: сразу" in env.labels()
+    env.press("🐢 Темп")
+    env.type("пять")
+    assert "5/45" in env.last_text()  # refused, asked again
+    env.type("5/45")
+    assert env.data()["directions"][0]["past_mode"] == {"full_history": True, "drip": {"posts": 5, "minutes": 45}}
+    labels = env.labels()
+    assert "🐢 Темп: 5 постов за 45 мин" in labels
+    assert not any(b.startswith(("▶️", "⏸", "⏱")) for b in labels)  # the mirror copies it: no unit to start
+    # Regression: «копируется» while the mirror, started before the pace, didn't drip at all
+    assert "⏸ ждёт перезапуска зеркала" in env.last_text()
+    _open_card(env)
+    assert "копируются порциями" not in env.last_text()
+    assert "Изменения ещё не применены" in env.last_text()
+    env.fake.journal = ("INFO  2026-11-23 04:00:05 [past.py:1]:past_mode: [PastMode] drip: "
+                        "1 channel pair(s) taking turns, alongside the live mirror")
+    env.press("🔄 Обновить")
+    assert "🐢 Старые посты копируются порциями: 5 постов за 45 мин" in env.last_text()
+    env.feed(callback_update(NavCB(s="rpl", p=env.live.key).pack()))
+    assert "копируется порциями вместе с зеркалом" in env.last_text()
+    _open_card(env)
+    # Regression: both kept saying so for weeks after the drip had finished
+    env.fake.journal = "INFO  2026-11-23 04:00:05 [past.py:1]:past_mode: [PastMode] drip: done"
+    env.press("🔄 Обновить")
+    assert "копируются порциями" not in env.last_text()
+    env.feed(callback_update(NavCB(s="rpl", p=env.live.key).pack()))
+    assert "✅ старые посты скопированы" in env.last_text()
+    # how many channel pairs are done, while under way
+    env.fake.journal = ("INFO  2026-11-23 04:00:05 [past.py:1]:past_mode: [PastMode] -1001→-1002: "
+                        "sent a post, gone through 12/340, next in 9min · 3/29 pair(s) done")
+    env.press("🔄 Обновить")
+    assert "🐢 копируется порциями вместе с зеркалом, готово пар каналов: 3 из 29" in env.last_text()
+    _open_card(env)
+    assert "🐢 Старые посты копируются порциями: 5 постов за 45 мин, готово пар каналов: 3 из 29" \
+        in env.last_text()
+    # Regression: one pair giving up showed the whole drip stopped, the others still copying
+    env.fake.journal = ("ERROR 2026-11-23 04:00:05 [past.py:1]:telemirror: [PastMode] -1001→-1002: "
+                        "gave up copying its history — the other pairs and the live mirror go on, "
+                        "tried again next start. RuntimeError: x")
+    env.press("🔄 Обновить")
+    assert "остановилось с ошибкой" not in env.last_text()
+    # Regression: «копируется» though it had given up
+    env.fake.journal = ("WARNING 2026-11-23 04:00:05 [past.py:1]:past_mode: [PastMode] drip: 1 pair(s) "
+                        "gave up — drip stopped, the live mirror goes on, tried again next start")
+    env.press("🔄 Обновить")
+    assert "⚠️ Копирование старых постов остановилось с ошибкой" in env.last_text()
+    env.feed(callback_update(NavCB(s="rpl", p=env.live.key).pack()))
+    assert "⚠️ остановилось с ошибкой — продолжит после перезапуска зеркала" in env.last_text()
+    env.fake.journal = "line one\nline <two>"
+    _open_card(env)
+    env.feed(callback_update(NavCB(s="rpl", p=env.live.key).pack()))
+    assert "Изменения ещё не применены" in env.last_text()  # the mirror started before the save
+    env.press("🔁 Перезапустить зеркало")
+    assert "Новые настройки начнут действовать" in env.last_text()
+    env.press("✅ Да")
+    assert any("restart" in c and env.live.live_unit in c for c in env.fake.calls)
+    env.feed(callback_update(NavCB(s="rpl", p=env.live.key).pack()))
+    env.press("🐢 Темп")
+    env.type("-")
+    assert env.data()["directions"][0]["past_mode"] == {"full_history": True}
+    assert "▶️ Начать копирование" in env.labels()
+    # dropped while the mirror still drips (its run's journal says so): it's to be restarted
+    env.fake.journal = ("INFO  2026-11-23 04:00:05 [past.py:1]:past_mode: [PastMode] -1001→-1002: "
+                        "sent a post, gone through 12/340, next in 9min")
+    env.press("🔄 Обновить")
+    assert "Изменения ещё не применены" in env.last_text()
+    env.fake.journal = ""  # no drip in the mirror's run: nothing to restart for
+    env.press("🔄 Обновить")
+    assert "Изменения ещё не применены" not in env.last_text()
+    env.fake.journal = "INFO  2026-11-23 04:00:05 [past.py:1]:past_mode: [PastMode] drip: done"
+    env.press("🔄 Обновить")
+    assert "Изменения ещё не применены" not in env.last_text()  # its drip had nothing left
+    env.press("🐢 Темп")
+    env.type("30с")  # in seconds
+    assert env.data()["directions"][0]["past_mode"] == {"full_history": True, "drip": {"seconds": 30}}
+    assert "🐢 Темп: 1 пост раз в 30 с" in env.labels()
+
+
+def test_an_old_start_button_doesnt_stop_the_mirror_once_a_pace_is_set(env):
+    """Regression: ▶️ on a screen drawn before 🐢 Темп started the replay unit —
+    the mirror and its drip stopped for a run that had nothing to do."""
+    cfg = env.data()
+    cfg["directions"][0]["past_mode"] = {"full_history": True}
+    env.live.config_path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+    _open_card(env)
+    env.press("⏪ Старые посты")
+    cfg["directions"][0]["past_mode"]["drip"] = {"posts": 5, "minutes": 45}
+    env.live.config_path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+    env.press("▶️ Начать")
+    assert env.session.of(AnswerCallbackQuery)[-1].text == texts.STALE_BUTTON
+    assert not any(env.live.past_unit in c for c in env.fake.calls if "start" in c)
+
+
+def test_a_pace_set_for_all_isnt_a_directions_own(env):
+    """Regression: 🐢 Темп (and ⏱ the pause) is written into every direction —
+    each was marked ✳️ «свои настройки в файле»."""
+    from bot.routers.directions import own_settings
+    one = {"past_mode": {"full_history": True, "send_delay": 2, "drip": {"posts": 5, "minutes": 45}}}
+    other = {"past_mode": {"full_history": True, "send_delay": 2, "drip": {"posts": 5, "minutes": 45}}}
+    assert own_settings(one, {"directions": [one, other]}) == []
+    other["past_mode"]["drip"] = {"minutes": 45, "posts": 5}  # the same pace, its keys in another order
+    assert own_settings(one, {"directions": [one, other]}) == []
+    other["past_mode"] = {"full_history": True, "drip": {"posts": 1, "minutes": 10}}  # hand-written
+    assert len(own_settings(one, {"directions": [one, other]})) == 2
+    # the default given or not: one pause, as ⏪ tells it
+    one["past_mode"], other["past_mode"] = {"full_history": True, "send_delay": 0.5}, {"full_history": True}
+    assert own_settings(one, {"directions": [one, other]}) == []
+
+
+def test_a_replay_running_at_once_stays_stoppable_once_a_pace_is_set(env):
+    """Regression: 🐢 Темп set while ▶️ ran it all at once hid ⏸ — «ждёт запуска зеркала»."""
+    cfg = env.data()
+    cfg["directions"][0]["past_mode"] = {"full_history": True, "drip": {"posts": 5, "minutes": 45}}
+    env.live.config_path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+    env.fake.states[env.live.past_unit] = "active"
+    _open_card(env)
+    env.press("⏪ Старые посты")
+    assert "ждёт запуска зеркала" not in env.last_text()
+    assert any(b.startswith("⏸") for b in env.labels())
 
 
 def test_replay_needs_history_then_pauses_the_mirror(env):
     _open_card(env)
-    env.press("⏪ История")
+    env.press("⏪ Старые посты")
+    assert "👉 Сначала выберите, какие посты копировать: «📜 Что копировать»." in env.last_text()
     env.press("▶️ Начать")
     assert "Не выбрано, какие старые посты" in env.session.of(AnswerCallbackQuery)[-1].text
     cfg = env.data()
     cfg["directions"][0]["past_mode"] = {"full_history": True}
     env.live.config_path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+    env.fake.journal = ""  # the mirror doesn't drip
     env.press("🔄 Обновить")
+    # Regression: any change since the mirror's start asked to restart it — ▶️ reads the config itself
+    assert "Изменения ещё не применены" not in env.last_text()
     env.press("▶️ Начать")
     assert "будет приостановлено" in env.last_text()
     env.press("✅ Да")
@@ -899,6 +1086,7 @@ def test_maintenance_dry_run_writes_the_task_env_file(env):
     env.press("⬜ Только добавлять")
     assert "☑️ Только добавлять" in " ".join(env.labels())
     assert not any(label.startswith("▶️ Выполнить") for label in env.labels())  # no dry run yet
+    assert "«▶️ Выполнить» появится здесь после успешной проверки" in env.last_text()  # said where it is
     env.press("🔍 Проверить")
     env.press("✅ Да")
     env_file = (env.tmp / "run" / f"{env.live.key}.env").read_text()
@@ -1010,11 +1198,11 @@ def test_pins_limit_and_donors_reach_the_task(env):
     env.press("📌 Закрепы")
     env.press("📏 Лимит")
     env.type("50")
-    env.press("📍 Только источники")
+    env.press("📍 Выбрать источники")
     env.type("-1009999999999")
     assert "не источники проекта" in env.last_text()
     env.type("-1001111111111")
-    assert "📍 Только источники: 1" in " ".join(env.labels())
+    assert "📍 Выбрать источники: 1" in " ".join(env.labels())
     env.press("🔍 Проверить")
     env.press("✅ Да")
     env_file = (env.tmp / "run" / f"{env.live.key}.env").read_text()
@@ -1033,10 +1221,10 @@ def test_build_task_args_refuses_bad_pin_options():
 
 def test_monitoring_timers_switch_on_and_off(env):
     env.type("⚙️ Настройки")
-    assert "🩺 Проверка зеркал: выкл" in env.labels()
-    env.press("🩺 Проверка зеркал")  # a switch: no question, one tap back
+    assert "🩺 Оповещение о сбоях: выкл" in env.labels()
+    env.press("🩺 Оповещение о сбоях")  # a switch: no question, one tap back
     assert ["systemctl", "--no-block", "enable", "--now", "telemirror-health.timer"] in env.fake.calls
-    assert env.last_text().startswith("▶️ Включено: 🩺 Проверка зеркал.")
+    assert env.last_text().startswith("▶️ Включено: 🩺 Оповещение о сбоях.")
     env.fake.states["telemirror-restart.timer"] = "active"
     env.press("🔄 Обновить")
     env.press("🔁 Перезапуск по расписанию")
@@ -1050,7 +1238,7 @@ def test_selfcheck_screen(env, monkeypatch):
         selfcheck.Check(selfcheck.FAIL, "🪞 Зеркало: настройки", "bad <mode>"),
     ])
     env.type("⚙️ Настройки")
-    env.press("🧾 Проверка установки")
+    env.press("🧾 Диагностика сервера")
     assert texts.SELFCHECK_WAIT in [str(r.text) for r in env.sent()]  # while it runs
     text = env.last_text()
     assert "✅ 1 · ⚠️ 0 · ❌ 1" in text and "❌ 🪞 Зеркало: настройки — bad &lt;mode&gt;" in text
@@ -1078,7 +1266,7 @@ def test_access_check_shows_its_report_and_runs_without_a_real_run(env):
 
 
 def test_tasks_and_unit_card(env):
-    env.type("📊 Задачи")
+    env.type("📊 Статус")
     assert "🪞 Зеркало · зеркало · 🟢 работает" in env.labels()  # on its button, not repeated in the text
     assert "🟢" not in env.last_text()
     env.press("🪞 Зеркало · зеркало")
@@ -1089,8 +1277,8 @@ def test_tasks_and_unit_card(env):
     env.press("📁 Проект ›")
     assert env.last_text().startswith("🪞 <b>Зеркало</b>\n")  # the project's card
     env.feed(callback_update(NavCB(s="unit", p=env.live.key, i=1).pack()))
-    env.press("⏪ История ›")
-    assert "<b>⏪ История</b>" in env.last_text()
+    env.press("⏪ Старые посты ›")
+    assert "<b>⏪ Старые посты</b>" in env.last_text()
 
 
 # ── 💾 Файл настроек ────────────────────────────────────────────────────────
@@ -1118,7 +1306,7 @@ def test_download_upload_and_rollback(env):
 def test_a_broken_file_can_still_be_rolled_back(env):
     _open_card(env)
     env.press("⚙️ Настройки проекта")
-    env.press("↔️ Режим")  # creates a good .bak
+    env.press("↔️ Как публиковать")  # creates a good .bak
     env.live.config_path.write_text("directions: [unclosed\n", encoding="utf-8")
     _open_card(env)
     assert "Не удалось прочитать файл настроек" in env.last_text()
@@ -1294,7 +1482,7 @@ def test_login_by_phone_with_2fa_straight_into_a_new_project(env, monkeypatch):
     env.type("1 1 1 1 1")
     assert "Неверный код" in env.last_text()
     env.type("1 2 3 4 5")
-    assert "2FA" in env.last_text()
+    assert "облачный пароль" in env.last_text()
     env.type("wrong")
     env.type("secret")
     session = env.tmp / "sessions" / "79994443322.jsession"
@@ -1331,7 +1519,7 @@ def test_an_expired_code_can_be_sent_again(env, monkeypatch):
     env.press("🔑 Войти по номеру")
     env.type("+79994443322")
     env.type("0 0 0 0 0")
-    assert "Код истёк" in env.last_text()
+    assert "Код больше не действует" in env.last_text()
     env.press("📲 Отправить код заново")
     assert client.codes_sent == 2 and "Новый код отправлен" in env.last_text()
     env.type("1 2 3 4 5")  # checked against the new code's hash
@@ -1346,12 +1534,12 @@ def test_a_project_whose_session_is_gone_says_where_to_fix_it(env):
     env.press("🔁 Перезапустить")  # a restart needs no session check: only start / runs do
     env.press("✖️ Отмена")
     env.press("⚙️ Настройки проекта")
-    env.press("↔️ Режим")
+    env.press("↔️ Как публиковать")
     assert "⚙️ Настройки проекта → 👤 Аккаунт" in env.last_text()
     assert "mode" not in env.data()  # nothing written
     env.press("⬅️ Назад")  # the refusal's ⬅️: back to ⚙️ Настройки проекта
     env.press("⬅️ Назад")
-    env.press("⏪ История")
+    env.press("⏪ Старые посты")
     env.press("▶️ Начать")
     answer = env.session.of(AnswerCallbackQuery)[-1]
     assert answer.show_alert and "Вход в аккаунт проекта не найден" in answer.text
@@ -1384,7 +1572,7 @@ def test_a_deleted_projects_button_is_answered(env):
 def test_a_deleted_projects_confirmation_and_input_are_answered(env):
     _open_card(env)
     env.press("⚙️ Настройки проекта")
-    env.press("🏷 Имя")
+    env.press("🏷 Переименовать")
     _delete_live(env)
     env.type("Другое имя")
     assert env.last_text().startswith("⛔ Проект не найден")
@@ -1398,9 +1586,10 @@ def test_a_refused_value_is_asked_again(env):
     _open_card(env)
     env.press("🔀 Направления")
     env.press("1. ")
-    env.press("⏱ Пауза между постами")
+    env.press("⏱ Пауза между отправками")
     env.type("сто")
-    assert env.last_text() == "⚠️ Неверное число: <code>сто</code>\nПришлите ещё раз:"
+    assert env.last_text() == ("⚠️ Нужно число секунд от 0 до 60, например <code>1.5</code>, получено: "
+                               "<code>сто</code>\nПришлите ещё раз:")
     env.type("2")
     assert env.data()["directions"][0]["send_delay"] == 2
 
@@ -1428,7 +1617,7 @@ def test_a_replay_alone_on_its_session_starts_without_a_question(env):
     cfg["directions"][0]["past_mode"] = {"full_history": True}
     env.live.config_path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
     _open_card(env)
-    env.press("⏪ История")
+    env.press("⏪ Старые посты")
     env.press("▶️ Начать")
     assert ["systemctl", "--no-block", "start", env.live.past_unit] in env.fake.calls
     assert env.last_text().startswith("▶️ Запускается.")
@@ -1489,7 +1678,7 @@ def test_a_direction_filters_card_shows_where_it_is(env):
     env.press("🔀 Направления")
     env.press("1. ")
     env.press("🧹 Фильтры направления")
-    env.press("🧹 1. Пропускать посты со словами")
+    env.press("1. Пропускать посты со словами")
     assert "<b>🧹 Фильтры направления</b> › <b>🧹 Фильтр</b>" in env.last_text()
     env.press("🗑 Удалить фильтр")
     env.press("✖️ Отмена")
@@ -1510,7 +1699,7 @@ def test_a_finished_form_leaves_no_fsm_record(env):
     storage: PanelStorage = env.dp.fsm.storage
     _open_card(env)
     env.press("⚙️ Настройки проекта")
-    env.press("🏷 Имя")
+    env.press("🏷 Переименовать")
     assert storage.storage
     env.type("/cancel")
     assert storage.storage == {}
@@ -1615,7 +1804,7 @@ def test_back_from_a_directions_filter_card_reaches_the_directions_page(env, mon
     env.live.config_path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
     env.feed(callback_update(NavCB(s="dir", p=env.live.key, i=1, pg=1).pack()))
     env.press("🧹 Фильтры направления")
-    env.press("🧹 1. Пропускать посты со словами")
+    env.press("1. Пропускать посты со словами")
     env.press("⬅️ Назад")  # → the direction's filters
     env.press("⬅️ Назад")  # → the direction
     assert NavCB(s="dirs", p=env.live.key, i=1, pg=1) in _kb_navs(env)
@@ -1630,7 +1819,7 @@ def test_filters_are_named_for_people_and_rare_settings_are_folded(env):
     assert "<b>Пропускать посты со словами</b> — <i>слова: реклама</i>" in env.last_text()
     env.press("➕ Добавить фильтр")
     env.press("Водяной знак")
-    env.press("🧹 2. Водяной знак")
+    env.press("2. Водяной знак")
     text = env.last_text()
     assert "точность поиска знака" not in text and "<code>WatermarkRemovalFilter</code>" in text
     env.press("🔬 Тонкая настройка")
@@ -1653,13 +1842,13 @@ def test_the_card_says_what_to_do_next(env):
 def test_a_filter_card_describes_only_its_own_buttons(env):
     _open_card(env)
     env.press("🧹 Фильтры")
-    env.press("🧹 1.")
+    env.press("1.")
     text = env.last_text()
     assert "включить или выключить" not in text and "задать своё" not in text and "порядок" not in text
     env.press("⬅️ Назад")
     env.press("➕ Добавить фильтр")
     env.press("Пропускать посты с любыми ссылками")
-    env.press("🧹 2.")
+    env.press("2.")
     text = env.last_text()
     assert "<b>☑️ / ⬜</b> — включить или выключить" in text and "<b>⬆️ Выше</b> — порядок" in text
 
@@ -1691,10 +1880,10 @@ def test_the_broadcast_is_set_in_the_directions(env):
     env.press("🔀 Направления")
     env.press("📢 Рассылка")
     assert "во все ваши каналы" in env.last_text()
-    env.press("📢 Рассылка из канала")
+    env.press("📢 Рассылать из канала")
     env.feed(forwarded_update(-1009999999999, "Объявления"))
     assert env.data()["broadcast_channel"] == -1009999999999
-    assert "📢 Рассылка из канала: <b>Объявления</b>" in env.last_text()  # back on 📢 Рассылка
+    assert "📢 Рассылать из канала: <b>Объявления</b>" in env.last_text()  # back on 📢 Рассылка
 
 
 def test_channels_are_named_wherever_the_bot_shows_them(env):
@@ -1705,18 +1894,18 @@ def test_channels_are_named_wherever_the_bot_shows_them(env):
     _open_card(env)
     env.press("🔀 Направления")
     env.press("📢 Рассылка")
-    assert "📢 Рассылка из канала: <code>-1003926294676</code>" in env.last_text()
+    assert "📢 Рассылать из канала: <code>-1003926294676</code>" in env.last_text()
     assert "покажутся по имени" in env.last_text()  # not known yet: says when it will be
     projects.save_chat_names(env.live.key, {-1003926294676: "Объявления", -1001111111111: "Склад"})
     env.press("⬅️ Назад")
     env.press("📢 Рассылка")
-    assert "📢 Рассылка из канала: <b>Объявления</b>" in env.last_text()
+    assert "📢 Рассылать из канала: <b>Объявления</b>" in env.last_text()
     assert "покажутся по имени" not in env.last_text()
     _open_card(env)
     env.press("🧹 Фильтры")
     assert "только для источников: Склад" in env.last_text()
     assert "True" not in env.last_text() and "False" not in env.last_text()
-    env.press("🧹 2.")
+    env.press("2.")
     assert "1. <b>Склад</b>" in env.last_text() and "🗑 1. Склад" in env.labels()
 
 
@@ -1726,14 +1915,14 @@ def test_keyword_patterns_are_marked_not_shown_in_their_notation(env):
     _open_card(env)
     env.press("🧹 Фильтры")
     assert "слова: 🔣 @frmtribune, Золотой билет" in env.last_text()
-    env.press("🧹 1.")
+    env.press("1.")
     text = env.last_text()
     assert "1. 🔣 <code>@frmtribune</code>" in text and "2. Золотой билет" in text and "r'" not in text
     assert "шаблон поиска" in text
     assert env.labels()[:2] == ["🗑 1. 🔣 @frmtribune", "🗑 2. Золотой билет"]
 
 
-# ── ❗ Не скопировано, 🧬 Без повторов, 📈 Сводка за неделю ─────────────────────
+# ── ❗ Не скопировано, 🧬 Без дублей, 📈 Сводка за неделю ─────────────────────
 
 
 def _failed_entry(env, link="https://t.me/c/1111111111/5", mid=5):
@@ -1802,11 +1991,11 @@ def test_a_stale_failed_post_row(env):
 def test_dedup_hours_parameter(env):
     _open_card(env)
     env.press("⚙️ Настройки проекта")
-    assert "🧬 Без повторов: выкл" in env.labels()
-    env.press("🧬 Без повторов")
+    assert "🧬 Без дублей: выкл" in env.labels()
+    env.press("🧬 Без дублей")
     env.type("24")
     assert env.data()["dedup_hours"] == 24
-    env.press("🧬 Без повторов: 24 ч")
+    env.press("🧬 Без дублей: 24 ч")
     env.type("0")
     assert "dedup_hours" not in env.data()
 
@@ -1815,3 +2004,27 @@ def test_weekly_report_timer_switch(env):
     env.type("⚙️ Настройки")
     env.press("📈 Сводка за неделю")
     assert ["systemctl", "--no-block", "enable", "--now", "telemirror-report.timer"] in env.fake.calls
+
+def test_a_prompt_that_failed_to_send_leaves_the_step_its_data():
+    """Regression: the step's data was saved only after its prompt was sent —
+    a failed send left ➕ Добавить's next step without ``source``: KeyError on
+    the admin's next message."""
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from bot.routers._common import ask
+    from bot.states import AddDirection
+
+    class Msg:
+        async def answer(self, *a, **kw):
+            raise TelegramBadRequest(method=SimpleNamespace(), message="Bad Request")
+
+    state = FSMContext(MemoryStorage(), StorageKey(bot_id=42, chat_id=1, user_id=1))
+
+    async def scenario():
+        with pytest.raises(TelegramBadRequest):
+            await ask(Msg(), state, AddDirection.targets, "куда?", source=-100, targets=[])
+        return await state.get_data()
+
+    assert run(scenario()) == {"source": -100, "targets": []}

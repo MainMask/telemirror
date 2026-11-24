@@ -1,4 +1,4 @@
-"""A post's fingerprint for ``dedup_hours`` (🧬 Без повторов): the same post
+"""A post's fingerprint for ``dedup_hours`` (🧬 Без дублей): the same post
 from another source — the same text and the same photos/videos — isn't sent
 to a channel that already got it.
 

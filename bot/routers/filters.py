@@ -18,7 +18,6 @@ from bot.configstore import ConfigStore
 from bot.keyboards.common import button, choice_kb, paged_rows, pages, pick_kb
 from bot.registry import (
     CHECKED,
-    ROW_OPEN_FILTER,
     ROW_REMOVE,
     TITLES,
     UNCHECKED,
@@ -44,19 +43,20 @@ from telemirror.projects import Project
 
 router = Router(name="filters")
 
-NAMES_ASK = ("пришлите @имена, которые убирать (остальные упоминания останутся), по одному на строку — "
-             "как в тексте, с <code>@</code>.")
+NAMES_ASK = ("какие @имена убирать из текста?\n\nПришлите их, каждое с новой строки, так, как они написаны "
+             "в постах — с <code>@</code>. Остальные упоминания останутся.")
 ASK = {
-    "set": "пришлите значения, по одному на строку.",
-    "list": "пришлите значения, по одному на строку.",
-    "ids": f"нажмите {head(TITLES['pick'])}, перешлите сюда пост из канала или пришлите ID каналов через "
-           "запятую или с новой строки.",
-    "map": "пришлите пары по одной на строку: <code>что =&gt; на что</code>.",
-    "text": "пришлите новое значение или <code>-</code>, чтобы вернуть значение по умолчанию.",
-    "number": "пришлите число или <code>-</code>, чтобы вернуть значение по умолчанию.",
+    "set": "пришлите значения, каждое с новой строки.",
+    "list": "пришлите значения, каждое с новой строки.",
+    "ids": f"нажмите {head(TITLES['pick'])}, перешлите сюда пост из канала или пришлите ID каналов — через "
+           "запятую или каждый с новой строки.",
+    "map": "пришлите пары, каждую с новой строки, в виде <code>что =&gt; на что</code>, например "
+           "<code>купить =&gt; приобрести</code>.",
+    "text": "пришлите новое значение.\n\n<code>-</code> — вернуть значение по умолчанию.",
+    "number": "пришлите число.\n\n<code>-</code> — вернуть значение по умолчанию.",
 }
-KEYWORD_HINT = (" Слова ищутся целиком и без учёта регистра; <code>@имена</code> и <code>#теги</code> пишите "
-                "как есть. Для опытных — шаблон поиска (регулярное выражение): <code>r'шаблон'</code>.")
+KEYWORD_HINT = ("\n\nСлова ищутся целиком, без учёта регистра; <code>@имена</code> и <code>#теги</code> пишите "
+                "как есть.\n<i>Для опытных: шаблон поиска (регулярное выражение) — <code>r'шаблон'</code>.</i>")
 PATTERN = "🔣"  # a keyword written as r'...' — a regex, not a word
 PATTERN_NOTE = f"{PATTERN} — шаблон поиска (регулярное выражение, для опытных); остальное — обычные слова."
 
@@ -70,8 +70,9 @@ def _keyword(item: str) -> str:
     """A keywords value for people: a set's word, or a map's «word => replacement»."""
     word, sep, rest = item.partition(" => ")
     return _pattern(word) + (f" => {rest}" if sep else "")
-FORMAT_HINT = (" Обязательно <code>{message_text}</code>; можно <code>{channel_name}</code>, "
-               "<code>{message_link}</code>, <code>{sender_title}</code>, <code>{sender_username}</code>.")
+FORMAT_HINT = ("\n\nВ подписи обязательно должно быть <code>{message_text}</code> — сюда встанет текст поста. "
+               "Можно добавить <code>{channel_name}</code> (название источника), <code>{message_link}</code> "
+               "(ссылка на пост), <code>{sender_title}</code> и <code>{sender_username}</code> (автор).")
 
 
 def label(key: str) -> str:
@@ -96,13 +97,13 @@ def _item_html(item: str, kind: str, int_keys: bool, names: dict, key: str = "")
 def _item_plain(item: str, kind: str, int_keys: bool, names: dict, key: str = "") -> str:
     """The same for a button (no HTML)."""
     if key == "keywords":
-        return _keyword(item)[:40]
+        return texts.cut(_keyword(item), 40)
     if kind == "ids":
         return texts.chat_plain(item, names, 40)
     if int_keys and " => " in item:
         chat_id, value = item.split(" => ", 1)
-        return f"{texts.chat_plain(chat_id, names)} => {value}"[:40]
-    return item[:40]
+        return texts.cut(f"{texts.chat_plain(chat_id, names)} => {value}", 40)
+    return texts.cut(item, 40)
 
 
 def _arg_text(a: Any, names: dict) -> str:
@@ -129,8 +130,7 @@ def _short(value: Any, limit: int = 60) -> str:
         value = [f"{k} => {v}" for k, v in value.items()]
     if isinstance(value, (list, tuple)):
         value = ", ".join(str(v) for v in value)
-    text = str(value)
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+    return texts.cut(str(value), limit)
 
 
 def _ask_text(entry: Any, key: str, kind: str) -> str:
@@ -140,7 +140,7 @@ def _ask_text(entry: Any, key: str, kind: str) -> str:
     if key == "format":
         text += FORMAT_HINT
     if configedit.int_keys(entry, key):
-        text = "пришлите пары по одной на строку: <code>-1001234567890 =&gt; Имя канала</code>."
+        text = "пришлите пары, каждую с новой строки: <code>-1001234567890 =&gt; Имя канала</code>."
     return text
 
 
@@ -194,7 +194,7 @@ async def filters_view(message: Message, edit: bool, nav: NavCB, *, project: Pro
         lines.append(f"{n + 1}. {head(name_of(f))}"
                      + (f" — <i>{esc(detail)}</i>" if detail else ""))
         if info.writable:
-            own.append([button(f"{ROW_OPEN_FILTER} {n + 1}. {name_of(f)}",
+            own.append([button(f"{n + 1}. {name_of(f)}",
                                FltCB(a="v", p=project.key, d=d, f=n, h=configedit.filter_fp(info.data, d, f)))])
     if info.writable:
         own.append([button(TITLES["flt_add"], FltCB(a="n", p=project.key, d=d, h=_dir_fp(project, d)))])
@@ -212,7 +212,7 @@ async def filters_view(message: Message, edit: bool, nav: NavCB, *, project: Pro
         scope = f"Свои фильтры направления № {d + 1}" + (
             "." if entries else " не заданы — действуют общие фильтры проекта. Если добавить сюда "
                                 "фильтр, общие скопируются сюда же, и дальше у направления будет свой список.")
-    hints = [(f"{ROW_OPEN_FILTER} фильтр", "его настройки, порядок, удаление"),
+    hints = [("Фильтр из списка", "его настройки, порядок, удаление"),
              (TITLES["flt_add"], "выбрать из списка")] if info.writable else ()
     await show(message, edit, nav.s, project, body=scope + ("\n\n" + "\n".join(lines) if lines else ""),
                more=more, note=note, own=own, own_hints=hints, i=nav.i, pg=nav.pg)

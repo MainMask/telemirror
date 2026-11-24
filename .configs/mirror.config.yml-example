@@ -56,10 +56,15 @@ directions:
     past_mode:
       last_n: 100       # sync last 100 messages
       send_delay: 1.0   # delay between replayed messages (seconds)
+      # (Optional) Spread the history out instead: 5 posts per 45 minutes, one
+      # every 9 min (an album counts once). Copied by the live mirror itself,
+      # which keeps running; telemirror.past skips such directions.
+      # drip: {posts: 5, minutes: 45}
+      # drip: {seconds: 30}   # or: one post every 30 seconds
     # past_mode:
     #   full_history: true
     # past_mode:
-    #   since_date: "2024-01-01T00:00:00"
+    #   since_date: "2024-01-01T00:00:00+03:00"  # without an offset it's UTC; the panel writes Moscow time
     # Overwrite global filters
     filters:
       - SkipWithUrlFilter:      # must come before UrlMessageFilter (runs on raw entities)

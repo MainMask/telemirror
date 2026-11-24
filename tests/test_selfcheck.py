@@ -1,5 +1,5 @@
 """telemirror.selfcheck: each check on faked systemd / HTTP / Postgres, the
-config load in a real subprocess, and the panel's 🧾 Проверка установки."""
+config load in a real subprocess, and the panel's 🧾 Диагностика сервера."""
 
 import json
 import re

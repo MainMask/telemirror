@@ -4,7 +4,7 @@ keyboards, the screens' texts and the menu paths in messages are built from
 here, so a button can't lose its description or its handler — the bot refuses
 to start with a button nobody handles (``unhandled_actions``).
 
-A screen's message lists each of its buttons with its hint, under their
+A screen's message lists (folded) each of its buttons with its hint, under their
 subheadings (``Button.group``); its keyboard has them two short ones per row,
 a group's never mixed with another's, then the screens opened from it (``›``),
 then ``🔄 Обновить`` and ``⬅️ Назад`` on the last row. ``⬅️ Назад`` returns to the
@@ -43,7 +43,7 @@ PRIMARY, DANGER, SUCCESS = "primary", "danger", "success"
 
 # ── titles (button labels quote these, so a rename can't leave a stale one) ──
 PROJECTS = "📁 Проекты"
-TASKS = "📊 Задачи"
+TASKS = "📊 Статус"
 SETTINGS = "⚙️ Настройки"
 CARD = "📁 Проект"
 DIRECTIONS = "🔀 Направления"
@@ -52,7 +52,7 @@ BROADCAST = "📢 Рассылка"
 FILTERS = "🧹 Фильтры"
 DIR_FILTERS = "🧹 Фильтры направления"
 FILTER = "🧹 Фильтр"
-REPLAY = "⏪ История"
+REPLAY = "⏪ Старые посты"
 MAINTENANCE = "🛠 Инструменты"
 RESTRICT = "🔒 Запрет копирования"
 PINS = "📌 Закрепы"
@@ -62,10 +62,10 @@ CLEAR = "🧨 Очистка каналов"
 CONFIG = "💾 Файл настроек"
 FAILED = "❗ Не скопировано"  # telemirror.notify.FAILED_SCREEN
 MANAGE = "⚙️ Настройки проекта"
-UNIT = "📊 Задача"
+UNIT = "📊 Статус и журнал"
 ACCOUNTS = "👤 Аккаунты"
 ACCOUNT = "👤 Аккаунт"
-SELFCHECK = "🧾 Проверка установки"
+SELFCHECK = "🧾 Диагностика сервера"
 
 BACK = "⬅️ Назад"
 REFRESH = "🔄 Обновить"
@@ -114,23 +114,25 @@ SCREENS = {s.id: s for s in (
     Screen("dir", DIRECTION, "одно направление: откуда и куда", "dirs", buttons=(
         Button("dir_src", "📨 Откуда", "каналы, из которых берутся посты"),
         Button("dir_dst", "🎯 Куда", "каналы, в которые посты копируются"),
-        Button("dir_delay", "⏱ Пауза между постами", "сколько секунд ждать между отправками"),
-        Button("dir_del", "🗑 Удалить", "убрать это направление", style=DANGER),
+        Button("dir_delay", "⏱ Пауза между отправками", "сколько секунд ждать между отправками"),
+        Button("dir_del", "🗑 Удалить направление", "убрать это направление", style=DANGER),
     ), project=True),
     Screen("dflt", DIR_FILTERS, "свой список фильтров вместо общих", "dir", project=True),
     Screen("bc", BROADCAST, "канал, посты которого копируются во все ваши каналы", "dirs", buttons=(
-        Button("p_bc", "📢 Рассылка из канала", "какой канал рассылать"),
+        Button("p_bc", "📢 Рассылать из канала", "какой канал рассылать"),
         Button("p_bct", "📬 Куда рассылать", "если не во все ваши каналы"),
     ), project=True),
     Screen("flt", FILTERS, "что не копировать и что менять в постах", "card", project=True),
     Screen("fv", FILTER, "настройки одного фильтра", "flt", project=True),
-    Screen("rpl", REPLAY, "скопировать старые посты источников", "card", buttons=(
-        Button("rpl_start", "▶️ Начать", "новые посты на это время подождут", START),
-        Button("rpl_stop", "⏹ Прервать", "в следующий раз продолжит с того же места", START),
+    Screen("rpl", REPLAY, "скопировать посты, вышедшие до запуска зеркала", "card", buttons=(
+        Button("rpl_start", "▶️ Начать копирование", "новые посты на это время подождут", START),
+        Button("rpl_stop", "⏸ Приостановить", "в следующий раз продолжит с того же места", START),
+        Button("rpl_restart", "🔁 Перезапустить зеркало", "чтобы новый темп начал действовать", START),
         Button("rpl_hist", "📜 Что копировать", "все старые посты, последние N, с даты или ничего", WHAT),
-        Button("rpl_delay", "⏱ Пауза при копировании", "сколько секунд ждать между старыми постами", WHAT),
+        Button("rpl_delay", "⏱ Пауза для старых постов", "сколько секунд ждать между старыми постами", WHAT),
+        Button("rpl_pace", "🐢 Темп", "сразу или порциями: N постов за M минут, зеркало не останавливается", WHAT),
     ), refresh=True, project=True),
-    Screen("mnt", MAINTENANCE, "проверка доступа, запрет копирования, закрепы, анонимность, очистка", "card",
+    Screen("mnt", MAINTENANCE, "разовые действия с вашими каналами: проверить доступ, перенести закрепы, очистить", "card",
            project=True),
     Screen("ca", ACCESS, "видит ли аккаунт источники и может ли публиковать в ваших каналах", "mnt", buttons=(
         Button("ca_dry", CHECK, "ничего не меняет: только проверяет права аккаунта"),
@@ -147,7 +149,7 @@ SCREENS = {s.id: s for s in (
         Button("sp_broadcast", "☑️ С рассылкой", "и канал рассылки", RUN_SETTINGS),
         Button("sp_thorough", "☑️ Тщательно", "каждую тему группы — дольше", RUN_SETTINGS),
         Button("sp_max", "📏 Лимит закрепов", "сколько закрепов смотреть в чате или теме", RUN_SETTINGS),
-        Button("sp_only", "📍 Только источники", "только эти источники вместо всех", RUN_SETTINGS),
+        Button("sp_only", "📍 Выбрать источники", "только эти источники вместо всех", RUN_SETTINGS),
         run="сделать то, что показала проверка с теми же настройками",
     ), refresh=True, project=True),
     Screen("ag", ANONYMITY, "скрыть, кто из админов пишет, и участников групп", "mnt",
@@ -160,14 +162,14 @@ SCREENS = {s.id: s for s in (
         Button("fail_all", "♻️ Повторить все", "скопировать заново все посты из списка"),
         Button("fail_clear", "🧽 Очистить список", "забыть эти посты, не копируя"),
     ), refresh=True, project=True, paged=True),
-    Screen("mng", MANAGE, "правки, удаления, режим; имя, значок, аккаунт; файл настроек", "card", buttons=(
-        Button("p_edits", "✏️ Правки", "исправили пост в источнике — исправить и копию", COPYING),
-        Button("p_dels", "✂️ Удаления", "удалили пост в источнике — удалить и копию", COPYING),
-        Button("p_mode", "↔️ Режим", "копия от имени вашего канала или пересылка «Переслано из»", COPYING),
-        Button("p_link", "🔗 Ссылка вместо чужих", "ею заменяются ссылки на чужие закрытые каналы", COPYING),
-        Button("p_dedup", "🧬 Без повторов", "не копировать в канал пост, который уже пришёл в него из "
+    Screen("mng", MANAGE, "как копировать посты и сам проект: имя, аккаунт, удаление", "card", buttons=(
+        Button("p_edits", "✏️ Повторять правки", "исправили пост в источнике — исправить и копию", COPYING),
+        Button("p_dels", "✂️ Повторять удаления", "удалили пост в источнике — удалить и копию", COPYING),
+        Button("p_mode", "↔️ Как публиковать", "копия от имени вашего канала или пересылка «Переслано из»", COPYING),
+        Button("p_link", "🔗 Запасная ссылка", "вместо ссылки на пост источника, если его копии у вас нет", COPYING),
+        Button("p_dedup", "🧬 Без дублей", "не копировать в канал пост, который уже пришёл в него из "
                                             "другого источника", COPYING),
-        Button("rename", "🏷 Имя", "новое имя проекта", PROJECT),
+        Button("rename", "🏷 Переименовать", "новое имя проекта", PROJECT),
         Button("icon", "🎨 Значок", "эмодзи перед именем", PROJECT),
         Button("account", "👤 Аккаунт", "от чьего имени копируются посты", PROJECT),
         Button("delete", "🗑 Удалить проект", "остановить и убрать проект", PROJECT, DANGER),
@@ -182,14 +184,14 @@ SCREENS = {s.id: s for s in (
         Button("acc_upload", "📤 Загрузить сессию", "файл входа из Telegram Desktop или другого бота"),
     ), paged=True),
     Screen("acct", ACCOUNT, "один аккаунт", "acc", buttons=(
-        Button("acc_del", "🗑 Удалить", "только если ни один проект его не использует", style=DANGER),
+        Button("acc_del", "🗑 Удалить с сервера", "только если ни один проект его не использует", style=DANGER),
     )),
     Screen("chk", SELFCHECK, "всё ли на сервере на месте: бот, база, юниты, таймеры, проекты", "set",
            refresh=True),
     Screen("tsk", TASKS, "что сейчас работает и журналы", refresh=True, paged=True),
     Screen("unit", UNIT, "работает ли и что происходило", "tsk", refresh=True, project=True),
-    Screen("set", SETTINGS, "аккаунты Telegram, присмотр за зеркалами, проверка установки", buttons=(
-        Button("set_health", "🩺 Проверка зеркал", "каждые 10 минут: сообщить сюда, если зеркало падает снова и снова",
+    Screen("set", SETTINGS, "аккаунты Telegram, присмотр за зеркалами, диагностика сервера", buttons=(
+        Button("set_health", "🩺 Оповещение о сбоях", "каждые 10 минут: сообщить сюда, если зеркало падает снова и снова",
                WATCH),
         Button("set_restart", "🔁 Перезапуск по расписанию", "каждую ночь в 04:00 перезапускать зеркала", WATCH),
         Button("set_report", "📈 Сводка за неделю", "по понедельникам в 10:00: сколько скопировано, какие "
@@ -214,9 +216,9 @@ TITLES = {
     "resend": "📲 Отправить код заново",  # 🔑 Войти по номеру
     "notice": UNIT,  # a push notice: open the unit
 }
-# A list's rows start with these: the item they open (🧹 a filter, 👤 an
-# account…) or remove (🗑 a value).
-ROW_OPEN_FILTER, ROW_ACCOUNT, ROW_REMOVE = "🧹", "👤", "🗑"
+# A list's rows start with these: the item they open (👤 an account) or
+# remove (🗑 a value). Numbered lists (directions, filters) start with the number.
+ROW_ACCOUNT, ROW_REMOVE = "👤", "🗑"
 CHECKED, UNCHECKED = "☑️", "⬜"
 
 # The colour of a label shown off a screen's buttons (a form's, a list's),

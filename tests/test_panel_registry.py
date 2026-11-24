@@ -6,7 +6,7 @@ import re
 from itertools import groupby
 
 from bot import registry
-from bot.keyboards.menu import screen_kb
+from bot.keyboards.menu import SHORT, screen_kb
 from bot.routers._common import CONFIRMED, HANDLED, INPUTS
 from bot.screens import VIEWS
 
@@ -55,7 +55,7 @@ def test_the_tree_is_sound():
             assert screen.parent in registry.SCREENS
             assert screen.project or not registry.SCREENS[screen.parent].project, screen.id
         assert registry.trail(screen.id)[0].parent == ""
-    assert registry.MAIN_MENU == ("📁 Проекты", "📊 Задачи", "⚙️ Настройки")
+    assert registry.MAIN_MENU == ("📁 Проекты", "📊 Статус", "⚙️ Настройки")
 
 
 def test_screens_opened_from_a_list_have_a_view():
@@ -71,7 +71,7 @@ def test_confirmations_and_inputs_are_registered():
 
 def test_menu_path_names_the_way_there():
     assert registry.menu_path("dir_add") == "📁 Проекты → проект → 🔀 Направления → ➕ Добавить"
-    assert registry.menu_path("p_link") == "📁 Проекты → проект → ⚙️ Настройки проекта → 🔗 Ссылка вместо чужих"
+    assert registry.menu_path("p_link") == "📁 Проекты → проект → ⚙️ Настройки проекта → 🔗 Запасная ссылка"
     assert registry.menu_path("acc_login") == "⚙️ Настройки → 👤 Аккаунты → 🔑 Войти по номеру"
     assert registry.menu_path("ca") == "📁 Проекты → проект → 🛠 Инструменты → 🛂 Проверка доступа"
     assert registry.menu_path("cfg_get") == "📁 Проекты → проект → ⚙️ Настройки проекта → 💾 Файл настроек → 📥 Скачать"
@@ -111,3 +111,12 @@ def test_a_group_starts_its_own_row():
     copying = {b.title for b in registry.SCREENS["mng"].buttons if b.group == registry.COPYING}
     for row in rows:
         assert set(row) <= copying or not set(row) & copying, row
+
+
+def test_two_buttons_share_a_row_only_when_both_are_short():
+    """Paired, a long label is cut on a phone: the screens opened from a
+    screen (›) are laid out as its own buttons."""
+    for screen_id in registry.SCREENS:
+        for row in screen_kb(screen_id, "p").inline_keyboard:
+            if len(row) == 2:
+                assert max(len(b.text) for b in row) <= SHORT, (screen_id, [b.text for b in row])

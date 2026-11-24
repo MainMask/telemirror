@@ -1,5 +1,5 @@
 """⚙️ Настройки: access (read-only — it lives in .env), the monitoring timers
-(on/off), 🧾 Проверка установки (telemirror.selfcheck) and its 👤 Аккаунты
+(on/off), 🧾 Диагностика сервера (telemirror.selfcheck) and its 👤 Аккаунты
 (routers/accounts.py)."""
 
 import asyncio

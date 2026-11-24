@@ -139,6 +139,15 @@ class Database(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def count_mirrored(
+        self: "Database", original_channel: int, mirror_channel: int, up_to: int
+    ) -> int:
+        """How many source messages of the pair, ids ``up_to`` and below, have
+        a mirror — counted once each, however many rows (topics) they have;
+        without loading the rows."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def update_source_media_id(
         self: "Database",
         original_channel: int,
@@ -173,7 +182,28 @@ class Database(ABC):
         """Removes the checkpoint for a source→target pair (no-op if absent).
 
         Used by the ``clear_channels`` maintenance script after a target is wiped.
+        The pair's drip state (`get_drip_state`) goes with it: the history is
+        copied again.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_drip_state(
+        self: "Database", source: int, target: int
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """A drip's (``past_mode.drip``) state for a source→target pair:
+        (when it last sent a post — unix time, the history it finished — its
+        strategy), each None when not yet."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def set_drip_sent(self: "Database", source: int, target: int, at: float) -> None:
+        """Upserts when the pair's drip last sent a post (unix time)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def set_drip_done(self: "Database", source: int, target: int, done: str) -> None:
+        """Upserts the history (its strategy) the pair's drip has finished."""
         raise NotImplementedError
 
     @abstractmethod
@@ -284,6 +314,7 @@ class InMemoryDatabase(Database):
     ) -> None:
         self.__storage = LRUCache[str, List[MirrorMessage]](capacity=max_capacity)
         self.__checkpoints: Dict[Tuple[int, int], int] = {}
+        self.__drips: Dict[Tuple[int, int], Tuple[Optional[float], Optional[str]]] = {}
         self.__capacity = max_capacity
         self.__broadcast_sync: Dict[int, LRUCache[int, Optional[int]]] = {}
         # (target, topic, fingerprint) → [(original_channel, original_id, at)]
@@ -378,6 +409,12 @@ class InMemoryDatabase(Database):
             if m.mirror_channel == mirror_channel
         ]
 
+    async def count_mirrored(
+        self: "InMemoryDatabase", original_channel: int, mirror_channel: int, up_to: int
+    ) -> int:
+        return len({m.original_id for m in await self.get_messages_for_channel_pair(
+            original_channel, mirror_channel) if m.original_id <= up_to})
+
     async def update_source_media_id(
         self: "InMemoryDatabase",
         original_channel: int,
@@ -407,6 +444,18 @@ class InMemoryDatabase(Database):
         self: "InMemoryDatabase", source: int, target: int
     ) -> None:
         self.__checkpoints.pop((source, target), None)
+        self.__drips.pop((source, target), None)
+
+    async def get_drip_state(
+        self: "InMemoryDatabase", source: int, target: int
+    ) -> Tuple[Optional[float], Optional[str]]:
+        return self.__drips.get((source, target), (None, None))
+
+    async def set_drip_sent(self: "InMemoryDatabase", source: int, target: int, at: float) -> None:
+        self.__drips[(source, target)] = (at, self.__drips.get((source, target), (None, None))[1])
+
+    async def set_drip_done(self: "InMemoryDatabase", source: int, target: int, done: str) -> None:
+        self.__drips[(source, target)] = (self.__drips.get((source, target), (None, None))[0], done)
 
     async def delete_bindings_for_mirror(
         self: "InMemoryDatabase", mirror_channel: int
@@ -517,7 +566,12 @@ class PostgresDatabase(Database):
     """
 
     MIN_CONN = 1
-    MAX_CONN = 10
+    # Per process — each project's mirror, a history replay, a task has its
+    # own pool, all against one server (max_connections, 100 by default);
+    # the queries are short, a few at once are plenty.
+    MAX_CONN = 5
+    # pg_advisory_xact_lock key the schema migration is serialized on
+    SCHEMA_LOCK_KEY = 0x7E1E_0001
 
     def __init__(self, connection_string: str) -> None:
         self.__conn_info = connection_string
@@ -528,9 +582,19 @@ class PostgresDatabase(Database):
             min_size=self.MIN_CONN,
             max_size=self.MAX_CONN,
             open=False,
+            # a connection the server dropped (a restart) is replaced before
+            # use: otherwise the query it gets — an insert_batch of a post
+            # already sent — fails, and the copy is never tracked
+            check=AsyncConnectionPool.check_connection,
         )
         await self.connection_pool.open()
-        await self.__create_tables_if_not_exists()
+        try:
+            await self.__create_tables_if_not_exists()
+        except BaseException:
+            # the caller gets no database to close: the pool (its
+            # connections, its workers) would be left open
+            await self.connection_pool.close()
+            raise
         return self
 
     async def insert_batch(
@@ -663,6 +727,18 @@ class PostgresDatabase(Database):
             )
             return await cursor.fetchall()
 
+    async def count_mirrored(
+        self: "PostgresDatabase", original_channel: int, mirror_channel: int, up_to: int
+    ) -> int:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "SELECT count(DISTINCT original_id) FROM binding_id "
+                "WHERE original_channel = %s AND mirror_channel = %s AND original_id <= %s",
+                (original_channel, mirror_channel, up_to),
+            )
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
     async def update_source_media_id(
         self: "PostgresDatabase",
         original_channel: int,
@@ -680,8 +756,15 @@ class PostgresDatabase(Database):
             )
 
     async def __create_tables_if_not_exists(self: "PostgresDatabase"):
-        """Create tables if not exists"""
+        """Create tables if not exists.
+
+        Run by every process at its start, in one transaction: an advisory lock
+        keeps two starting at once (a fresh database) from racing on the same
+        CREATE TABLE. A column or an index is added only when it's missing —
+        ALTER TABLE / CREATE INDEX lock the table even with IF NOT EXISTS, and
+        the running mirrors would wait on each start's migration."""
         async with self.__pg_cursor() as cursor:
+            await cursor.execute("SELECT pg_advisory_xact_lock(%s)", (self.SCHEMA_LOCK_KEY,))
             await cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS binding_id(
@@ -695,20 +778,18 @@ class PostgresDatabase(Database):
                     source_media_id bigint
                 );
 
-                ALTER TABLE binding_id ADD COLUMN IF NOT EXISTS mirror_topic_id bigint;
-                ALTER TABLE binding_id ADD COLUMN IF NOT EXISTS source_topic_id bigint;
-                ALTER TABLE binding_id ADD COLUMN IF NOT EXISTS source_media_id bigint;
-
-                CREATE INDEX IF NOT EXISTS binding_id_original_idx
-                ON binding_id (original_channel, original_id);
-
-                CREATE INDEX IF NOT EXISTS binding_id_channel_pair_idx
-                ON binding_id (original_channel, mirror_channel);
-
                 CREATE TABLE IF NOT EXISTS past_mode_checkpoint (
                     source_channel BIGINT NOT NULL,
                     target_channel BIGINT NOT NULL,
                     last_message_id BIGINT NOT NULL,
+                    PRIMARY KEY (source_channel, target_channel)
+                );
+
+                CREATE TABLE IF NOT EXISTS past_mode_drip (
+                    source_channel BIGINT NOT NULL,
+                    target_channel BIGINT NOT NULL,
+                    last_sent_at   DOUBLE PRECISION,
+                    done           TEXT,
                     PRIMARY KEY (source_channel, target_channel)
                 );
 
@@ -727,14 +808,27 @@ class PostgresDatabase(Database):
                     original_id      BIGINT NOT NULL,
                     created_at       BIGINT NOT NULL
                 );
-
-                CREATE INDEX IF NOT EXISTS post_fingerprint_lookup_idx
-                ON post_fingerprint (target_channel, fingerprint);
-
-                CREATE INDEX IF NOT EXISTS post_fingerprint_created_idx
-                ON post_fingerprint (created_at);
                 """
             )
+            # binding_id created before these columns existed
+            await cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'binding_id'"
+            )
+            columns = {row[0] for row in await cursor.fetchall()}
+            for column in ("mirror_topic_id", "source_topic_id", "source_media_id"):
+                if column not in columns:
+                    await cursor.execute(f"ALTER TABLE binding_id ADD COLUMN {column} bigint")
+            for name, on in (
+                ("binding_id_original_idx", "binding_id (original_channel, original_id)"),
+                ("binding_id_channel_pair_idx", "binding_id (original_channel, mirror_channel)"),
+                ("post_fingerprint_lookup_idx", "post_fingerprint (target_channel, fingerprint)"),
+                ("post_fingerprint_created_idx", "post_fingerprint (created_at)"),
+            ):
+                await cursor.execute("SELECT to_regclass(%s)", (name,))
+                row = await cursor.fetchone()
+                if row is None or row[0] is None:
+                    await cursor.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {on}")
 
     async def get_past_mode_checkpoint(
         self: "PostgresDatabase", source: int, target: int
@@ -770,6 +864,47 @@ class PostgresDatabase(Database):
                 "DELETE FROM past_mode_checkpoint "
                 "WHERE source_channel = %s AND target_channel = %s",
                 (source, target),
+            )
+            await cursor.execute(
+                "DELETE FROM past_mode_drip "
+                "WHERE source_channel = %s AND target_channel = %s",
+                (source, target),
+            )
+
+    async def get_drip_state(
+        self: "PostgresDatabase", source: int, target: int
+    ) -> Tuple[Optional[float], Optional[str]]:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                "SELECT last_sent_at, done FROM past_mode_drip "
+                "WHERE source_channel = %s AND target_channel = %s",
+                (source, target),
+            )
+            row = await cursor.fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+    async def set_drip_sent(self: "PostgresDatabase", source: int, target: int, at: float) -> None:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO past_mode_drip (source_channel, target_channel, last_sent_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (source_channel, target_channel)
+                DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at
+                """,
+                (source, target, at),
+            )
+
+    async def set_drip_done(self: "PostgresDatabase", source: int, target: int, done: str) -> None:
+        async with self.__pg_cursor() as cursor:
+            await cursor.execute(
+                """
+                INSERT INTO past_mode_drip (source_channel, target_channel, done)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (source_channel, target_channel)
+                DO UPDATE SET done = EXCLUDED.done
+                """,
+                (source, target, done),
             )
 
     async def delete_bindings_for_mirror(

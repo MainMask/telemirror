@@ -17,7 +17,7 @@ from bot import registry, settings, status, texts
 from bot.callbacks import ActCB, ChoiceCB, NavCB
 from bot.keyboards.common import button, choice_kb, paged_rows, pages
 from bot.registry import YES_DELETE, title
-from bot.routers import _units
+from bot.routers import _units, replay
 from bot.routers._common import (
     ask,
     ask_confirm,
@@ -58,7 +58,7 @@ async def projects_view(message: Message, edit: bool, nav: NavCB, *, sysd: Syste
         count = len(info.directions) if info.readable else texts.UNKNOWN
         active = st.active if st else None
         items.append(button(
-            f"{project_label(p)} · {texts.state_icon(active)} {texts.mirror_state(active)} · направлений: {count}",
+            f"{project_label(p)} · {texts.state_icon(active)} {texts.mirror_state(active)} · 🔀 {count}",
             NavCB(s="card", p=p.key, pg=page),
         ))
     about = "Проект — это одно зеркало: из каких каналов в какие копировать посты и от имени какого аккаунта."
@@ -91,6 +91,13 @@ async def card_view(message: Message, edit: bool, nav: NavCB, *, project: Projec
                      + " — они работают по очереди, не одновременно.")
     if not info.readable:
         lines.append(texts.unreadable(info))
+    if running and info.readable and replay.drips(info.data):
+        kind, pairs = await _units.drip_state(sysd, project.live_unit, st)
+        if kind == "stopped":
+            lines.append(f"⚠️ Копирование старых постов остановилось с ошибкой — {registry.REPLAY}.")
+        elif not kind or kind == "idle" and not pending:  # idle and pending: the pace came after the start
+            lines.append(f"🐢 Старые посты копируются порциями: {replay.pace_text(info.data)}"
+                         + (f", готово пар каналов: {pairs}" if pairs else "") + f" — {registry.REPLAY}.")
     if pending:
         lines.append(f"⚠️ <b>Изменения ещё не применены</b> — нажмите «{title('restart')}».")
     elif step := next_step(project, info, running):
@@ -152,8 +159,9 @@ async def on_stop(callback: CallbackQuery, callback_data: ActCB, project: Projec
 
 # ── ➕ Новый проект: name → icon → account ───────────────────────────────────
 
-NAME_ASK = f"{head(title('new'))} — пришлите имя проекта (до {settings.PROJECT_NAME_MAX} символов):"
-ICON_ASK = "— выберите значок проекта или пришлите свой эмодзи:"
+NAME_ASK = (f"{head(title('new'))} — как назвать проект?\n\n"
+            f"Пришлите имя, до {settings.PROJECT_NAME_MAX} символов. Оно видно в панели и в уведомлениях.")
+ICON_ASK = "— выберите значок проекта кнопкой ниже или пришлите свой эмодзи."
 
 
 def name_problem(name: str, skip: str = "") -> Optional[str]:
@@ -195,9 +203,11 @@ async def _new_icon(message: Message, state: FSMContext, icon: str) -> None:
     paths = session_files()
     await ask(
         message, state, NewProject.account,
-        f"{head(title('new'))} {esc(icon)} «{esc((await state.get_data())['name'])}» — выберите аккаунт: "
-        "от его имени зеркало будет читать каналы-источники и публиковать в ваших каналах. Проекты "
-        "с одним аккаунтом работают по очереди.",
+        f"{head(title('new'))} {esc(icon)} «{esc((await state.get_data())['name'])}» — от имени какого "
+        "аккаунта работать?\n\n"
+        "С этого аккаунта зеркало будет читать каналы-источники и публиковать в ваших каналах. Выберите "
+        "аккаунт или добавьте новый.\n\n"
+        "<i>Проекты на одном аккаунте работают по очереди, не одновременно.</i>",
         picker(paths), icon=icon, accounts=paths, then="new",
     )
 
@@ -241,7 +251,8 @@ def _manage(project: Project) -> NavCB:
 @on_action(router, "rename")
 async def on_rename(callback: CallbackQuery, project: Project, state: FSMContext) -> None:
     await start_form(callback, state, Input.value,
-                     f"{head(title('rename'))} — сейчас «{esc(project.name)}». Пришлите новое имя:",
+                     f"{head(title('rename'))} — сейчас «{esc(project.name)}».\n\n"
+                     f"Пришлите новое имя проекта, до {settings.PROJECT_NAME_MAX} символов.",
                      _manage(project), data={"kind": "rename", "p": project.key})
 
 
@@ -282,8 +293,9 @@ async def on_account(callback: CallbackQuery, project: Project, state: FSMContex
     paths = session_files()
     await start_form(
         callback, state, Input.value,
-        f"{head(title('account'))} — сейчас {esc(account_label(project.session))}. "
-        "Выберите другой; посты начнут копироваться от его имени после перезапуска.",
+        f"{head(title('account'))} — сейчас {esc(account_label(project.session))}.\n\n"
+        "Выберите другой аккаунт или добавьте новый.\n\n"
+        "<i>Посты начнут копироваться от его имени после перезапуска зеркала.</i>",
         _manage(project), markup=picker(paths), choice=True,
         data={"kind": "account", "p": project.key, "accounts": paths, "then": project.key},
     )

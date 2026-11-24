@@ -153,13 +153,14 @@ async def session_ready(message: Message, state: FSMContext, path: str, note: st
 # ── 📤 Загрузить сессию ─────────────────────────────────────────────────────
 
 UPLOAD_ASK = (
-    f"{head(title('acc_upload'))} — пришлите документом одно из:\n"
-    "• ZIP с папкой <code>tdata</code> (Telegram Desktop);\n"
+    f"{head(title('acc_upload'))} — пришлите документом один из вариантов:\n\n"
+    "• ZIP с папкой <code>tdata</code> из Telegram Desktop;\n"
     "• файл <code>.session</code> (Telethon) вместе с <code>.json</code> того же имени — выделите оба "
-    "и отправьте вместе, — или ZIP с ними;\n"
-    "• файл <code>.jsession</code>.\n"
-    "В аккаунт уже должен быть выполнен вход: бот проверит это, подключившись к нему, и сохранит файл "
-    "на сервере. Облачный пароль не нужен и не сохраняется. Файлы из чата я удалю."
+    "и отправьте вместе — или ZIP с ними;\n"
+    "• файл <code>.jsession</code>.\n\n"
+    "В этом аккаунте уже должен быть выполнен вход. Бот проверит это, подключившись к аккаунту, и сохранит "
+    "файл на сервере.\n\n"
+    "<i>Облачный пароль не нужен и не сохраняется. Присланные файлы бот удалит из чата.</i>"
 )
 UPLOAD_SUFFIXES = (".zip", ".session", ".json", ".jsession")
 
@@ -211,7 +212,8 @@ async def _import(message: Message, state: FSMContext, files: dict, passcode: Op
     except session_import.NeedPasscode as e:
         await pending.put(message.chat.id, pending.Upload(files))  # too big for FSM data
         await ask(message, state, UploadSession.passcode,
-                  f"🔐 {esc(e)}. Пришлите код-пароль Telegram Desktop (сообщение удалю, он не сохраняется):")
+                  f"🔐 {esc(e)}.\n\nПришлите код-пароль, которым защищён Telegram Desktop, — тот, что "
+                  "вводится при запуске программы.\n\n<i>Сообщение бот удалит, код-пароль не сохраняется.</i>")
         return
     except session_import.SessionImportError as e:
         await ask(message, state, UploadSession.file, f"⚠️ Не загружено: {esc(e)}. Пришлите другие файлы:")
@@ -238,12 +240,14 @@ async def on_passcode(message: Message, state: FSMContext, deps: dict) -> None:
 # ── 🔑 Войти по номеру ──────────────────────────────────────────────────────
 
 PHONE_ASK = (
-    f"{head(title('acc_login'))} — пришлите номер телефона в международном формате, "
-    "например <code>+79991234567</code>. Бот войдёт как приложение Telegram Desktop."
+    f"{head(title('acc_login'))} — какой номер у аккаунта?\n\n"
+    "Пришлите его в международном формате, например <code>+79991234567</code>.\n\n"
+    "<i>Бот войдёт в аккаунт как приложение Telegram Desktop — этот вход появится в списке устройств.</i>"
 )
 CODE_ASK = (
-    "Пришлите код <b>через пробелы</b>, например <code>1 2 3 4 5</code>: код, отправленный "
-    "в Telegram целиком, Telegram аннулирует. Сообщение с кодом я удалю."
+    "Пришлите код из Telegram <b>через пробелы</b>, например <code>1 2 3 4 5</code>. Код, отправленный "
+    "слитно, Telegram аннулирует.\n\n"
+    "<i>Сообщение с кодом бот сразу удалит.</i>"
 )
 
 
@@ -311,6 +315,7 @@ async def on_resend(callback: CallbackQuery, state: FSMContext) -> None:
         await message_of(callback).answer(f"⚠️ Код не отправлен: {esc(e) or 'Telegram не ответил'}.")
         return
     login.phone_code_hash = sent.phone_code_hash
+    await message_of(callback).edit_reply_markup(reply_markup=None)  # the old prompt's button is spent
     await ask(message_of(callback), state, Login.code, f"📲 Новый код отправлен.\n{CODE_ASK}", resend_kb())
 
 
@@ -329,15 +334,16 @@ async def on_code(message: Message, state: FSMContext, deps: dict) -> None:
         await _timed(login.client.sign_in(f"+{login.phone}", code, phone_code_hash=login.phone_code_hash))
     except errors.SessionPasswordNeededError:
         await ask(message, state, Login.password,
-                  "🔐 У аккаунта включён пароль 2FA. Пришлите его (сообщение удалю, пароль не сохраняется):")
+                  "🔐 У аккаунта включён облачный пароль (двухэтапная проверка). Пришлите его.\n\n"
+                  "<i>Сообщение бот удалит, пароль нигде не сохраняется.</i>")
         return
     except errors.PhoneCodeInvalidError:
         await message.answer(f"Неверный код. {CODE_ASK}")
         return
     except errors.PhoneCodeExpiredError:
         await ask(message, state, Login.code,
-                  "⌛ Код истёк (или Telegram аннулировал его, увидев целиком). Запросите новый и "
-                  "пришлите его через пробелы.", resend_kb())
+                  "⌛ Код больше не действует: истёк или Telegram аннулировал его, увидев слитно.\n\n"
+                  f"Нажмите {head(TITLES['resend'])} и пришлите новый код через пробелы.", resend_kb())
         return
     except errors.FloodWaitError as e:
         await message.answer(f"{too_many(e.seconds)} Затем пришлите код снова.")
@@ -397,6 +403,7 @@ async def on_pick(callback: CallbackQuery, callback_data: ChoiceCB, state: FSMCo
     if callback_data.value in ("login", "upload"):
         await callback.answer()
         step, prompt = (Login.phone, PHONE_ASK) if callback_data.value == "login" else (UploadSession.file, UPLOAD_ASK)
+        await message_of(callback).edit_reply_markup(reply_markup=None)
         await ask(message_of(callback), state, step, prompt)
         return
     paths = data["accounts"]

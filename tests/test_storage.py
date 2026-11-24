@@ -1,8 +1,11 @@
 """Sign-off coverage for telemirror/storage.py InMemoryDatabase (the DB used in
-every test and in dev). PostgresDatabase needs a live server and is reviewed by
-inspection only (see REVIEW.md)."""
+every test and in dev). PostgresDatabase against a live server:
+tests/test_storage_postgres.py."""
 
-from telemirror.storage import InMemoryDatabase, MirrorMessage
+import pytest
+
+from telemirror import storage
+from telemirror.storage import InMemoryDatabase, MirrorMessage, PostgresDatabase
 from tests.conftest import run
 
 SRC = -1001000000000
@@ -107,6 +110,103 @@ def test_channel_pair_filter():
     assert [m.mirror_id for m in got] == [12]
 
 
+def test_count_mirrored_counts_each_source_message_once():
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([
+        _mm(1, 101), MirrorMessage(1, SRC, 102, DST_A, mirror_topic_id=7),  # one post, two topics
+        _mm(2, 103), _mm(3, 104, mchan=DST_B),
+    ]))
+    assert run(db.count_mirrored(SRC, DST_A, 99)) == 2
+    assert run(db.count_mirrored(SRC, DST_A, 1)) == 1  # ids up to 1 only
+    assert run(db.count_mirrored(SRC, DST_B, 99)) == 1
+    assert run(db.count_mirrored(DST_A, SRC, 99)) == 0
+
+
+def test_a_failed_start_closes_the_pool(monkeypatch):
+    """Regression: the tables failing to be created (the server not ready, no
+    rights) left the pool just opened open — the caller got no DB to close."""
+    events = []
+
+    class Pool:
+        check_connection = None
+
+        def __init__(self, **kw):
+            pass
+
+        async def open(self):
+            events.append("open")
+
+        async def close(self):
+            events.append("close")
+
+    async def no_tables(self):
+        raise RuntimeError("permission denied")
+
+    monkeypatch.setattr(storage, "AsyncConnectionPool", Pool)
+    monkeypatch.setattr(PostgresDatabase, "_PostgresDatabase__create_tables_if_not_exists", no_tables)
+    with pytest.raises(RuntimeError, match="permission denied"):
+        run(PostgresDatabase(connection_string="postgresql://x"))
+    assert events == ["open", "close"]
+
+
+class _SchemaCursor:
+    """Records the migration's statements; `columns`/`indexes`: what the
+    database already has."""
+
+    def __init__(self, columns, indexes):
+        self.columns, self.indexes, self.sql = columns, indexes, []
+        self._rows = []
+
+    async def execute(self, query, params=None):
+        self.sql.append(" ".join(query.split()))
+        if "information_schema.columns" in query:
+            self._rows = [(c,) for c in self.columns]
+        elif "to_regclass" in query:
+            self._rows = [(params[0] if params[0] in self.indexes else None,)]
+
+    async def fetchall(self):
+        return self._rows
+
+    async def fetchone(self):
+        return self._rows[0]
+
+
+def _migrate(monkeypatch, columns, indexes):
+    from contextlib import asynccontextmanager
+
+    cursor = _SchemaCursor(columns, indexes)
+
+    @asynccontextmanager
+    async def pg_cursor(self):
+        yield cursor
+
+    monkeypatch.setattr(PostgresDatabase, "_PostgresDatabase__pg_cursor", pg_cursor)
+    run(PostgresDatabase("postgresql://x")._PostgresDatabase__create_tables_if_not_exists())
+    return cursor.sql
+
+
+_COLUMNS = ("mirror_topic_id", "source_topic_id", "source_media_id")
+_INDEXES = ("binding_id_original_idx", "binding_id_channel_pair_idx",
+            "post_fingerprint_lookup_idx", "post_fingerprint_created_idx")
+
+
+def test_migration_on_an_up_to_date_schema_alters_nothing(monkeypatch):
+    """ALTER TABLE / CREATE INDEX lock the table even with IF NOT EXISTS: a
+    start against an up-to-date schema runs neither."""
+    sql = _migrate(monkeypatch, _COLUMNS, _INDEXES)
+    assert sql[0].startswith("SELECT pg_advisory_xact_lock(")
+    assert not [s for s in sql if s.startswith(("ALTER", "CREATE INDEX"))]
+
+
+def test_migration_adds_only_what_is_missing(monkeypatch):
+    sql = _migrate(monkeypatch, ("source_topic_id",), ("post_fingerprint_created_idx",))
+    assert [s for s in sql if s.startswith("ALTER")] == [
+        "ALTER TABLE binding_id ADD COLUMN mirror_topic_id bigint",
+        "ALTER TABLE binding_id ADD COLUMN source_media_id bigint",
+    ]
+    assert [s.split()[5] for s in sql if s.startswith("CREATE INDEX")] == list(_INDEXES[:3])
+
+
 def test_checkpoint_get_set():
     db = run(InMemoryDatabase())
     assert run(db.get_past_mode_checkpoint(SRC, DST_A)) is None
@@ -123,6 +223,19 @@ def test_delete_past_mode_checkpoint():
     assert run(db.get_past_mode_checkpoint(SRC, DST_A)) is None
     assert run(db.get_past_mode_checkpoint(SRC, DST_B)) == 7
     run(db.delete_past_mode_checkpoint(SRC, DST_A))  # absent → no error
+
+
+def test_drip_state_and_its_reset_with_the_checkpoint():
+    db = run(InMemoryDatabase())
+    assert run(db.get_drip_state(SRC, DST_A)) == (None, None)
+    run(db.set_drip_sent(SRC, DST_A, 100.5))
+    run(db.set_drip_done(SRC, DST_A, "last_n=5"))
+    run(db.set_drip_sent(SRC, DST_A, 200.0))  # each kept apart from the other
+    assert run(db.get_drip_state(SRC, DST_A)) == (200.0, "last_n=5")
+    assert run(db.get_drip_state(SRC, DST_B)) == (None, None)
+    run(db.set_past_mode_checkpoint(SRC, DST_A, 42))
+    run(db.delete_past_mode_checkpoint(SRC, DST_A))  # a cleared target: copied again
+    assert run(db.get_drip_state(SRC, DST_A)) == (None, None)
 
 
 def test_delete_bindings_for_mirror_only_named_channel():

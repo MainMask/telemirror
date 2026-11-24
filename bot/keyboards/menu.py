@@ -65,8 +65,8 @@ def screen_kb(
     """A screen's buttons (``titles``: labels showing a value, ``hidden``: ones
     that don't apply now — by action, or by screen id for the screens opened
     from it —, ``primary``: the one to tap now, in blue), a group's on rows of
-    their own, its view's ``own`` rows, the screens opened from it (two per
-    row), then 🔄 Обновить and ⬅️ Назад (to its parent, or ``back``)."""
+    their own, its view's ``own`` rows, the screens opened from it (two short
+    ones per row, as its buttons), then 🔄 Обновить and ⬅️ Назад (to its parent, or ``back``)."""
     screen = SCREENS[screen_id]
     titles = titles or {}
     rows: list = []
@@ -81,7 +81,7 @@ def screen_kb(
     # a child without a list of its own keeps the page, for its ⬅️ Назад
     opened = [button(f"{titles.get(c.id, c.title)} ›", NavCB(s=c.id, p=project, i=i, pg=0 if c.paged else pg))
               for c in children(screen_id) if c.id not in hidden]
-    rows += [opened[n:n + 2] for n in range(0, len(opened), 2)]
+    rows += _pairs(opened)
     last = []
     if screen.refresh:
         last.append(button(REFRESH, NavCB(s=screen_id, p=project, i=i, pg=pg)))

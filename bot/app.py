@@ -11,7 +11,14 @@ from aiogram.types import BotCommand, ErrorEvent
 
 from bot import pending, registry, texts
 from bot.configstore import ConfigStore
-from bot.middlewares import AdminOnly, AlbumMiddleware, ChatPicked, LeaveFormOnNavigation, Services
+from bot.middlewares import (
+    AdminOnly,
+    AlbumMiddleware,
+    ChatPicked,
+    DropStalePrompt,
+    LeaveFormOnNavigation,
+    Services,
+)
 from bot.routers import (
     accounts,
     config_file,
@@ -44,7 +51,7 @@ ROUTERS = (menu, projects, directions, filters, params, replay, maintenance, fai
 
 COMMANDS = {
     "start": "Главный экран",
-    "status": "Что сейчас выполняется",
+    "status": "Что сейчас работает",
     "cancel": "Выйти из ввода",
 }
 
@@ -62,7 +69,10 @@ def build_dispatcher(
     dp = Dispatcher(storage=PanelStorage())
     dp.update.outer_middleware(AdminOnly(admin_ids))
     dp.update.outer_middleware(Services())
+    # before LeaveFormOnNavigation: it must see the prompt of the form a tap leaves
+    dp.callback_query.outer_middleware(DropStalePrompt())
     dp.callback_query.outer_middleware(LeaveFormOnNavigation())
+    dp.message.outer_middleware(DropStalePrompt())
     dp.message.outer_middleware(ChatPicked())  # a chat picked at the bottom: the main menu back
     dp.message.middleware(AlbumMiddleware())  # a .session with its .json, sent together
     dp.errors.register(_on_error)

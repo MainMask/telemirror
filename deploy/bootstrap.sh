@@ -79,7 +79,7 @@ Done. Units are installed but NOT started. Next, by hand:
   systemctl enable --now telemirror@<key>.service
   journalctl -u telemirror@<key>.service -f
 
-  # then check the whole installation (or ⚙️ Настройки → 🧾 Проверка установки):
+  # then check the whole installation (or ⚙️ Настройки → 🧾 Диагностика сервера):
   .venv/bin/python -m telemirror.selfcheck
 
 Details — deploy/README.md

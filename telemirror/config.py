@@ -4,9 +4,11 @@ set by ``telemirror@<key>.service``), else ``./.configs/mirror.config.yml``.
 Everything is read at import time; a bad value fails the import.
 """
 
+import inspect
 import math
 import os
-from typing import Dict, List, Literal, Optional, cast
+from types import UnionType
+from typing import Any, Dict, List, Literal, Optional, Union, cast, get_args, get_origin
 
 import yaml
 from decouple import AutoConfig
@@ -47,10 +49,10 @@ def _channel_id(value, name: str) -> Optional[int]:
 _VALID_MODES = {"copy", "forward"}
 
 
-def _validate_mode(value: str, context: str) -> Literal["copy", "forward"]:
+def _validate_mode(value: object, context: str) -> Literal["copy", "forward"]:
     """Fail fast on a bad `mode` instead of letting it silently mix the
     `== "forward"`/`== "copy"` branches downstream in mirroring.py."""
-    if value not in _VALID_MODES:
+    if not isinstance(value, str) or value not in _VALID_MODES:  # a list: unhashable
         raise ValueError(
             f"{context}: mode must be 'copy' or 'forward', got {value!r}"
         )
@@ -70,6 +72,23 @@ def _validate_dedup_hours(value, context: str) -> float:
     if not math.isfinite(hours) or hours < 0:
         raise ValueError(f"{context}: dedup_hours must be 0 or more, got {value!r}")
     return hours
+
+
+def _validate_bool(value, key: str, context: str) -> bool:
+    """A quoted ``"false"`` is a non-empty string — truthy, the opposite of
+    what was written."""
+    if not isinstance(value, bool):
+        raise ValueError(f"{context}: {key} must be true or false, got {value!r}")
+    return value
+
+
+def _validate_number(value, key: str, context: str, minimum: float = 0, whole: bool = False):
+    """A quoted ``"1"`` passed and failed only later, when the mirror used it."""
+    kinds = int if whole else (int, float)
+    if isinstance(value, bool) or not isinstance(value, kinds) or not math.isfinite(value) or value < minimum:
+        kind = "a whole number" if whole else "a number"
+        raise ValueError(f"{context}: {key} must be {kind} ≥ {minimum}, got {value!r}")
+    return value
 
 
 _CONTENT_MUTATING_FILTERS = (
@@ -250,6 +269,27 @@ BROADCAST_TARGETS: Optional[List[str]] = (
 _LIVE_SEND_DELAY: float = config("SEND_DELAY", default=0.5, cast=float)
 
 
+# Every key the mirror reads. Anything else — a typo, or a key the mirror was
+# never taught — is refused instead of silently ignored.
+_TOP_KEYS = {
+    "directions", "filters", "mode", "disable_delete", "disable_edit",
+    "fallback_link_url", "dedup_hours", "broadcast_channel", "broadcast_targets",
+}
+_DIRECTION_KEYS = {
+    "from", "to", "filters", "mode", "disable_delete", "disable_edit",
+    "past_mode", "send_delay", "fallback_link_url", "dedup_hours",
+}
+_PAST_MODE_KEYS = {"send_delay", "since_date", "last_n", "full_history", "drip"}
+
+
+def _check_keys(section: dict, known: set, context: str) -> None:
+    unknown = sorted(map(str, set(section) - known))
+    if unknown:
+        raise ValueError(
+            f"{context}: unknown key(s) {', '.join(unknown)} — known: {', '.join(sorted(known))}"
+        )
+
+
 with open(YAML_CONFIG_FILE, encoding="utf8") as _file:
     yaml_config = yaml.safe_load(_file) or {}
 if not isinstance(yaml_config, dict) or not isinstance(yaml_config.get("directions"), list):
@@ -257,6 +297,7 @@ if not isinstance(yaml_config, dict) or not isinstance(yaml_config.get("directio
         f"{YAML_CONFIG_FILE}: expected a mapping with a 'directions:' list "
         "(`directions: []` when there are none yet)"
     )
+_check_keys(yaml_config, _TOP_KEYS, str(YAML_CONFIG_FILE))
 
 if "broadcast_channel" in yaml_config:
     BROADCAST_CHANNEL = _channel_id(
@@ -289,20 +330,90 @@ def build_filters(
             list(entry.items())[0] if isinstance(entry, dict) else (entry, {})
         )
         filter_class = getattr(messagefilters, filter_name)
+        _check_filter_args(filter_name, filter_class, filter_args or {})
         filters.append(filter_class(**filter_args))
 
     return CompositeMessageFilter(filters) if (len(filters) > 1) else filters[0]
 
 
-def build_past_mode(pm: Optional[dict]) -> Optional[PastModeConfig]:
+def _fits(annotation, value) -> bool:
+    """Whether a YAML value fits a filter arg's declared type: any list for a
+    set/list, an int for a float. ``Any``, no type or a type of its own: not checked."""
+    if annotation in (inspect.Parameter.empty, Any):
+        return True
+    origin = get_origin(annotation)
+    if origin in (Union, UnionType):  # Optional[...], bool | set
+        return any(_fits(a, value) for a in get_args(annotation))
+    base = origin or annotation
+    if base is type(None):
+        return value is None
+    if base in (set, list, tuple, frozenset):
+        return isinstance(value, (list, set, tuple))
+    if base is dict:
+        return isinstance(value, dict)
+    if base is bool:
+        return isinstance(value, bool)
+    if base in (int, float):
+        return not isinstance(value, bool) and isinstance(value, int if base is int else (int, float))
+    if base is str:
+        return isinstance(value, str)
+    return True
+
+
+def _check_filter_args(name: str, filter_class: type, args: dict) -> None:
+    """A string where a list is expected became a set of its letters, a quoted
+    «"false"» a truthy switch, a number where text is expected failed only on
+    the first post."""
+    params = inspect.signature(filter_class).parameters
+    for arg, value in args.items():
+        if arg in params and not _fits(params[arg].annotation, value):
+            hint = params[arg].annotation
+            hint = hint.__name__ if isinstance(hint, type) else str(hint).replace("typing.", "")
+            raise ValueError(f"filters: {name}.{arg} must be {hint}, got {value!r}")
+
+
+def _validate_link(value, context: str) -> Optional[str]:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{context}: fallback_link_url must be a link, got {value!r}")
+    return value
+
+
+def build_past_mode(pm: Optional[dict], context: str = "") -> Optional[PastModeConfig]:
     if not pm:
         return None
+    context = f"{context}: past_mode" if context else "past_mode"
+    if not isinstance(pm, dict):
+        raise ValueError(f"{context}: expected a mapping (full_history / last_n / since_date …), got {pm!r}")
+    _check_keys(pm, _PAST_MODE_KEYS, context)
+    last_n = pm.get("last_n")
     return PastModeConfig(
-        send_delay=pm.get("send_delay", 0.5),
+        send_delay=_validate_number(pm.get("send_delay", 0.5), "send_delay", context),
         since_date=pm.get("since_date"),
-        last_n=pm.get("last_n"),
-        full_history=pm.get("full_history", False),
+        last_n=None if last_n is None else _validate_number(last_n, "last_n", context, 1, whole=True),
+        full_history=_validate_bool(pm.get("full_history", False), "full_history", context),
+        drip_interval=_drip_interval(pm.get("drip"), context),
     )
+
+
+def _drip_interval(drip, context: str = "past_mode") -> Optional[float]:
+    """``past_mode.drip: {posts: N, minutes: M}`` or ``{seconds: S}`` → seconds between posts."""
+    if drip is None:
+        return None
+    if isinstance(drip, dict) and set(drip) == {"seconds"}:
+        seconds = drip["seconds"]
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) \
+                or seconds <= 0:
+            raise ValueError(f"{context}.drip.seconds: expected a number > 0, got {seconds!r}")
+        return seconds
+    if not isinstance(drip, dict) or set(drip) != {"posts", "minutes"}:
+        raise ValueError(f"{context}.drip: expected {{posts: N, minutes: M}} or {{seconds: S}}, got {drip!r}")
+    posts, minutes = drip["posts"], drip["minutes"]
+    if isinstance(posts, bool) or not isinstance(posts, int) or posts < 1:
+        raise ValueError(f"{context}.drip.posts: expected a whole number ≥ 1, got {posts!r}")
+    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)) or not math.isfinite(minutes) \
+            or minutes <= 0:
+        raise ValueError(f"{context}.drip.minutes: expected a number > 0, got {minutes!r}")
+    return minutes * 60 / posts
 
 
 default_filters = build_filters(
@@ -310,6 +421,9 @@ default_filters = build_filters(
 )
 
 for direction in yaml_config["directions"]:
+    if not isinstance(direction, dict):
+        raise ValueError(f"{YAML_CONFIG_FILE}: a direction is a mapping with from: and to:, got {direction!r}")
+    _check_keys(direction, _DIRECTION_KEYS, f"direction from {direction.get('from')}")
     sources: list = direction["from"]
     targets: list = direction["to"]
     # Built once per direction (not per source/target pair), so every pair
@@ -338,20 +452,25 @@ for direction in yaml_config["directions"]:
 
             CHAT_MAPPING.setdefault(source, {}).setdefault(target, []).append(
                 DirectionConfig(
-                    disable_delete=direction.get(
-                        "disable_delete", yaml_config.get("disable_delete", False)
+                    disable_delete=_validate_bool(
+                        direction.get("disable_delete", yaml_config.get("disable_delete", False)),
+                        "disable_delete", f"{source}->{target}",
                     ),
-                    disable_edit=direction.get(
-                        "disable_edit", yaml_config.get("disable_edit", False)
+                    disable_edit=_validate_bool(
+                        direction.get("disable_edit", yaml_config.get("disable_edit", False)),
+                        "disable_edit", f"{source}->{target}",
                     ),
                     filters=_direction_filters,
                     from_topic_id=source_topic_id,
                     to_topic_id=target_topic_id,
                     mode=_direction_mode,
-                    past_mode=build_past_mode(direction.get("past_mode")),
-                    send_delay=direction.get("send_delay", _LIVE_SEND_DELAY),
-                    fallback_link_url=direction.get(
-                        "fallback_link_url", yaml_config.get("fallback_link_url")
+                    past_mode=build_past_mode(direction.get("past_mode"), f"{source}->{target}"),
+                    send_delay=_validate_number(
+                        direction.get("send_delay", _LIVE_SEND_DELAY), "send_delay", f"{source}->{target}"
+                    ),
+                    fallback_link_url=_validate_link(
+                        direction.get("fallback_link_url", yaml_config.get("fallback_link_url")),
+                        f"{source}->{target}",
                     ),
                     dedup_hours=_validate_dedup_hours(
                         direction.get("dedup_hours", yaml_config.get("dedup_hours", 0)),

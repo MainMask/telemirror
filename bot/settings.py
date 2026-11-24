@@ -7,6 +7,7 @@ while the panel must stay up exactly when the mirror's config is broken.
 """
 
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from decouple import config as _env
 
@@ -26,6 +27,9 @@ def parse_admin_ids(raw: str) -> frozenset[int]:
             ) from None
     return frozenset(ids)
 
+
+# The admins' clock: dates they type (⏪ 📅 С даты…) and every time the panel shows.
+TIMEZONE = ZoneInfo("Europe/Moscow")
 
 BOT_TOKEN: str = _env("PANEL_BOT_TOKEN", default="")
 ADMIN_IDS: frozenset[int] = parse_admin_ids(_env("PANEL_ADMIN_IDS", default=""))

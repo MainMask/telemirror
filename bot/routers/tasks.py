@@ -1,4 +1,4 @@
-"""📊 Задачи: every project's units (mirror, history replay, maintenance) and a
+"""📊 Статус: every project's units (mirror, history replay, maintenance) and a
 unit's card with its journal — only shown here: a button opens the screen
 that runs it (the project's card, ⏪, the tool), its title on it."""
 
@@ -36,7 +36,7 @@ async def tasks_view(message: Message, edit: bool, nav: NavCB, *, sysd: Systemd,
     lines, items = [], []
     for n, (p, kind, unit, st) in enumerate(shown):
         label = f"{unit_label(p, unit)} · {_units.state_text(p, unit, st)}"
-        items.append(button(label[:60], NavCB(s="unit", p=p.key, i=kind, pg=page)))
+        items.append(button(texts.cut(label, 60), NavCB(s="unit", p=p.key, i=kind, pg=page)))
         # the rows are on the buttons; the text adds only a running replay's progress
         if unit == p.past_unit and page * settings.PAGE_SIZE <= n < (page + 1) * settings.PAGE_SIZE \
                 and (line := await _units.progress(sysd, unit, st)):

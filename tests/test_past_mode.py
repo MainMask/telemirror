@@ -48,7 +48,8 @@ def test_integrity_keeps_checkpoint_below_max_mirrored():
     # checkpoint 10 < max mirrored 42: NOT rolled forward — already-mirrored
     # messages past the checkpoint are skipped per target by new_message's
     # own dedup, while anything unmirrored in between still gets replayed.
-    assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (10, 2)
+    # Counted up to the checkpoint only: 42 is past it.
+    assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (10, 1)
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 10
 
 
@@ -60,7 +61,7 @@ def test_integrity_does_not_skip_history_after_live_mirror_ran():
     run(db.insert_batch([MirrorMessage(oid, SRC, oid + 1000, TGT) for oid in range(1, 51)]))
     run(db.set_past_mode_checkpoint(SRC, TGT, 50))
     run(db.insert_batch([MirrorMessage(9000, SRC, 5000, TGT)]))  # live mirror's row
-    assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (50, 51)
+    assert run(past_mode._integrity_check(db, SRC, TGT, _LOG)) == (50, 50)  # the live row not counted
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 50
 
 
@@ -262,7 +263,7 @@ def test_replay_with_retry_waits_out_flood(monkeypatch, exc):
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
 
-    async def fake_replay(client, database, source_id, target_id, cfgs, logger, total=None):
+    async def fake_replay(client, database, source_id, target_id, cfgs, logger, total=None, **kw):
         attempts.append(1)
         if len(attempts) == 1:
             raise exc(request=None)
@@ -297,7 +298,7 @@ def test_replay_with_retry_gives_up_after_flood_retry_limit_at_same_checkpoint(
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
 
-    async def always_flooding(client, database, source_id, target_id, cfgs, logger, total=None):
+    async def always_flooding(client, database, source_id, target_id, cfgs, logger, total=None, **kw):
         attempts.append(1)
         raise exc(request=None)
 
@@ -325,7 +326,7 @@ def test_replay_with_retry_flood_retry_counter_resets_on_checkpoint_progress(mon
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
 
-    async def flooding_with_progress(client, database, source_id, target_id, cfgs, logger, total=None):
+    async def flooding_with_progress(client, database, source_id, target_id, cfgs, logger, total=None, **kw):
         attempts.append(1)
         if len(attempts) > past_mode._FLOOD_RETRY_LIMIT + 5:
             return 0  # eventually succeeds
@@ -356,7 +357,7 @@ def test_replay_with_retry_waits_out_media_download_error(monkeypatch):
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
 
-    async def fake_replay(client, database, source_id, target_id, cfgs, logger, total=None):
+    async def fake_replay(client, database, source_id, target_id, cfgs, logger, total=None, **kw):
         attempts.append(1)
         if len(attempts) == 1:
             raise MediaDownloadError("t.me/c/1/2: exhausted")
@@ -374,25 +375,27 @@ def test_replay_with_retry_waits_out_media_download_error(monkeypatch):
     assert slept == [past_mode._MEDIA_RETRY_WAIT]
 
 
-def test_replay_with_retry_skips_stuck_message_after_limit(monkeypatch):
+@pytest.mark.parametrize("drip, unit", [(None, "past"), (540, "live")])
+def test_replay_with_retry_skips_stuck_message_after_limit(monkeypatch, drip, unit):
     """A message that keeps failing to download past the limit is skipped:
     checkpoint jumps past it, an alert is sent, the replay continues (no crash
-    loop, live mirror not held down for hours)."""
+    loop, live mirror not held down for hours). The alert's button opens the
+    journal of the unit that skipped it: a drip's is the live mirror's."""
     attempts = []
     notified = []
 
     async def fake_sleep(seconds):
         pass
 
-    async def fake_notify(src, mid, log):
-        notified.append(mid)
+    async def fake_notify(src, mid, unit, log):
+        notified.append((mid, unit))
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(past_mode, "_notify_skipped", fake_notify)
 
     db = run(InMemoryDatabase())
 
-    async def stuck_then_done(client, database, source_id, target_id, cfgs, logger, total=None):
+    async def stuck_then_done(client, database, source_id, target_id, cfgs, logger, total=None, **kw):
         attempts.append(1)
         if len(attempts) <= past_mode._MEDIA_RETRY_LIMIT + 1:
             raise MediaDownloadError("t.me/c/1/77: exhausted", message_id=77)
@@ -403,10 +406,10 @@ def test_replay_with_retry_skips_stuck_message_after_limit(monkeypatch):
     run(
         past_mode._replay_with_retry(
             object(), db, SRC, TGT,
-            [_cfg(PastModeConfig(full_history=True, send_delay=0))], _LOG,
+            [_cfg(PastModeConfig(full_history=True, send_delay=0, drip_interval=drip))], _LOG,
         )
     )
-    assert notified == [77]
+    assert notified == [(77, unit)]
     assert run(db.get_past_mode_checkpoint(SRC, TGT)) == 77
 
 
@@ -417,7 +420,7 @@ def test_replay_with_retry_reraises_when_stuck_message_unknown(monkeypatch):
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)
 
-    async def always_failing(client, database, source_id, target_id, cfgs, logger, total=None):
+    async def always_failing(client, database, source_id, target_id, cfgs, logger, total=None, **kw):
         raise MediaDownloadError("t.me/c/1/2: exhausted")  # no message_id
 
     monkeypatch.setattr(past_mode, "_replay_direction", always_failing)
@@ -603,15 +606,29 @@ def test_edit_links_pass_rewrites_cross_message_link(monkeypatch):
     )
     client = _EditFakeClient([linked])
 
-    run(past_mode._edit_links_pass(
+    assert run(past_mode._edit_links_pass(
         client, db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]},
         _LOG,
-    ))
+    )) is True
 
     assert len(client.edits) == 1
     entity, message_id, _text, ents = client.edits[0]
     assert (entity, message_id) == (TGT, 910)
     assert ents[0].url == private_message_link(TGT, 907)
+
+
+def test_edit_links_pass_says_when_telegram_didnt_give_the_posts():
+    """A drip runs it again next start then (its links aren't left for good)."""
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([MirrorMessage(10, SRC, 910, TGT)]))
+
+    class Down(_EditFakeClient):
+        async def get_messages(self, entity, ids=None, limit=None, **kw):
+            raise ConnectionError("no network")
+
+    assert run(past_mode._edit_links_pass(
+        Down([]), db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]}, _LOG,
+    )) is False
 
 
 def test_edit_links_pass_waits_out_a_long_flood_once(monkeypatch):
@@ -655,7 +672,8 @@ class _BatchRecordingClient(_EditFakeClient):
         return await super().get_messages(entity, ids=ids, limit=limit, **kw)
 
 
-def test_edit_links_pass_streams_source_messages_in_batches(monkeypatch):
+@pytest.mark.parametrize("beside_live, sizes", [(False, [100, 50]), (True, [100, 1, 50, 1])])
+def test_edit_links_pass_streams_source_messages_in_batches(monkeypatch, beside_live, sizes):
     # 150 mirrors -> the source fetch must be split into 100 + 50, and a
     # rewritable link in either half is still repointed (no master list).
     db = run(InMemoryDatabase(max_capacity=1000))  # avoid LRU eviction mid-test
@@ -683,11 +701,64 @@ def test_edit_links_pass_streams_source_messages_in_batches(monkeypatch):
 
     run(past_mode._edit_links_pass(
         client, db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]},
-        _LOG,
+        _LOG, beside_live=beside_live,
     ))
 
-    assert client.batch_sizes == [100, 50]
+    # beside the live mirror each edit's own post is read again just before it
+    # (1): edited meanwhile, it's left be; without it no request for that
+    assert client.batch_sizes == sizes
     assert sorted(m for _e, m, _t, _ents in client.edits) == [910, 1040]
+
+
+@pytest.mark.parametrize("error, again", [
+    (ConnectionError("Cannot send requests while disconnected"), True),
+    (errors.MessageIdInvalidError(request=None), False),  # a refusal: it wouldn't change
+])
+def test_edit_links_pass_says_when_the_network_failed_an_edit(error, again):
+    """Regression: a network error re-reading or editing a post was taken for
+    a refusal — the drip pair marked done, that link left unfixed for good."""
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([MirrorMessage(10, SRC, 910, TGT), MirrorMessage(7, SRC, 907, TGT)]))
+    src_peer = -SRC - 1000000000000
+    linked = types.Message(id=10, peer_id=types.PeerChannel(1), message="link", entities=[
+        types.MessageEntityTextUrl(offset=0, length=4, url=f"https://t.me/c/{src_peer}/7")])
+
+    class Client(_EditFakeClient):
+        async def edit_message(self, *a, **kw):
+            raise error
+
+    assert run(past_mode._edit_links_pass(
+        Client([linked]), db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]}, _LOG,
+    )) is not again
+
+
+def test_edit_links_pass_doesnt_undo_an_edit_made_meanwhile():
+    """Beside a drip the live mirror runs: a post edited after its batch was
+    read got that edit (links fixed) — the pass's old text mustn't undo it."""
+    from datetime import datetime, timezone
+
+    db = run(InMemoryDatabase())
+    run(db.insert_batch([MirrorMessage(10, SRC, 910, TGT), MirrorMessage(7, SRC, 907, TGT)]))
+    src_peer = -SRC - 1000000000000
+
+    def linked(edit_date=None):
+        return types.Message(id=10, peer_id=types.PeerChannel(1), message="link", edit_date=edit_date,
+                             entities=[types.MessageEntityTextUrl(offset=0, length=4,
+                                                                  url=f"https://t.me/c/{src_peer}/7")])
+
+    class Client(_EditFakeClient):
+        async def get_messages(self, entity, ids=None, **kw):
+            got = await super().get_messages(entity, ids=ids, **kw)
+            if entity == TGT:  # the batch is read: the admin edits the post now
+                self._src[10] = linked(datetime(2026, 1, 1, tzinfo=timezone.utc))
+            return got
+
+    client = Client([linked()])
+    assert run(past_mode._edit_links_pass(
+        client, db, {(SRC, TGT): [_cfg(PastModeConfig(full_history=True, send_delay=0))]}, _LOG,
+        beside_live=True,
+    )) is True
+    assert client.edits == []
 
 
 def test_edit_links_pass_fixes_every_mirror_of_a_multi_topic_source_message():
@@ -935,6 +1006,13 @@ def test_a_skipped_post_is_reported_through_the_bot(monkeypatch):
             sent.append(body)
             return True
 
-    monkeypatch.setattr(past_mode.BotNotifier, "from_env", classmethod(lambda cls, key=None, kind="live": Notifier()))
-    run(past_mode._notify_skipped(-1001111111111, 77, logging.getLogger("test")))
+    kinds = []
+
+    def from_env(cls, key=None, kind="live"):
+        kinds.append(kind)
+        return Notifier()
+
+    monkeypatch.setattr(past_mode.BotNotifier, "from_env", classmethod(from_env))
+    run(past_mode._notify_skipped(-1001111111111, 77, "past", logging.getLogger("test")))
     assert len(sent) == 1 and "пропустило пост" in sent[0] and "t.me/c/1111111111/77" in sent[0]
+    assert kinds == ["past"]  # its button: the journal of the unit that skipped it

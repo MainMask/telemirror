@@ -61,7 +61,7 @@ async def failed_view(message: Message, edit: bool, nav: NavCB, *, project: Proj
     for n, e in enumerate(entries):
         first = e["targets"][0] if e["targets"] else {"chat": ALL_CHATS}
         label = f"{ROW} {texts.fmt_ts(e['at'])} · {texts.chat_plain(e['chat'], names)} → {_target_plain(first, names)}"
-        items.append(button(label[:60], ActCB(a="fail_one", p=project.key, i=n, pg=page, h=e["id"])))
+        items.append(button(texts.cut(label, 60), ActCB(a="fail_one", p=project.key, i=n, pg=page, h=e["id"])))
     for e in shown:
         where = "; ".join(f"{_target_text(t, names)}: {esc(t['reason'])}" for t in e["targets"][:5])
         more_targets = f" и ещё {len(e['targets']) - 5}" if len(e["targets"]) > 5 else ""

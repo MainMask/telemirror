@@ -1,6 +1,6 @@
 """Send a one-off notice through the control panel bot to its admins
 (``PANEL_BOT_TOKEN`` → ``PANEL_ADMIN_IDS``, ``telemirror.notify``) — signed
-with the failed unit's project and carrying the panel's 📊 Задача button.
+with the failed unit's project and carrying the panel's 📊 Статус и журнал button.
 
 The bot, not an account: with several projects there's no single session to
 send from, and an account that was banned or logged out can't report it
@@ -19,8 +19,9 @@ import re
 import socket
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from decouple import config as _env
 
@@ -64,8 +65,11 @@ def notifier_of(unit: str) -> Optional[BotNotifier]:
     return BotNotifier.from_env(match["key"], kind)
 
 
+MOSCOW = ZoneInfo("Europe/Moscow")  # the admins' clock, as the panel's (bot.settings.TIMEZONE)
+
+
 def _stamp(text: str) -> str:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = datetime.now(MOSCOW).strftime("%d.%m.%Y %H:%M:%S МСК")
     return f"{text}\n\nсервер: {socket.gethostname()}  •  {now}"
 
 

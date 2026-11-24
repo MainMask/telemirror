@@ -14,6 +14,9 @@ class PastModeConfig:
     since_date: Optional[datetime] = None  # accepts datetime/date/ISO-str, see __post_init__
     last_n: Optional[int] = None
     full_history: bool = False
+    # «N posts in M minutes» (past_mode.drip): seconds between sent posts. The
+    # live mirror copies such a history itself, at this pace (telemirror.past.drip_history).
+    drip_interval: Optional[float] = None
 
     def __post_init__(self) -> None:
         # YAML auto-parses an unquoted `since_date` into a `datetime` (or a bare

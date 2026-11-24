@@ -84,6 +84,10 @@ def add_direction(
         d["mode"] = mode
     if full_history:
         d["past_mode"] = CommentedMap(full_history=True)
+        # The project's one pause and pace (🐢 Темп) — else this direction alone
+        # would be copied at once, by the replay that stops the mirror.
+        for k, v in _shared_pace(data).items():
+            d["past_mode"][k] = _copy(v)
     if data.get("directions") is None:
         data["directions"] = CommentedSeq()
     data["directions"].append(d)
@@ -144,14 +148,23 @@ def set_direction_value(data: Any, index: int, fp: str, key: str, value: Any) ->
     if value is None:
         d.pop(key, None)
     elif key == "past_mode":
-        # Keep a hand-set replay send_delay when switching the strategy.
-        old = d.get("past_mode")
-        pm = CommentedMap(value)
-        if isinstance(old, dict) and "send_delay" in old:
-            pm["send_delay"] = old["send_delay"]
-        d[key] = pm
+        # Keep a hand-set replay pause and pace when switching the strategy.
+        d[key] = _with_pace(value, d.get("past_mode"))
     else:
         d[key] = value
+
+
+# past_mode's keys that say how, not what: kept when the strategy changes.
+_PACE_KEYS = ("send_delay", "drip")
+
+
+def _with_pace(value: dict, old: Any) -> CommentedMap:
+    pm = CommentedMap(value)
+    if isinstance(old, dict):
+        for k in _PACE_KEYS:
+            if k in old:
+                pm[k] = old[k]
+    return pm
 
 
 def replay_delays(data: Any) -> list:
@@ -177,28 +190,73 @@ def set_replay_delay(data: Any, value: Optional[float]) -> int:
     return touched
 
 
+def replay_paces(data: Any) -> list:
+    """``past_mode.drip`` of each direction with a history (None = all at once)."""
+    return [d["past_mode"].get("drip") for d in directions(data)
+            if isinstance(d.get("past_mode"), dict) and d["past_mode"]]
+
+
+def pace_key(value: Any) -> str:
+    """A pause or pace to compare: the order of its keys in the file doesn't make it another one."""
+    return str(sorted(value.items())) if isinstance(value, dict) else str(value)
+
+
+def set_replay_pace(data: Any, value: Optional[dict]) -> int:
+    """«N постов за M минут» for every direction with a history; None — all
+    at once again. Returns how many directions it touched."""
+    touched = 0
+    for d in directions(data):
+        pm = d.get("past_mode")
+        if isinstance(pm, dict) and pm:
+            if value is None:
+                pm.pop("drip", None)
+            else:
+                pm["drip"] = CommentedMap(value)
+            touched += 1
+    if not touched:
+        raise ConfigError("no_history")
+    return touched
+
+
+def _shared_pace(data: Any) -> dict:
+    """The project's ⏱ pause and 🐢 Темп (``_PACE_KEYS``) where all its
+    directions with a history share one — for a direction given a history."""
+    out = {}
+    for k, values in (("send_delay", replay_delays(data)), ("drip", replay_paces(data))):
+        distinct = {pace_key(v): v for v in values}
+        if len(distinct) == 1 and (v := next(iter(distinct.values()))) is not None:
+            out[k] = v
+    return out
+
+
+def _copy(value: Any) -> Any:
+    """A direction's own copy: one map shared by two would be written as a YAML alias."""
+    return CommentedMap(value) if isinstance(value, dict) else value
+
+
 def set_history(data: Any, value: Optional[dict]) -> None:
     """What history every direction copies (``past_mode``: full_history /
-    last_n / since_date); None — none. A replay pause already set is kept."""
+    last_n / since_date); None — none. A replay pause and pace already set are
+    kept; the project's one pause and pace go to a direction that had no history too."""
     if not directions(data):
         raise ConfigError("no_directions")
+    shared = _shared_pace(data)
     for d in directions(data):
-        old = d.get("past_mode")
         if value is None:
             d.pop("past_mode", None)
             continue
-        pm = CommentedMap(value)
-        if isinstance(old, dict) and "send_delay" in old:
-            pm["send_delay"] = old["send_delay"]
-        d["past_mode"] = pm
+        d["past_mode"] = _with_pace(value, d.get("past_mode"))
+        for k, v in shared.items():
+            if k not in d["past_mode"]:
+                d["past_mode"][k] = _copy(v)
 
 
 def history_of(d: Any) -> Optional[dict]:
-    """A direction's history choice without its pause — for comparing them."""
+    """A direction's history choice without its pause and pace — for comparing them."""
     pm = d.get("past_mode")
     if not isinstance(pm, dict):
         return None
-    return {k: v for k, v in pm.items() if k != "send_delay"} or None
+    return {k: v for k, v in pm.items() if k not in _PACE_KEYS} or None
 
 
 GLOBAL_VALUE_KEYS = ("broadcast_channel", "broadcast_targets", "fallback_link_url", "dedup_hours")

@@ -1,11 +1,12 @@
 """Starting and stopping a project's units — its mirror, its history replay,
-its maintenance task — the same way from every screen (📁 Проект, 📊 Задача,
-⏪ История, 🛠 Инструменты): systemd and the session checked, the restart
+its maintenance task — the same way from every screen (📁 Проект, 📊 Статус и журнал,
+⏪ Старые посты, 🛠 Инструменты): systemd and the session checked, the restart
 cooldown kept, a question first when the start stops something else on the
 session (``turns``), then the screen it came from reopened with the outcome."""
 
 import logging
-from typing import Optional
+import re
+from typing import Optional, Tuple
 
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
@@ -32,6 +33,11 @@ logger = logging.getLogger(__name__)
 STARTING, STOPPING, RESTARTING = "▶️ Запускается.", "⏹ Останавливается.", "🔁 Перезапускается."
 
 _PROGRESS_GREP = r"\[Progress\]|\[PastMode\]"
+# telemirror.past's DRIP_DONE / DRIP_STOPPED (not imported: it loads the
+# project's config; a test keeps them equal), and its progress line's tail
+DRIP_DONE = "[PastMode] drip: done"
+DRIP_STOPPED = "drip stopped, the live mirror goes on"
+_PAIRS_DONE = re.compile(r"(\d+)/(\d+) pair\(s\) done")
 
 
 def mask(text: str) -> str:
@@ -44,15 +50,41 @@ def state_text(project: Project, unit: str, st: Optional[UnitState]) -> str:
     return f"{texts.state_icon(active)} {state}"
 
 
-async def progress(sysd: Systemd, unit: str, st: Optional[UnitState]) -> str:
-    """The last history-replay progress line of the current run, verbatim."""
+async def _last_progress(sysd: Systemd, unit: str, st: Optional[UnitState]) -> str:
     if st is None or not st.running or not st.invocation:
         return ""
     try:
-        line = await sysd.journal(unit, 1, st.invocation, _PROGRESS_GREP)
+        return await sysd.journal(unit, 1, st.invocation, _PROGRESS_GREP)
     except SystemdError:
         return ""
+
+
+async def progress(sysd: Systemd, unit: str, st: Optional[UnitState]) -> str:
+    """The last history-replay progress line of the current run, verbatim."""
+    line = await _last_progress(sysd, unit, st)
     return f"<b>Сейчас:</b> <code>{esc(mask(line))}</code>" if line else ""
+
+
+async def drip_state(sysd: Systemd, unit: str, st: Optional[UnitState]) -> Tuple[str, str]:
+    """The running mirror's drip by its run's last journal line: "done",
+    "stopped" (gave up — tried again next start), "idle" (no drip line in this
+    run: just started, or a pace set since its start) or "" (under way), and
+    how many of its pairs are done then ("3 из 29"; "" — not said yet)."""
+    line = await _last_progress(sysd, unit, st)
+    if "[PastMode]" not in line:
+        return "idle", ""
+    if line.endswith(DRIP_DONE):
+        return "done", ""
+    if DRIP_STOPPED in line:
+        return "stopped", ""
+    m = _PAIRS_DONE.search(line)
+    return "", f"{m[1]} из {m[2]}" if m else ""
+
+
+async def dripping(sysd: Systemd, unit: str, st: Optional[UnitState]) -> bool:
+    """The mirror's run is copying a history at a pace now (not done, not given up)."""
+    line = await _last_progress(sysd, unit, st)
+    return "[PastMode]" in line and not line.endswith(DRIP_DONE) and DRIP_STOPPED not in line
 
 
 def pause_text(holders: list, mirror: bool = False) -> str:

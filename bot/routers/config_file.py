@@ -91,9 +91,10 @@ async def on_download(callback: CallbackQuery, project: Project, bot: Bot) -> No
 async def on_upload(callback: CallbackQuery, project: Project, state: FSMContext) -> None:
     await start_form(
         callback, state, UploadConfig.file,
-        f"{head(title('cfg_put'))} — пришлите YAML-файл документом (до "
-        f"{settings.CONFIG_MAX_BYTES // 1024} КБ). Перед заменой он будет проверен; текущий файл "
-        "сохранится как прошлая версия.",
+        f"{head(title('cfg_put'))} — пришлите файл настроек (<code>.yml</code>) документом, до "
+        f"{settings.CONFIG_MAX_BYTES // 1024} КБ.\n\n"
+        "Перед заменой бот проверит файл и покажет, что изменится. Текущие настройки сохранятся как прошлая "
+        f"версия — их можно будет вернуть кнопкой {head(title('cfg_undo'))}.",
         _config(project), data={"p": project.key},
     )
 

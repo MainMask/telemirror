@@ -5,7 +5,7 @@ import re
 import time
 from collections import Counter
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Awaitable, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, AsyncIterator, Awaitable, Callable, Coroutine, Dict, List, Optional, Set, Tuple, Union
 
 from telethon import TelegramClient, errors, events, utils
 from telethon.tl import types
@@ -136,6 +136,7 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         logger: logging.Logger,
         strict_media_errors: bool = False,
         sink: Optional[OutcomeSink] = None,
+        live: Optional["EventProcessor"] = None,
     ) -> None:
         """Message event processor
 
@@ -152,6 +153,10 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
                 in each of its channels (the live mirror's counters and posts
                 to copy again). With one, a channel the post didn't reach is
                 its notice, not an error notice of its own.
+            live (`EventProcessor`, optional): the live mirror's, when this one
+                copies a drip's history beside it: their fan-outs in flight and
+                dedup turns are one — an edit/delete of a post this one is
+                sending waits for it, the same post from two sources goes once.
         """
         self._chat_mapping = chat_mapping
         self._sink = sink
@@ -181,6 +186,9 @@ class EventProcessor(CopyEventMessage, UpdateEntitiesParams):
         # deleted/edited right after posting can't race a still-in-progress
         # fan-out into an orphaned/unedited copy.
         self._fanout_inflight: Dict[Tuple[int, int], List[asyncio.Future]] = {}
+        if live is not None:
+            self._fanout_inflight = live._fanout_inflight
+            self._dedup_turns = live._dedup_turns
         # The tasks running those fan-outs: see `cancel_fanouts`.
         self._fanout_tasks: Set[asyncio.Task] = set()
         self._stopping = False  # see `stop`
@@ -2481,6 +2489,7 @@ class Mirroring:
         notifier: Optional[BotNotifier] = None,
         chat_names_key: Optional[str] = None,
         sink: Optional[LiveSink] = None,
+        history: Optional[Callable[[TelegramClient, "EventProcessor"], Coroutine[Any, Any, None]]] = None,
     ) -> None:
         """Configure channels mirroring
 
@@ -2496,6 +2505,9 @@ class Mirroring:
                 gets the chats' titles at start (the panel shows them).
             sink (`LiveSink`, optional): The project's counters and posts to
                 copy again; the panel's requests to copy them are handled here.
+            history (optional): Run in the background once signed in, stopped
+                with the mirror — the history copied at a drip's pace
+                (``telemirror.past.drip_history``).
         """
         logger = _resolve_logger(logger)
 
@@ -2506,6 +2518,7 @@ class Mirroring:
         self._broadcast_channel = broadcast_channel
         self._notifier = notifier
         self._sink = sink
+        self._history = history
 
         self._processor = EventProcessor(
             chat_mapping=chat_mapping,
@@ -2724,6 +2737,7 @@ class Mirroring:
     async def __connect_client(self: "Mirroring", client: TelegramClient) -> None:
         watchdog_task: Optional[asyncio.Task] = None
         sink_task: Optional[asyncio.Task] = None
+        history_task: Optional[asyncio.Task] = None
         log_handler: Optional[NoticeLogHandler] = None
         try:
             # First of all: the notices go through the panel's bot, not the
@@ -2772,6 +2786,8 @@ class Mirroring:
 
             if self._sink is not None:
                 sink_task = asyncio.create_task(self._sink_loop(client))
+            if self._history is not None:
+                history_task = asyncio.create_task(self._history(client, self._processor))
 
             if self._chat_names_key:
                 await self._save_chat_names(client)
@@ -2807,6 +2823,8 @@ class Mirroring:
                 await cancel_and_await(watchdog_task)
             if sink_task is not None:
                 await cancel_and_await(sink_task)
+            if history_task is not None:
+                await cancel_and_await(history_task)
             sdnotify.notify("STOPPING=1")
             self._processor.stop()
             try:
@@ -2895,6 +2913,7 @@ class Telemirror:
         notifier: Optional[BotNotifier] = None,
         chat_names_key: Optional[str] = None,
         sink: Optional[LiveSink] = None,
+        history: Optional[Callable[[TelegramClient, "EventProcessor"], Coroutine[Any, Any, None]]] = None,
     ):
         """Telemirror
 
@@ -2914,6 +2933,7 @@ class Telemirror:
             notifier (`BotNotifier`, optional): The panel's admins, for the mirror's notices. Defaults to None.
             chat_names_key (`str`, optional): The project whose ``chats.json`` gets the chats' titles. Defaults to None.
             sink (`LiveSink`, optional): The project's counters and posts to copy again. Defaults to None.
+            history (optional): The drip's history copy, run beside the mirror. Defaults to None.
         """
         set_album_event_timeout(delay_sec=_ALBUM_EVENT_DELAY_SEC)
 
@@ -2946,6 +2966,7 @@ class Telemirror:
             notifier=notifier,
             chat_names_key=chat_names_key,
             sink=sink,
+            history=history,
         )
 
     async def run(self: "Telemirror") -> None:

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import sys
-from typing import Optional
+from typing import Any, Callable, Coroutine, Optional
 
 from aiohttp import web
 
@@ -47,7 +47,10 @@ async def run_telemirror(
     api_lang_pack: Optional[str] = None,
     api_system_lang_code: Optional[str] = None,
     project_key: Optional[str] = None,
+    history: Optional[Callable[..., Coroutine[Any, Any, None]]] = None,
 ):
+    """``history`` (``telemirror.past.drip_history``, when a direction has a
+    drip): ``(client, database, logger, processor)``, run beside the mirror."""
     # return_exceptions=True: with the default False, gather() propagates the
     # first exception without cancelling the other awaitable, which keeps
     # running in the background — if the DB side succeeds after the health
@@ -88,6 +91,8 @@ async def run_telemirror(
             notifier=notifier,
             chat_names_key=project_key,
             sink=LiveSink(project_key, notifier, chat_mapping) if project_key else None,
+            history=(lambda client, processor: history(client, database, logger, processor))
+            if history else None,
         )
         cancel_on_sigterm()
         await telemirror.run()
@@ -117,6 +122,13 @@ def main():
         SESSION_STRING,
         TELEMIRROR_PROJECT,
     )
+    from telemirror.past import DRIP_LOGGER, drip_history, history_pairs
+
+    drips = bool(history_pairs(CHAT_MAPPING, drip=True))
+    if drips:
+        # INFO at least whatever LOG_LEVEL: the panel reads the drip's state
+        # («done», pairs done) from these lines in the journal.
+        setup_stdout_logger(DRIP_LOGGER, "DEBUG" if LOG_LEVEL == "DEBUG" else "INFO")
 
     if SESSION_FILE:
         try:
@@ -150,6 +162,7 @@ def main():
             port=PORT,
             broadcast_channel=BROADCAST_CHANNEL,
             project_key=TELEMIRROR_PROJECT,
+            history=drip_history if drips else None,
         )
     )
 

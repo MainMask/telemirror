@@ -299,3 +299,131 @@ def test_dedup_hours_must_be_a_number_of_hours(tmp_path, value):
     out = import_config(tmp_path, "import telemirror.config", ONE_DIRECTION + f"dedup_hours: {value}\n")
     assert out.returncode != 0
     assert "->" in out.stderr and "dedup_hours must be 0 or more" in out.stderr
+
+
+@pytest.mark.parametrize("text, where, key", [
+    ("disable_edits: true\n" + ONE_DIRECTION, "mirror.config.yml", "disable_edits"),
+    ("directions:\n  - from: [-1001]\n    to: [-1002]\n    disable_edits: true\n",
+     "direction from [-1001]", "disable_edits"),
+    ("directions:\n  - from: [-1001]\n    to: [-1002]\n    past_mode: {last_n: 5, lastn: 9}\n",
+     "past_mode", "lastn"),
+])
+def test_an_unknown_key_is_refused(tmp_path, text, where, key):
+    """A typo (or a key the mirror was never taught) used to be silently
+    ignored — the mirror then ran with the default instead."""
+    out = import_config(tmp_path, "import telemirror.config", text)
+    assert out.returncode != 0
+    assert f"{where}: unknown key(s) {key}" in out.stderr
+
+
+@pytest.mark.parametrize("text, said", [
+    ("directions:\n  - -1001\n", "a direction is a mapping with from: and to:, got -1001"),
+    ("directions:\n  - from: [-1001]\n    to: [-1002]\n    past_mode: true\n", "past_mode: expected a mapping"),
+    ("directions:\n  - from: [-1001]\n    to: [-1002]\n    mode: [copy]\n", "mode must be 'copy' or 'forward'"),
+])
+def test_a_misshapen_entry_says_what_is_wrong(tmp_path, text, said):
+    """Regression: a bare AttributeError / TypeError instead of what to fix."""
+    out = import_config(tmp_path, "import telemirror.config", text)
+    assert out.returncode != 0
+    assert said in out.stderr
+
+
+def test_every_known_key_loads(tmp_path):
+    text = (
+        "mode: copy\ndisable_delete: false\ndisable_edit: false\n"
+        "fallback_link_url: https://t.me/x\ndedup_hours: 0\nfilters: []\n"
+        "broadcast_channel: -1009\nbroadcast_targets: [-1002]\n"
+        "directions:\n  - from: [-1001]\n    to: [-1002]\n    mode: copy\n"
+        "    disable_delete: false\n    disable_edit: false\n    send_delay: 0\n"
+        "    fallback_link_url: https://t.me/x\n    dedup_hours: 0\n    filters: []\n"
+        "    past_mode: {last_n: 5, send_delay: 1, drip: {posts: 1, minutes: 1}}\n"
+    )
+    out = import_config(tmp_path, "import telemirror.config", text)
+    assert out.returncode == 0, out.stderr[-500:]
+
+
+@pytest.mark.parametrize("line, error", [
+    ('disable_edit: "false"', "-1001->-1002: disable_edit must be true or false, got 'false'"),
+    ('disable_delete: 1', "-1001->-1002: disable_delete must be true or false, got 1"),
+    ('send_delay: "1"', "-1001->-1002: send_delay must be a number ≥ 0, got '1'"),
+    ('send_delay: .inf', "-1001->-1002: send_delay must be a number ≥ 0, got inf"),
+    ('past_mode: {last_n: "5"}', "past_mode: last_n must be a whole number ≥ 1, got '5'"),
+    ('past_mode: {last_n: 0}', "past_mode: last_n must be a whole number ≥ 1, got 0"),
+    ('past_mode: {full_history: "no"}', "past_mode: full_history must be true or false, got 'no'"),
+    ('past_mode: {last_n: 5, send_delay: -1}', "past_mode: send_delay must be a number ≥ 0, got -1"),
+])
+def test_a_value_of_the_wrong_type_is_refused(tmp_path, line, error):
+    """A quoted value passed: «"false"» is truthy — edits turned off, the
+    opposite of what was written; «"1"» failed only once the mirror used it."""
+    out = import_config(tmp_path, "import telemirror.config", ONE_DIRECTION + f"    {line}\n")
+    assert out.returncode != 0
+    assert error in out.stderr
+
+
+def test_values_of_the_right_type_load(tmp_path):
+    text = ONE_DIRECTION + (
+        "    disable_edit: no\n    disable_delete: true\n    send_delay: 2\n"
+        "    past_mode: {full_history: true, send_delay: 0.5}\n"
+    )
+    probe = ("from telemirror.config import CHAT_MAPPING as m; c = m[-1001][-1002][0]; "
+             "print(c.disable_edit, c.disable_delete, c.send_delay, c.past_mode.full_history)")
+    out = import_config(tmp_path, probe, text)
+    assert out.returncode == 0, out.stderr[-500:]
+    assert out.stdout.split() == ["False", "True", "2", "True"]
+
+
+@pytest.mark.parametrize("filter_yaml, error", [
+    ("SkipWithUrlFilter: {blacklist: ads.com}", "filters: SkipWithUrlFilter.blacklist must be Set[str], got 'ads.com'"),
+    ("SkipWithKeywordsFilter: {keywords: spam}", "filters: SkipWithKeywordsFilter.keywords must be set[str], got 'spam'"),
+    ('SkipUrlFilter: {skip_mention: "false"}', "filters: SkipUrlFilter.skip_mention must be bool, got 'false'"),
+    ("DocumentFilenameFilter: {suffix: 5}", "filters: DocumentFilenameFilter.suffix must be str, got 5"),
+    ("UrlMessageFilter: {placeholder: 123}", "filters: UrlMessageFilter.placeholder must be str, got 123"),
+    ('StripFooterFilter: {max_lines: "3"}', "filters: StripFooterFilter.max_lines must be int, got '3'"),
+])
+def test_a_filter_arg_of_the_wrong_type_is_refused(tmp_path, filter_yaml, error):
+    """«blacklist: ads.com» became the set of its letters, «"false"» a truthy
+    switch, «suffix: 5» failed only on the first document."""
+    out = import_config(tmp_path, "import telemirror.config", f"filters:\n  - {filter_yaml}\n" + ONE_DIRECTION)
+    assert out.returncode != 0
+    assert error in out.stderr
+
+
+def test_filter_args_of_the_right_type_load(tmp_path):
+    text = (
+        "filters:\n"
+        "  - SkipWithUrlFilter: {blacklist: [ads.com]}\n"  # a list where a set is declared
+        "  - UrlMessageFilter: {filter_mention: [some_user], whitelist: null}\n"  # bool | set, Optional
+        "  - StripFooterFilter: {max_lines: 3}\n"
+        "  - WatermarkRemovalFilter: {remove_watermark: false}\n"  # **config: Any — not checked here
+    ) + ONE_DIRECTION
+    out = import_config(tmp_path, "import telemirror.config", text)
+    assert out.returncode == 0, out.stderr[-500:]
+
+
+def test_every_default_the_panel_writes_fits_the_filter():
+    """The panel's catalog and the filters' declared types can't drift apart:
+    what the panel writes by default, the mirror accepts."""
+    import inspect
+
+    from bot.filtercatalog import FILTER_ARGS
+    from telemirror import messagefilters
+    from telemirror.config import _fits
+
+    for name, args in FILTER_ARGS.items():
+        params = inspect.signature(getattr(messagefilters, name).__init__).parameters
+        for arg, _kind, default in args:
+            if default is not None and arg in params:
+                assert _fits(params[arg].annotation, default), (name, arg, default)
+
+
+def test_a_bad_fallback_link_is_refused(tmp_path):
+    out = import_config(tmp_path, "import telemirror.config", "fallback_link_url: 123\n" + ONE_DIRECTION)
+    assert out.returncode != 0
+    assert "-1001->-1002: fallback_link_url must be a link, got 123" in out.stderr
+
+
+def test_a_past_mode_error_names_its_direction(tmp_path):
+    text = ONE_DIRECTION + "    past_mode: {last_n: 5, drip: {posts: 0, minutes: 1}}\n"
+    out = import_config(tmp_path, "import telemirror.config", text)
+    assert out.returncode != 0
+    assert "-1001->-1002: past_mode.drip.posts: expected a whole number ≥ 1, got 0" in out.stderr

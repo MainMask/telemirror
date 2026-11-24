@@ -159,17 +159,22 @@ async def start_form(
     await leave_form(callback.from_user.id, state)
     await state.set_state(step)
     await state.update_data(origin=origin.pack(), **(data or {}))
-    send = message_of(callback).edit_text if choice else message_of(callback).answer
-    await send(text, reply_markup=cancel_kb(step.state, markup))
+    if choice:
+        await message_of(callback).edit_text(text, reply_markup=cancel_kb(step.state, markup))
+        return
+    prompt = await message_of(callback).answer(text, reply_markup=cancel_kb(step.state, markup))
+    # their buttons go once answered / once the form is over (DropStalePrompt)
+    await state.update_data(prompt=prompt.message_id, screen=message_of(callback).message_id)
 
 
 async def ask(message: Message, state: FSMContext, step, text: str,
               markup: Optional[InlineKeyboardMarkup] = None, **data) -> None:
     """The form's next step: its prompt as a new message, ✖️ Отмена under it."""
     await state.set_state(step)
-    if data:
+    if data:  # before the prompt: a failed send mustn't leave the step without its data
         await state.update_data(**data)
-    await message.answer(text, reply_markup=cancel_kb(step.state, markup))
+    prompt = await message.answer(text, reply_markup=cancel_kb(step.state, markup))
+    await state.update_data(prompt=prompt.message_id)  # the last step's prompt: DropStalePrompt
 
 
 async def origin_of(state: FSMContext) -> Optional[NavCB]:

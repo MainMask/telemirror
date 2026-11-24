@@ -60,7 +60,7 @@ runs `daemon-reload`. It does **not** start any mirror — create a project in
 the bot (📁 Проекты → ➕ Новый проект) and press ▶️ Запустить there, or by hand:
 `systemctl enable --now telemirror@<key>.service`.
 
-Then check the whole installation (also ⚙️ Настройки → 🧾 Проверка установки
+Then check the whole installation (also ⚙️ Настройки → 🧾 Диагностика сервера
 in the bot): `.env`, the bot's token, the database and its tables, the unit
 links, the timers, the panel, every project's session, config and mirror.
 Read-only; exit code 1 when something is ❌.
@@ -138,7 +138,7 @@ systemctl kill -s STOP telemirror@<key>.service
   `/run/telemirror-panel/<key>.env` right before the start (a manual
   `systemctl start` without that file fails on purpose).
 - Both use the project's session: `Conflicts=telemirror@%i.service` stops its
-  mirror. The panel (⏪ История / 🛠 Инструменты) also stops whatever else
+  mirror. The panel (⏪ Старые посты / 🛠 Инструменты) also stops whatever else
   holds that session, records it in `projects/.resume.json`, and its watcher
   starts those mirrors again once the run is over — whatever the outcome. A run
   started by hand doesn't bring anything back. A mirror started on a session

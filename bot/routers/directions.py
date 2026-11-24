@@ -2,7 +2,7 @@
 channels (📨 Откуда / 🎯 Куда: a list to add to and remove from), ➕ Добавить.
 A channel is typed as its id or given by a post forwarded from it. What is
 the same for every direction — edits, deletes, mode, history, the link — is
-set once for the project (⚙️ Настройки проекта, ⏪ История); a
+set once for the project (⚙️ Настройки проекта, ⏪ Старые посты); a
 direction's own value of those is hand-written and only shown here."""
 
 import logging
@@ -17,7 +17,7 @@ from bot.callbacks import ActCB, ChoiceCB, NavCB
 from bot.configparse import ConfigError
 from bot.configstore import ConfigStore
 from bot.keyboards.common import button, cancel_kb, choice_kb, markup, paged_rows, pages, pick_kb
-from bot.registry import BACK, ROW_REMOVE, SCREENS, TITLES, YES_DELETE, title
+from bot.registry import BACK, ROW_REMOVE, SCREENS, TITLES, YES_DELETE, menu_path, title
 from bot.routers._common import (
     ask,
     ask_confirm,
@@ -55,8 +55,10 @@ def effective(d: Any, data: Any) -> tuple:
     return mode, edit_on, delete_on
 
 
-def own_settings(d: Any) -> list:
-    """A direction's hand-written values of the project-wide settings, in words."""
+def own_settings(d: Any, data: Any) -> list:
+    """A direction's hand-written values of the project-wide settings, in words.
+    The replay's pause and pace are kept in every direction: its own only when
+    they differ between directions (⏪ Старые посты sets one for all)."""
     out = []
     if "mode" in d:
         out.append(f"режим «{texts.mode_text(d['mode'])}»")
@@ -65,10 +67,13 @@ def own_settings(d: Any) -> list:
     if "disable_delete" in d:
         out.append(f"удаления {texts.on_off(not d['disable_delete'])}")
     if d.get("fallback_link_url"):
-        out.append(f"ссылка вместо чужих <code>{esc(d['fallback_link_url'])}</code>")
+        out.append(f"запасная ссылка <code>{esc(d['fallback_link_url'])}</code>")
     pm = d.get("past_mode")
-    if isinstance(pm, dict) and pm.get("send_delay") is not None:
+    delays = [settings.REPLAY_DELAY_DEFAULT if v is None else v for v in configedit.replay_delays(data)]
+    if isinstance(pm, dict) and pm.get("send_delay") is not None and len(set(delays)) > 1:  # as ⏪ tells
         out.append(f"пауза при копировании истории {esc(pm['send_delay'])} с")
+    if isinstance(pm, dict) and pm.get("drip") is not None and len({configedit.pace_key(v) for v in configedit.replay_paces(data)}) > 1:
+        out.append(f"история порциями: {texts.pace_text(pm['drip'])}")
     return out
 
 
@@ -88,9 +93,9 @@ def _card(project: Project, index: int, page: int) -> NavCB:
     return NavCB(s="dir", p=project.key, i=index, pg=page)
 
 
-# how to give a channel, in every prompt that asks for one
-CHAT_HOW = (f"нажмите {head(TITLES['pick'])}, перешлите сюда любой пост из канала или пришлите его ID: "
-            "<code>-1001234567890</code> (тема группы — <code>-1001234567890#5</code>).")
+# how to give a channel, in every prompt that asks for one (a line of its own)
+CHAT_HOW = (f"Нажмите {head(TITLES['pick'])}, перешлите сюда любой пост из канала или пришлите его ID, "
+            "например <code>-1001234567890</code> (тема группы — <code>-1001234567890#5</code>).")
 
 
 def _chats(d: Any) -> list:
@@ -120,9 +125,9 @@ def _last_post(days: Optional[int]) -> str:
     return {0: "сегодня", 1: "вчера"}.get(days, f"{days} дн. назад")
 
 
-def _row(n: int, d: Any, names: dict, counts: dict) -> str:
+def _row(n: int, d: Any, names: dict, counts: dict, data: Any) -> str:
     """A direction's button: «3. Источник → Канал» and its marks."""
-    marks = (" 🧹" if d.get("filters") else "") + (" ✳️" if own_settings(d) else "") + \
+    marks = (" 🧹" if d.get("filters") else "") + (" ✳️" if own_settings(d, data) else "") + \
         (" 🔇" if _silent(_quiet(d, counts)) else "")
     return (f"{n + 1}. {texts.short_refs(list(d.get('from') or []), names)} → "
             f"{texts.short_refs(list(d.get('to') or []), names)}{marks}")
@@ -139,14 +144,14 @@ async def directions_view(message: Message, edit: bool, nav: NavCB, *, project: 
     count = pages(len(dirs), settings.PAGE_SIZE)
     page = nav.pg % count
     counts = stats.load(project.key)
-    items = [button(_row(n, d, names, counts), _card(project, n, page)) for n, d in enumerate(dirs)]
+    items = [button(_row(n, d, names, counts, info.data), _card(project, n, page)) for n, d in enumerate(dirs)]
     if not info.readable:
         body = texts.unreadable(info)
     elif dirs:
         body = f"Всего: <b>{len(dirs)}</b> · стр. {page + 1}/{count}. Каждая строка — откуда → куда."
         if silent := sum(_silent(_quiet(d, counts)) for d in dirs):
             body += f"\n🔇 Молчат {SILENT_DAYS} дней и больше: <b>{silent}</b>."
-        if any(d.get("filters") or own_settings(d) for d in dirs):
+        if any(d.get("filters") or own_settings(d, info.data) for d in dirs):
             body += "\nЗначки: 🧹 свои фильтры, ✳️ свои настройки в файле."
         if any(texts.any_unnamed(_chats(d), names) for d in dirs):
             body += "\n" + texts.NAMES_LATER
@@ -164,8 +169,9 @@ async def directions_view(message: Message, edit: bool, nav: NavCB, *, project: 
 async def on_find(callback: CallbackQuery, callback_data: ActCB, project: Project, state: FSMContext) -> None:
     await start_form(
         callback, state, Input.value,
-        f"{head(title('dir_find'))} — пришлите часть названия канала или его ID, перешлите пост из канала "
-        f"или нажмите {head(TITLES['pick'])}. Ищется и среди источников, и среди ваших каналов.",
+        f"{head(title('dir_find'))} — какой канал ищем?\n\n"
+        f"Пришлите часть его названия или ID, перешлите пост из канала или нажмите {head(TITLES['pick'])}.\n\n"
+        "<i>Поиск идёт и по источникам, и по вашим каналам.</i>",
         _list(project, callback_data.pg), markup=pick_kb(), data={"kind": "dir_find", "p": project.key},
     )
 
@@ -181,7 +187,7 @@ async def find(message: Message, state: FSMContext, raw: str, data: dict, projec
         return query in str(ref) or query in names.get(chat_id, "").casefold()
 
     found = [(n, d) for n, d in enumerate(info.directions) if any(hit(r) for r in _chats(d))]
-    rows = [[button(_row(n, d, names, counts), _card(project, n, n // settings.PAGE_SIZE))] for n, d in found[:FIND_MAX]]
+    rows = [[button(_row(n, d, names, counts, info.data), _card(project, n, n // settings.PAGE_SIZE))] for n, d in found[:FIND_MAX]]
     rows.append([button(title("dir_find"), ActCB(a="dir_find", p=project.key)),
                  button(BACK, _list(project))])
     if not found:
@@ -220,9 +226,10 @@ async def direction_view(message: Message, edit: bool, nav: NavCB, *, project: P
     more = (f"Правки, удаления и режим — общие для всех направлений: {SCREENS['mng'].title}; "
             f"старые посты — {REPLAY}. Последний пост — по подсчётам зеркала: пока оно остановлено, "
             f"источник тоже выглядит молчащим.{_later(d, names)}")
-    if own := own_settings(d):
+    if own := own_settings(d, info.data):
         lines.append(f"✳️ У этого направления в файле настроек свои: {', '.join(own)}.")
-    titles = {"dir_delay": f"{title('dir_delay')}: " + ("по умолчанию" if delay is None else f"{delay} с")}
+    titles = {"dir_delay": f"{title('dir_delay')}: " + ("по умолчанию" if delay is None else f"{delay} с"),
+              **{kind: f"{title(kind)}: {len(d.get(side) or [])}" for kind, side in SIDES.items()}}
     hidden = () if info.writable else ("dir_src", "dir_dst", "dir_delay", "dir_del")
     await show(message, edit, "dir", project, body="\n".join(lines), more=more, note=note,
                titles=titles, hidden=hidden, i=nav.i, pg=nav.pg, h=configedit.fingerprint(d))
@@ -261,11 +268,12 @@ async def do_delete(callback: CallbackQuery, action: dict, project: Project, sto
                _list(project, action["pg"]), deps)
 
 
-# ── ⏱ Пауза между постами ───────────────────────────────────────────────────
+# ── ⏱ Пауза между отправками ────────────────────────────────────────────────
 
-DELAY_ASK = ("Пришлите, сколько секунд ждать между отправками (0–60, например <code>0.5</code>), или "
-             "<code>-</code>, чтобы вернуть значение по умолчанию. Обычно менять не нужно: пауза помогает, "
-             "если Telegram ограничивает частые отправки.")
+DELAY_ASK = ("Сколько секунд ждать между отправками постов в этом направлении.\n\n"
+             "Пришлите число от 0 до 60, например <code>1.5</code>. Пауза помогает, если Telegram ограничивает "
+             "частую отправку. Обычно менять не нужно.\n\n"
+             "<code>-</code> — вернуть значение по умолчанию.")
 
 
 @on_action(router, "dir_delay")
@@ -296,7 +304,7 @@ async def set_delay(message: Message, state: FSMContext, raw: str, data: dict, p
 # ── 📨 Откуда / 🎯 Куда: the direction's channels, one by one ───────────────
 
 SIDES = {"dir_src": "from", "dir_dst": "to"}
-REFS_ADD = {"dir_src": "Добавить источник", "dir_dst": "Добавить канал, куда копировать"}
+REFS_ADD = {"dir_src": "Добавить источник", "dir_dst": "Добавить ваш канал"}
 
 
 def _refs_form(project: Project, kind: str, index: int) -> tuple:
@@ -307,9 +315,9 @@ def _refs_form(project: Project, kind: str, index: int) -> tuple:
     current = list(d.get(SIDES[kind]) or [])
     lines = [f"{head(title(kind))} — направление № {index + 1}:"]
     lines += [f"{n + 1}. {texts.chat(r, names)}" for n, r in enumerate(current)] or [texts.UNKNOWN]
-    lines.append(f"\n<b>{REFS_ADD[kind]}</b>: {CHAT_HOW}")
-    lines.append(f"Убрать — кнопка {ROW_REMOVE} с его названием. Всё сохраняется сразу; закончили — "
-                 f"{TITLES['done']}.")
+    lines.append(f"\n➕ <b>{REFS_ADD[kind]}</b>\n{CHAT_HOW}")
+    lines.append(f"\n{ROW_REMOVE} <b>Убрать</b> — нажмите кнопку с названием канала.")
+    lines.append(f"\n<i>Изменения сохраняются сразу. Закончили — {TITLES['done']}.</i>")
     if texts.any_unnamed(current, names):
         lines.append(texts.NAMES_LATER)
     options = [(f"{ROW_REMOVE} {texts.chat_plain(r, names, 40)}", f"x{configparse.ref_str(r)}") for r in current]
@@ -326,9 +334,10 @@ async def on_refs(callback: CallbackQuery, callback_data: ActCB, project: Projec
     await callback.answer()
     await leave_form(callback.from_user.id, state)
     await state.set_state(Input.value)
+    # in the card's place: ✅ Готово puts the card back there
     await state.update_data(origin=_card(project, cb.i, cb.pg).pack(), kind=cb.a, p=project.key, i=cb.i,
-                            h=cb.h, pg=cb.pg)
-    await message_of(callback).answer(text, reply_markup=kb)
+                            h=cb.h, pg=cb.pg, prompt=message_of(callback).message_id)
+    await message_of(callback).edit_text(text, reply_markup=kb)
 
 
 async def _save_refs(message: Message, edit: bool, state: FSMContext, data: dict, project: Project,
@@ -341,7 +350,8 @@ async def _save_refs(message: Message, edit: bool, state: FSMContext, data: dict
         if d is None:
             await end_form(target, state, texts.config_error("stale"), edit=True)
             return
-        await state.update_data(h=configedit.fingerprint(d), changed=True)
+        # a typed channel: the list is shown anew below — the one above loses its buttons (DropStalePrompt)
+        await state.update_data(h=configedit.fingerprint(d), changed=True, prompt=target.message_id)
         text, kb = _refs_form(project, data["kind"], data["i"])
         await target.edit_text(f"{done}\n\n{text}", reply_markup=kb)
 
@@ -410,7 +420,7 @@ async def on_refs_pick(callback: CallbackQuery, callback_data: ChoiceCB, state: 
 # ── ➕ Добавить: source → targets → mode → history ──────────────────────────
 
 ADD = TITLES["dir_new"]
-SOURCE_ASK = f"{head(ADD)} — шаг 1 из 3. <b>Откуда</b> копировать? Чтобы указать канал-источник, {CHAT_HOW}"
+SOURCE_ASK = f"{head(ADD)} — шаг 1 из 3.\n\n<b>Откуда</b> копировать посты? Укажите канал-источник.\n\n{CHAT_HOW}"
 ADD_HISTORY = [(TITLES["hist_none"], "hist_none"), (TITLES["hist_full"], "hist_full")]
 
 
@@ -442,9 +452,9 @@ async def on_add_source(message: Message, state: FSMContext) -> None:
         await retry(message, e)
         return
     await ask(message, state, AddDirection.targets,
-              f"{head(ADD)} — шаг 2 из 3. Откуда: {texts.refs([source], _names_of(key))}.\n\n"
-              f"<b>Куда</b> копировать? Чтобы указать ваш канал, {CHAT_HOW} Можно несколько: присылайте "
-              "по одному или ID через запятую.", pick_kb(),
+              f"{head(ADD)} — шаг 2 из 3.\nОткуда: {texts.refs([source], _names_of(key))}\n\n"
+              f"<b>Куда</b> копировать? Укажите ваш канал.\n\n{CHAT_HOW}\n\n"
+              "<i>Можно несколько: присылайте по одному или ID через запятую.</i>", pick_kb(),
               source=source, targets=[])
 
 
@@ -458,9 +468,9 @@ async def on_add_targets(message: Message, state: FSMContext) -> None:
         return
     targets = data.get("targets", []) + [t for t in new if t not in data.get("targets", [])]
     await ask(message, state, AddDirection.targets,
-              f"{head(ADD)} — шаг 2 из 3. {texts.refs([data['source']], _names_of(data['p']))} → "
-              f"{texts.refs(targets, _names_of(data['p']))}\n\nДобавьте ещё канал или нажмите "
-              f"{head(TITLES['done'])}.",
+              f"{head(ADD)} — шаг 2 из 3.\n{texts.refs([data['source']], _names_of(data['p']))} → "
+              f"{texts.refs(targets, _names_of(data['p']))}\n\n"
+              f"Добавьте ещё канал так же или нажмите {head(TITLES['done'])}, если других нет.",
               pick_kb(choice_kb("add_targets", [(TITLES["done"], "done")])), targets=targets)
 
 
@@ -477,11 +487,12 @@ async def on_add_targets_done(callback: CallbackQuery, state: FSMContext) -> Non
     names = info.names if info else {}
     usual = ""
     if info and (kinds := {str(configedit.history_of(d)) for d in info.directions}) and len(kinds) == 1:
-        usual = f" У остальных направлений сейчас: {texts.history_text(info.directions[0].get('past_mode'))}."
+        usual = f"\nУ остальных направлений сейчас: {texts.history_text(info.directions[0].get('past_mode'))}."
     await message_of(callback).edit_text(
-        f"{head(ADD)} — шаг 3 из 3. {texts.refs([data['source']], names)} → {texts.refs(data['targets'], names)}\n\n"
-        f"Скопировать и старые посты этого источника?{usual} Само копирование запускается кнопкой в "
-        f"{head(REPLAY)}; там же выбирается, что копировать, для всех направлений сразу.",
+        f"{head(ADD)} — шаг 3 из 3.\n{texts.refs([data['source']], names)} → {texts.refs(data['targets'], names)}\n\n"
+        f"Копировать ли и старые посты — те, что вышли в источнике раньше?{usual}\n\n"
+        f"<i>Само копирование старых постов запускается в {head(REPLAY)}; там же можно выбрать, сколько их "
+        "копировать, — сразу для всех направлений.</i>",
         reply_markup=cancel_kb(str(AddDirection.choice.state), choice_kb("add_hist", ADD_HISTORY, widths=(2,))),
     )
 
@@ -498,8 +509,7 @@ async def on_add_history(callback: CallbackQuery, callback_data: ChoiceCB, state
     await leave_form(callback.from_user.id, state)
     await callback.answer()
     full = callback_data.value == "hist_full"
-    check = (f"\n👉 Проверьте, что у аккаунта есть доступ к новым каналам: {title('ca_dry')} в "
-             f"{SCREENS['ca'].title} (кнопка в {SCREENS['dirs'].title}).")
+    check = f"\n👉 Проверьте, что у аккаунта есть доступ к новым каналам: {esc(menu_path('ca_dry'))}."
     await save(
         message_of(callback), True, project,
         lambda p: store.update(p, lambda cfg: configedit.add_direction(

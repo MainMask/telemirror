@@ -82,13 +82,25 @@ async def on_status(message: Message, deps: dict) -> None:
     await open_screen(NavCB(s=BY_TITLE[TASKS].id), message, False, deps)
 
 
+async def cancel(message: Message, state: FSMContext, deps: dict, edit: bool) -> None:
+    """Out of the form (or a pending «Да»), straight back to the screen it began on."""
+    data = await state.get_data()
+    back = data.get("origin") or (data.get("confirm") or {}).get("back")
+    await leave_form(message.chat.id, state)
+    if back:
+        await open_screen(NavCB.unpack(back), message, edit, deps, note=texts.CANCELLED)
+    else:
+        await message.answer(texts.CANCELLED, reply_markup=main_menu())
+
+
 @router.message(Command("cancel"))
-async def on_cancel(message: Message, state: FSMContext) -> None:
+async def on_cancel(message: Message, state: FSMContext, deps: dict) -> None:
     if await state.get_state() is not None:
-        await end_form(message, state, texts.CANCELLED)
+        await cancel(message, state, deps, edit=False)
         return
     await message.answer(
-        f"Сейчас нечего отменять. Остановить задачу — в {TASKS}.", reply_markup=main_menu()
+        "Сейчас нечего отменять. Остановить зеркало, копирование старых постов или инструмент — "
+        f"на их экране в проекте; что сейчас работает — в {TASKS}.", reply_markup=main_menu()
     )
 
 
@@ -112,13 +124,15 @@ async def on_pick(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(ChoiceCB.filter(F.scope == "cancel"))
-async def on_cancel_button(callback: CallbackQuery, callback_data: ChoiceCB, state: FSMContext) -> None:
-    """✖️ Отмена under a prompt: as /cancel, only while still at its step."""
+async def on_cancel_button(callback: CallbackQuery, callback_data: ChoiceCB, state: FSMContext,
+                           deps: dict) -> None:
+    """✖️ Отмена under a prompt: as /cancel, only while still at its step —
+    the screen in the prompt's place."""
     if await state.get_state() != callback_data.value.replace(".", ":"):
         await stale_tap(callback)
         return
     await callback.answer()
-    await end_form(message_of(callback), state, texts.CANCELLED, edit=True)
+    await cancel(message_of(callback), state, deps, edit=True)
 
 
 @router.callback_query(ChoiceCB.filter(F.scope.in_({"yes", "no"})))

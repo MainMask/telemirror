@@ -17,7 +17,7 @@ from bot import configedit, configparse, configstore, filtercatalog, registry, s
 from bot.callbacks import ActCB, NavCB
 from bot.configparse import ConfigError
 from bot.keyboards.common import pick_kb
-from bot.registry import CHECKED, SCREENS, TITLES, UNCHECKED, YES, YES_DELETE, title
+from bot.registry import CHECK, CHECKED, RUN, SCREENS, TITLES, UNCHECKED, YES, YES_DELETE, title
 from bot.routers import _units
 from bot.routers._common import (
     confirmed,
@@ -202,12 +202,14 @@ async def task_view(message: Message, edit: bool, nav: NavCB, *, project: Projec
         titles["sp_only"] = f"{title('sp_only')}: {len(only) if only else 'все'}"
         if only:
             names = status.project_info(project).names
-            body += "\n\nТолько источники: " + texts.refs(only, names)
+            body += "\n\nВыбранные источники: " + texts.refs(only, names)
             if texts.any_unnamed(only, names):
                 body += "\n" + texts.NAMES_LATER
     if journal:
         body += "\n\n" + (await _units.journal_text(sysd, project.task_unit, st) or "<i>Журнал пуст.</i>")
     hidden: tuple = () if can_run_real(task, project, runtime, st) else (f"{task}_run",)
+    if hidden and task != "ca":  # ca only checks
+        body += f"\n\n<i>«{RUN}» появится здесь после успешной проверки — «{CHECK}» с этими же настройками.</i>"
     if not (sysd.available and st is not None and st.running):
         hidden += (f"{task}_stop",)
     await show(message, edit, task, project, body=body, more=ABOUT[task], note=note, titles=titles, hidden=hidden,
@@ -227,11 +229,14 @@ async def on_flag(callback: CallbackQuery, callback_data: ActCB, project: Projec
 
 
 SP_ASKS = {
-    "sp_max": "Пришлите, сколько закрепов читать в одном чате или теме ({low}–{high}; по умолчанию "
-              f"{settings.SYNC_PINS_DEFAULT_MAX_PINS}), или <code>-</code>, чтобы вернуть значение по умолчанию.",
-    "sp_only": f"Нажмите {head(TITLES['pick'])}, перешлите пост из источника или пришлите ID источников через "
-               "запятую — закрепы перенесутся "
-               "только у них. <code>-</code> — снова у всех.",
+    "sp_max": "Сколько закрепов просматривать в каждом чате или теме группы.\n\n"
+              "Пришлите число от {low} до {high}, например "
+              f"<code>{settings.SYNC_PINS_DEFAULT_MAX_PINS}</code>.\n\n"
+              f"<code>-</code> — вернуть значение по умолчанию ({settings.SYNC_PINS_DEFAULT_MAX_PINS}).",
+    "sp_only": "У каких источников переносить закрепы?\n\n"
+               f"Нажмите {head(TITLES['pick'])}, перешлите пост из источника или пришлите ID источников через "
+               "запятую — закрепы перенесутся только у них.\n\n"
+               "<code>-</code> — снова у всех источников.",
 }
 
 
@@ -271,7 +276,7 @@ async def set_option(message: Message, state: FSMContext, raw: str, data: dict, 
     elif data["kind"] == "sp_max":
         low, high = settings.SYNC_PINS_MAX_PINS
         if not raw.isdigit() or not low <= int(raw) <= high:
-            raise ConfigError("bad_number", raw)
+            raise ConfigError("bad_max_pins", raw)
         opts["max_pins"] = int(raw)
     else:
         donors = [configparse.chat_of(r) for r in configparse.parse_chat_refs(raw)]
@@ -282,7 +287,7 @@ async def set_option(message: Message, state: FSMContext, raw: str, data: dict, 
         opts["only"] = tuple(dict.fromkeys(donors))
     await leave_form(message.chat.id, state)
     await task_view(message, False, _screen(project, "sp"), project=project,
-                    note="✅ Запомнено. Перед выполнением — новая проверка.", **deps)
+                    note=f"✅ Запомнено. Перед «{RUN}» нужна новая проверка с этими настройками.", **deps)
 
 
 RUNNING = "⛔ Инструмент этого проекта уже работает — дождитесь, пока закончит."

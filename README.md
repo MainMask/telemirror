@@ -82,7 +82,7 @@
             ? google.com
     ```
 
-    The mirror config is a YAML file: a project's own (`projects/<key>/project.yml` names it; the panel edits it), or `./.configs/mirror.config.yml` for a run without a project.
+    The mirror config is a YAML file: a project's own (`projects/<key>/project.yml` names it; the panel edits it), or `./.configs/mirror.config.yml` for a run without a project. An unknown key (at the top, in a direction or in `past_mode`) is an error naming it, not silently ignored; so is a value of the wrong type — a quoted `"false"` or `"1"`, or a filter's list written as one string.
 
     <details>
     <summary><b>./.configs/mirror.config.yml</b> mirroring config overview</summary>
@@ -143,7 +143,7 @@
 
 ### Linux VPS (supported)
 
-systemd units for every project's mirror, history replay and maintenance runs, the control panel, alerts and timers: see [deploy/README.md](deploy/README.md) (`deploy/bootstrap.sh` installs them). `python -m telemirror.selfcheck` (or ⚙️ Настройки → 🧾 Проверка установки in the bot) checks the installation afterwards.
+systemd units for every project's mirror, history replay and maintenance runs, the control panel, alerts and timers: see [deploy/README.md](deploy/README.md) (`deploy/bootstrap.sh` installs them). `python -m telemirror.selfcheck` (or ⚙️ Настройки → 🧾 Диагностика сервера in the bot) checks the installation afterwards.
 
 ### Locally (macOS)
 1. Create and activate python virtual environment
@@ -186,17 +186,28 @@ A live mirror run as a project keeps, in `projects/<key>/`:
 - `failed.json` — the posts it couldn't copy to some channel (the reason per channel; the last 300, up to 14 days). Instead of an error notice per send, the panel's admins get one summary a minute at most («❗ Не скопировано постов: N…») with **♻️ Повторить все** and **❗ Не скопировано** (the project's screen: copy one or all again, or clear the list; on the project's card only while posts wait in it, with how many). The panel only drops a request file into `projects/<key>/requests/`; the mirror picks it up within 15 s, fetches the post from the source again and sends it only where it's missing.
 - `stats.json` — per-day counters by direction (copied, dropped by the filters, repeats, failed sends), 35 days. `python -m telemirror.report` (`telemirror-report.timer`, Mondays 10:00; ⚙️ Настройки → 📈 Сводка за неделю) sends each project's week: totals, directions that got nothing, the most failing ones, the ones where the filters drop ≥90%.
 
-`dedup_hours: N` (YAML, project-wide or per direction; ⚙️ Настройки проекта → 🧬 Без повторов) — a post a channel already got from another source post within N hours isn't copied there again: the same text and the same photos/videos (a post without media — the same text of 20+ characters). The fingerprints are in the `post_fingerprint` table. A re-uploaded photo is another file, so it isn't caught. History replay (`telemirror.past`) honours it too.
+`dedup_hours: N` (YAML, project-wide or per direction; ⚙️ Настройки проекта → 🧬 Без дублей) — a post a channel already got from another source post within N hours isn't copied there again: the same text and the same photos/videos (a post without media — the same text of 20+ characters). The fingerprints are in the `post_fingerprint` table. A re-uploaded photo is another file, so it isn't caught. History replay (`telemirror.past`) honours it too.
 
 ## Replaying past messages (`telemirror.past`)
 
 `python -m telemirror.past` replays a channel's history through the mirror pipeline for the directions that have `past_mode:` in the mirror config.
 
 ```bash
-TELEMIRROR_PROJECT=<key> python -m telemirror.past   # what the bot's ⏪ История runs
+TELEMIRROR_PROJECT=<key> python -m telemirror.past   # what the bot's ⏪ Старые посты runs
 ```
 
 It takes the project's session (a second process on one session refuses to start — the panel pauses the project's mirror meanwhile). Progress is checkpointed after each message: if interrupted, re-running resumes from where it left off. A second pass rewrites cross-channel links in already-sent messages.
+
+`drip: {posts: N, minutes: M}` in `past_mode` (⏪ Старые посты → 🐢 Темп) spreads the history out evenly instead — one post every `M*60/N` seconds (or `drip: {seconds: S}`: one every `S` seconds; `30с` in the panel), an album counting once, and posts already mirrored or filtered out cost no time. Such a history is copied by the live mirror itself, in the background and without stopping (`telemirror.past` skips those directions); the pace is the project's — its channel pairs take turns, a post from each in turn (a pace per pair would multiply it by their number, for a target and the account alike; posts already there cost no turn), ⏪ Старые посты showing how many pairs are done, the pass stops at the newest message it saw when it began, and a restart resumes from the checkpoint — waiting out the rest of the interval first, since the last send (any pair's) is kept in the `past_mode_drip` table. A pair that finished its history (that `last_n` / `since_date` / `full_history`) isn't gone through again on later starts (links in the copies are fixed once every pair's copied — a fix that failed, or that Telegram didn't give posts for, is run again next start, without copying anew); another choice, or a target emptied by `clear_channels`, copies it anew. Its progress, FloodWaits and retries go to the journal only (⏪ Старые посты shows the latest line); the admins hear when a pair gives up, a post is skipped, and when it's done. Old posts then come in between the new ones.
+
+```yaml
+directions:
+  - from: [-1001111111111]
+    to: [-1002222222222]
+    past_mode:
+      last_n: 500
+      drip: {posts: 5, minutes: 45}
+```
 
 ## Maintenance tasks (`telemirror.tasks`)
 
@@ -205,7 +216,7 @@ It takes the project's session (a second process on one session refuses to start
 | Task (`python -m telemirror.tasks.…`) | Description |
 |---|---|
 | `setup_mirrors` | Interactive wizard for the "⚜️ Цитадель" set: discovers donors from hardcoded name lists, creates the recipient channels/forum topics + copies avatars, then generates the config — live directions are merge-appended to `.configs/mirror.config.yml` (comments preserved, old file backed up to `*.bak`), course-only directions go to `.configs/citadel_courses.config.yml`. Idempotent, safe to re-run after a FloodWait. |
-| `clear_channels` | Purges all messages in recipient channels/topics, then resets the `past_mode_checkpoint` and `binding_id` rows for the cleared targets (plus the broadcast channel's `broadcast_sync` state when a cleared target receives broadcasts, so the next start re-delivers the admin posts to it). Supports `--dry-run`; `--yes` skips the confirmation prompt (used by the control panel). |
+| `clear_channels` | Purges all messages in recipient channels/topics, then resets the `past_mode_checkpoint` (with `past_mode_drip`) and `binding_id` rows for the cleared targets (plus the broadcast channel's `broadcast_sync` state when a cleared target receives broadcasts, so the next start re-delivers the admin posts to it). Supports `--dry-run`; `--yes` skips the confirmation prompt (used by the control panel). |
 | `sync_pins` | Mirrors donor pinned messages onto their recipient mirrors using the `binding_id` table (needs PostgreSQL + a prior history replay). Reconcile mode by default (also unpins what the donor unpinned, only among mirror-managed pins); `--additive` disables unpinning, `--dry-run` shows the plan; `--max-pins N` / `--only DONOR_ID` narrow it. |
 | `anonymize_groups` | In every supergroup where the account is an admin: enables "Remain Anonymous" for the account, then "Hide Members" for the group (the latter only where Telegram allows it). Supports `--dry-run`; `--yes` skips the confirmation prompts (used by the control panel). |
 | `check_access` | Read-only: checks that the account sees every source and the broadcast channel and may post in every recipient (from its own rights in its dialogs; topics aren't checked). Run as a project, writes `projects/<key>/access.json` for the panel. |
@@ -251,22 +262,23 @@ expires after 10 min); a check, a replay or a start on a free session just runs.
    ├ 🔀 Направления — the list (channels by name, 🧹 / ✳️ = own filters / hand-written own settings),
    │   ➕ Добавить (source → targets → history), 🔎 Найти (by a channel's name or id),
    │   a direction: 📨 Откуда, 🎯 Куда (a channel list: add by id or a forwarded post, 🗑 one),
-   │   ⏱ Пауза между постами, 🗑 Удалить, 🧹 Фильтры направления;
-   │   📢 Рассылка (📢 Рассылка из канала, 📬 Куда рассылать)
+   │   ⏱ Пауза между отправками, 🗑 Удалить направление, 🧹 Фильтры направления;
+   │   📢 Рассылка (📢 Рассылать из канала, 📬 Куда рассылать)
    ├ 🧹 Фильтры — ➕ Добавить фильтр (Отсеять посты / Изменить посты), a filter (named for people):
    │   its lists (🗑 a value, ➕ Добавить), ☑️ toggles, 📝 values, 🔬 Тонкая настройка (rarely needed
    │   args), ⬆️ / ⬇️, 🗑 Удалить фильтр
-   ├ ⏪ История — telemirror.past for the project (its mirror is paused meanwhile),
-   │   Запуск: ▶️ Начать / ⏹ Прервать · Что и как: 📜 Что копировать (one choice for every
-   │   direction), ⏱ Пауза при копировании
+   ├ ⏪ Старые посты — telemirror.past for the project (its mirror is paused meanwhile),
+   │   Запуск: ▶️ Начать копирование / ⏸ Приостановить · Что и как: 📜 Что копировать (one choice for every
+   │   direction), ⏱ Пауза для старых постов, 🐢 Темп (сразу / N постов за M минут — then the
+   │   mirror copies it, without stopping; 🔁 Перезапустить зеркало until it runs the new pace)
    ├ 🛠 Инструменты — 🛂 Проверка доступа (read-only), 🔒 Запрет копирования, 📌 Закрепы (Настройки
-   │   запуска: flags, 📏 limit, 📍 Только источники), 🕶 Анонимность, 🧨 Очистка каналов — each the
+   │   запуска: flags, 📏 limit, 📍 Выбрать источники), 🕶 Анонимность, 🧨 Очистка каналов — each the
    │   same: 🔍 Проверить, then ▶️ Выполнить; ⏹ Остановить while it runs; 📄 Журнал
-   └ ⚙️ Настройки проекта — Копирование (for every direction): ✏️ Правки, ✂️ Удаления, ↔️ Режим,
-       🔗 Ссылка вместо чужих · Проект: 🏷 Имя, 🎨 Значок, 👤 Аккаунт, 🗑 Удалить проект
+   └ ⚙️ Настройки проекта — Копирование (for every direction): ✏️ Повторять правки, ✂️ Повторять удаления, ↔️ Как публиковать,
+       🔗 Запасная ссылка, 🧬 Без дублей · Проект: 🏷 Переименовать, 🎨 Значок, 👤 Аккаунт, 🗑 Удалить проект
        (moved to projects/.deleted/)
        └ 💾 Файл настроек — 📥 Скачать, 📤 Загрузить (diff + validation), ↩️ Откатить
-📊 Задачи (/status) — every project's units and a unit's journal; its button opens where it's run
+📊 Статус (/status) — every project's units and a unit's journal; its button opens where it's run
 ⚙️ Настройки — Присмотр за зеркалами: 🩺 / 🔁 timers on/off · 👤 Аккаунты: sessions, 🔑 Войти по номеру,
    📤 Загрузить сессию
 ```
@@ -280,7 +292,7 @@ expires after 10 min); a check, a replay or a start on a free session just runs.
   (`telemirror.notify`): their warnings and errors (repeats merged, at most 10 a
   minute), private messages to their account, a post a replay had to skip, and
   `telemirror.alert` / `telemirror.health` alerts — each signed with its project,
-  with a 📊 Задача button. Admins must have pressed /start once.
+  with a 📊 Статус и журнал button. Admins must have pressed /start once.
 - **Sign-in by phone** happens in the bot (number → code typed with spaces → 2FA
   password; 📲 sends a new code), with the Telegram Desktop profile `telemirror.login` uses;
   the messages with the code and the password are deleted, the password is never stored.
@@ -315,7 +327,7 @@ writes it at start (one `get_dialogs`), 🛂 Проверка доступа, a 
 or a chat picked in the bot add to it. A channel not in it yet is shown by its id.
 
 Edits, deletes, mode, the fallback link and the history are set once for all
-the directions of a project (⚙️ Настройки проекта, ⏪ История); a
+the directions of a project (⚙️ Настройки проекта, ⏪ Старые посты); a
 direction's own value of those can still be written in the file — the panel
 shows it (✳️) but doesn't edit it.
 

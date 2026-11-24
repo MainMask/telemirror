@@ -66,7 +66,7 @@ def test_send_sync_reaches_every_admin_as_plain_text(monkeypatch):
     assert "parse_mode" not in body  # log lines and names are never markup
     assert len(body["text"].encode("utf-16-le")) // 2 == notify.MAX_TEXT  # Telegram counts UTF-16 units
     assert body["text"].startswith("🪞 Зеркало: **x**")
-    assert body["reply_markup"]["inline_keyboard"][0][0]["text"] == "📊 Задача"
+    assert body["reply_markup"]["inline_keyboard"][0][0]["text"] == "📊 Статус и журнал"
 
 
 def test_send_never_raises(monkeypatch):

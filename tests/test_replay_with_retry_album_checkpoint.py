@@ -80,7 +80,7 @@ def test_give_up_on_stuck_album_advances_checkpoint_past_whole_album(monkeypatch
 
     notified = []
 
-    async def fake_notify(src, mid, log):
+    async def fake_notify(src, mid, unit, log):
         notified.append(mid)
 
     monkeypatch.setattr(past_mode.asyncio, "sleep", fake_sleep)

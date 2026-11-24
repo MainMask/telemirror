@@ -5,11 +5,12 @@ values, error details — goes through ``esc()``.
 
 Icons: ⛔ — refused (nothing done), ⚠️ — an error or a warning, ✅ — done."""
 
-from datetime import datetime
+from datetime import date, datetime, time, timezone
 from html import escape
 from types import MappingProxyType
 from typing import Iterable, Mapping, Optional
 
+from bot import settings
 from bot.registry import TITLES, menu_path, title
 from telemirror.projects import Project
 
@@ -26,6 +27,11 @@ def more(text: str) -> str:
     """How it works, the details: folded under the screen, opened by a tap
     (HTML ``text``)."""
     return f"<blockquote expandable>{text}</blockquote>"
+
+
+def cut(text: str, limit: int) -> str:
+    """A label shortened for a button: whole up to ``limit``, else cut with «…»."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def project_label(project: Project) -> str:
@@ -88,7 +94,26 @@ def on_off(value: bool) -> str:
 
 
 def fmt_ts(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime("%d.%m %H:%M")
+    return datetime.fromtimestamp(ts, settings.TIMEZONE).strftime("%d.%m %H:%M")
+
+
+def fmt_date(value: object) -> str:
+    """A config's ``since_date`` (an ISO string, a date or a datetime) as typed in
+    ⏪ 📅 С даты…: ``31.01.2024``, ``31.01.2024 12:00`` — Moscow time. One without
+    an offset (hand-written) is UTC to the mirror (Telethon's offset_date), so
+    it's shown so: ``2024-01-31`` → ``31.01.2024 03:00``."""
+    try:
+        if isinstance(value, datetime):
+            moment = value
+        elif isinstance(value, date):
+            moment = datetime.combine(value, time())
+        else:
+            moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return esc(value)
+    moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    moment = moment.astimezone(settings.TIMEZONE)
+    return moment.strftime("%d.%m.%Y" if moment.time() == time() else "%d.%m.%Y %H:%M")
 
 
 def fmt_duration(seconds: float) -> str:
@@ -141,8 +166,7 @@ def chat_plain(ref: object, names: Names = NO_NAMES, limit: int = 24) -> str:
     chat_id, topic = _split(ref)
     if chat_id not in names:
         return str(ref)
-    title = names[chat_id] if len(names[chat_id]) <= limit else names[chat_id][: limit - 1] + "…"
-    return title + (f" #{topic}" if topic else "")
+    return cut(names[chat_id], limit) + (f" #{topic}" if topic else "")
 
 
 def refs(values: Iterable[object], names: Names = NO_NAMES) -> str:
@@ -168,8 +192,21 @@ def history_text(pm) -> str:
     if pm.get("last_n") is not None:
         return f"последние {esc(pm['last_n'])}"
     if pm.get("since_date") is not None:
-        return f"с {esc(pm['since_date'])}"
+        return f"с {fmt_date(pm['since_date'])}"
     return "нет"
+
+
+def pace_text(drip) -> str:
+    """``past_mode.drip`` in words; None — all at once."""
+    if not isinstance(drip, dict):
+        return "сразу"
+    if "seconds" in drip:
+        return f"1 пост раз в {esc(drip.get('seconds'))} с"
+    posts = drip.get("posts")
+    word = ("пост" if posts % 10 == 1 and posts % 100 != 11
+            else "поста" if 2 <= posts % 10 <= 4 and not 12 <= posts % 100 <= 14
+            else "постов") if isinstance(posts, int) else "постов"
+    return f"{esc(posts)} {word} за {esc(drip.get('minutes'))} мин"
 
 
 # systemd's Result= of a stopped unit, in words
@@ -231,7 +268,7 @@ CONFIG_ERRORS = {
     "stale": "Список изменился (возможно, настройки меняли в файле). Откройте экран заново.",
     "changed_on_disk": "Файл настроек изменили во время сохранения — ничего не записано. "
     "Откройте экран заново и повторите.",
-    "duplicate": "Такое направление уже есть: <code>{detail}</code>",
+    "duplicate": "Такое направление уже есть: <code>{detail}</code>. Откройте его в списке направлений.",
     "self_loop": "Канал не может копировать сам в себя: <code>{detail}</code>",
     "bad_mode": "Неизвестный режим: <code>{detail}</code>",
     "read_only": "Файл настроек проекта не найден — менять нечего.",
@@ -242,15 +279,28 @@ CONFIG_ERRORS = {
     "bad_yaml": "Это не файл настроек зеркала: <code>{detail}</code>",
     "too_big": "Файл слишком большой (максимум {detail}).",
     "bad_url": "Нужна ссылка вида <code>https://t.me/channel</code>, получено: <code>{detail}</code>",
-    "bad_number": "Неверное число: <code>{detail}</code>",
-    "bad_date": "Нужна дата <code>2024-01-31</code> или <code>2024-01-31T12:00:00</code>, "
+    "bad_number": "Нужно число, например <code>3</code> или <code>0.5</code>, получено: <code>{detail}</code>",
+    "bad_delay": "Нужно число секунд от 0 до 60, например <code>1.5</code>, получено: <code>{detail}</code>",
+    "bad_hours": "Нужно число часов от 0 до 720 (30 дней), например <code>24</code>, получено: "
+    "<code>{detail}</code>",
+    "bad_last_n": "Нужно целое число от 1 до 1 000 000, например <code>100</code>, получено: <code>{detail}</code>",
+    "bad_max_pins": f"Нужно целое число от {settings.SYNC_PINS_MAX_PINS[0]} до {settings.SYNC_PINS_MAX_PINS[1]}, "
+    f"например <code>{settings.SYNC_PINS_DEFAULT_MAX_PINS}</code>, получено: " "<code>{detail}</code>",
+    "bad_date": "Нужна дата <code>31.01.2024</code> или с временем <code>31.01.2024 12:00</code>, "
     "получено: <code>{detail}</code>",
-    "bad_item": "Пустое или слишком длинное значение (до 200 символов): <code>{detail}</code>",
-    "bad_filter": "Этот фильтр меняется только в файле настроек: <code>{detail}</code>",
-    "bad_pair": "Нужна строка вида <code>что => на что</code>, получено: <code>{detail}</code>",
+    "bad_item": "Значение пустое или длиннее 200 символов: <code>{detail}</code>. Каждое значение — с новой "
+    "строки, до 200 символов.",
+    "bad_text": "Слишком длинный текст (больше 1000 символов): <code>{detail}</code>",
+    "bad_filter": "Этот фильтр меняется только в файле настроек: <code>{detail}</code>. Скачать файл: "
+    f"{esc(menu_path('cfg_get'))}.",
+    "bad_pair": "Нужна строка вида <code>что => на что</code>, например <code>купить => приобрести</code>, "
+    "каждая пара с новой строки. Получено: <code>{detail}</code>",
+    "bad_pace": "Нужно «сколько постов / за сколько минут», например <code>5/45</code> "
+    "(1–100 постов, 1–1440 минут), или раз во сколько секунд, например <code>30с</code> "
+    "(1–86400 секунд), получено: <code>{detail}</code>",
     "no_history": f"Не выбрано, какие старые посты копировать: {menu_path('rpl_hist')}.",
-    "no_directions": "В проекте нет направлений — сначала добавьте.",
-    "no_refs": "Нужен хотя бы один канал — сначала добавьте другой.",
+    "no_directions": f"В проекте нет направлений — сначала добавьте: {esc(menu_path('dir_add'))}.",
+    "no_refs": "В списке должен остаться хотя бы один канал: сначала добавьте другой, потом уберите этот.",
     "not_channel": "По этому сообщению канал не определить: оно переслано не из канала (или его автор "
     "скрыл, откуда оно). Перешлите пост из самого канала или пришлите ID канала.",
 }

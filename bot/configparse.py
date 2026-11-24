@@ -6,6 +6,8 @@ import re
 from datetime import datetime
 from typing import Any
 
+from bot import settings
+
 # `-100…` channel id with an optional `#topic`; ids are always -100-prefixed for
 # channels/supergroups (the only peers a userbot can mirror between).
 _CHAT_REF_RE = re.compile(r"^-100\d{5,}(?:#[1-9]\d{0,9})?$")
@@ -77,37 +79,72 @@ def parse_delay(raw: str) -> float:
     try:
         value = float(raw.strip().replace(",", "."))
     except ValueError:
-        raise ConfigError("bad_number", raw.strip()) from None
+        raise ConfigError("bad_delay", raw.strip()) from None
     if not 0 <= value <= 60:
-        raise ConfigError("bad_number", raw.strip())
+        raise ConfigError("bad_delay", raw.strip())
     return value
 
 
+_PACE_RE = re.compile(r"(\d+)\s*(?:/|за|\s)\s*(\d+(?:[.,]\d+)?)\s*(?:мин\w*)?", re.IGNORECASE)
+_PACE_SECONDS_RE = re.compile(r"(\d+)\s*(?:с|сек\w*|s|sec\w*)", re.IGNORECASE)
+
+
+def parse_pace(raw: str) -> dict:
+    """⏪ Старые посты's «N постов за M минут» (``past_mode.drip``): ``5/45``,
+    ``5 45`` or ``5 за 45``; 1–100 posts in 1–1440 minutes. Or a post every
+    S seconds: ``30с``, ``30 сек``, ``30s``; 1 s to a day."""
+    if m := _PACE_SECONDS_RE.fullmatch(raw.strip()):
+        seconds = int(m.group(1))
+        if not 1 <= seconds <= 86400:
+            raise ConfigError("bad_pace", raw.strip())
+        return {"seconds": seconds}
+    m = _PACE_RE.fullmatch(raw.strip())
+    if not m:
+        raise ConfigError("bad_pace", raw.strip())
+    posts, minutes = int(m.group(1)), float(m.group(2).replace(",", "."))
+    if not 1 <= posts <= 100 or not 1 <= minutes <= 1440:
+        raise ConfigError("bad_pace", raw.strip())
+    return {"posts": posts, "minutes": int(minutes) if minutes.is_integer() else minutes}
+
+
 def parse_hours(raw: str) -> float:
-    """Hours of 🧬 Без повторов: 0 (off) to 30 days."""
+    """Hours of 🧬 Без дублей: 0 (off) to 30 days."""
     try:
         value = float(raw.strip().replace(",", "."))
     except ValueError:
-        raise ConfigError("bad_number", raw.strip()) from None
+        raise ConfigError("bad_hours", raw.strip()) from None
     if not 0 <= value <= 720:
-        raise ConfigError("bad_number", raw.strip())
+        raise ConfigError("bad_hours", raw.strip())
     return int(value) if value.is_integer() else value
 
 
 def parse_last_n(raw: str) -> int:
     value = raw.strip()
     if not value.isdigit() or not 1 <= int(value) <= 1_000_000:
-        raise ConfigError("bad_number", value)
+        raise ConfigError("bad_last_n", value)
     return int(value)
 
 
 def parse_since(raw: str) -> str:
+    """A date as written in Russia (``31.01.2024``, ``31.01.2024 12:00``) or ISO
+    (``2024-01-31``, ``2024-01-31T12:00:00``), Moscow time unless it names its
+    offset; kept in the config as ISO with the offset — a bare one would be
+    taken for UTC (Telethon's offset_date), three hours off."""
     value = raw.strip()
-    try:
-        datetime.fromisoformat(value)
-    except ValueError:
-        raise ConfigError("bad_date", value) from None
-    return value
+    for fmt in ("%d.%m.%Y", "%d.%m.%Y %H:%M"):
+        try:
+            moment = datetime.strptime(value, fmt)
+            break
+        except ValueError:
+            pass
+    else:
+        try:
+            moment = datetime.fromisoformat(value)
+        except ValueError:
+            raise ConfigError("bad_date", value) from None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=settings.TIMEZONE)
+    return moment.isoformat()
 
 
 def parse_filter_items(raw: str) -> list[str]:
@@ -160,5 +197,5 @@ def parse_number(raw: str) -> Any:
 
 def parse_text(raw: str) -> str:
     if len(raw) > 1000:
-        raise ConfigError("bad_item", raw[:50] + "…")
+        raise ConfigError("bad_text", raw[:50] + "…")
     return raw

@@ -69,18 +69,22 @@ def screen_text(
     parent: str = "",
 ) -> str:
     """``note`` (an action's result) on top, the title line, the view's ``body``,
-    then each button with what it does — under its group's subheading —, each
-    screen opened from here, and ``more`` (how it works, details) folded at the end."""
+    then — folded, its first lines showing — each button with what it does
+    (under its group's subheading) and each screen opened from here, and
+    ``more`` (how it works, details) folded at the end."""
     titles = titles or {}
     screen = SCREENS[screen_id]
     blocks = [note, title_line(screen_id, project, parent), body]
+    hints = []
     shown = [b for b in screen.buttons if b.action not in hidden]
     for group, buttons in groupby(shown, key=lambda b: b.group):
         lines = [_line(titles.get(b.action, b.title), b.hint) for b in buttons]
-        blocks.append("\n".join([f"<i>{esc(group)}</i>", *lines] if group else lines))
-    blocks.append("\n".join([_line(label, hint) for label, hint in own_hints]
-                            + [_line(titles.get(c.id, c.title), c.hint)
-                               for c in children(screen_id) if c.id not in hidden]))
+        hints.append("\n".join([f"<i>{esc(group)}</i>", *lines] if group else lines))
+    hints.append("\n".join([_line(label, hint) for label, hint in own_hints]
+                           + [_line(titles.get(c.id, c.title), c.hint)
+                              for c in children(screen_id) if c.id not in hidden]))
+    if folded := "\n\n".join(h for h in hints if h):
+        blocks.append(texts.more(folded))
     if more:
         blocks.append(texts.more(more))
     return fit("\n\n".join(b for b in blocks if b))

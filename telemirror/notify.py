@@ -5,7 +5,7 @@ post a replay had to skip) goes there — there's no tech channel.
 
 Best effort: a notice never raises and never logs at WARNING or above (the
 mirror's log handler would send that one too). A notice from a project's
-process is signed with the project and carries the panel's 📊 Задача button."""
+process is signed with the project and carries the panel's 📊 Статус и журнал button."""
 
 import json
 import logging
@@ -22,7 +22,7 @@ logger = logging.getLogger("telemirror.notify")
 SEND_TIMEOUT = 20
 MAX_TEXT = 4096
 UNIT_KINDS = ("live", "past", "task")  # Project.units order: the panel's NavCB(s="unit", i=…)
-BUTTON = "📊 Задача"  # bot.registry.TITLES["notice"]
+BUTTON = "📊 Статус и журнал"  # bot.registry.TITLES["notice"]
 RETRY_ALL = "♻️ Повторить все"  # bot.registry: the fail_all button
 FAILED_SCREEN = "❗ Не скопировано"  # bot.registry.SCREENS["fail"].title
 
@@ -46,7 +46,7 @@ def project_label(key: str) -> str:
 
 
 def unit_button(key: str, kind: str) -> dict:
-    """The panel's 📊 Задача screen of the project's unit — its ``NavCB`` packed
+    """The panel's 📊 Статус и журнал screen of the project's unit — its ``NavCB`` packed
     by hand (this side doesn't import the bot; a test keeps them equal)."""
     return {"inline_keyboard": [[{"text": BUTTON,
                                   "callback_data": f"n:unit:{key}:{UNIT_KINDS.index(kind)}:0"}]]}

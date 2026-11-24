@@ -76,6 +76,7 @@ class FakeSystemd:
     def __init__(self, states: dict | None = None) -> None:
         self.states = states or {}
         self.calls: list = []
+        self.journal = "line one\nline <two>"
 
     async def __call__(self, argv):
         self.calls.append(list(argv))
@@ -84,7 +85,7 @@ class FakeSystemd:
             sub = "running" if active == "active" else "dead"
             return 0, SHOW.format(active=active, sub=sub, result="success")
         if argv[0] == "journalctl":
-            return 0, "line one\nline <two>"
+            return 0, self.journal
         return 0, ""
 
 

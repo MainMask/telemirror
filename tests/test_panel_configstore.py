@@ -1,6 +1,7 @@
 """Panel config writes: comments survive, refusals leave the file untouched,
 and every candidate is validated by telemirror.config itself."""
 
+import datetime
 from pathlib import Path
 
 import pytest
@@ -105,7 +106,7 @@ def test_add_direction_round_trip_keeps_comments_and_sets(tmp_path):
     assert after["directions"][-1] == {
         "from": [-1005555555555],
         "to": ["-1006666666666#2", -1007777777777],
-        "past_mode": {"full_history": True},
+        "past_mode": {"full_history": True, "send_delay": 1.0},  # the project's one replay pause
     }
     assert after["filters"] == before["filters"]  # !!set values intact
     assert "# (Optional) Admin broadcast channel" in text  # comments survive
@@ -516,11 +517,83 @@ def test_direction_link_and_replay_delay(tmp_path):
     assert e.value.code == "no_history"
 
 
+def test_pace_parser():
+    assert cp.parse_pace("5/45") == {"posts": 5, "minutes": 45}
+    assert cp.parse_pace(" 3 за 60 минут ") == {"posts": 3, "minutes": 60}
+    assert cp.parse_pace("2 7,5") == {"posts": 2, "minutes": 7.5}
+    for raw in ("30с", "30 с", "30 сек", " 30 секунд ", "30s", "30 SEC"):
+        assert cp.parse_pace(raw) == {"seconds": 30}
+    for raw in ("5", "0/45", "101/45", "5/0", "5/1441", "a/b", "5/45/1", "0с", "86401с", "1,5с", "30 мин"):
+        with pytest.raises(cp.ConfigError) as e:
+            cp.parse_pace(raw)
+        assert e.value.code == "bad_pace"
+
+
+def test_one_pace_for_every_direction_with_a_history(tmp_path):
+    project = _project(tmp_path, WITH_FILTERS)
+    run(_store().update(project, lambda d: ce.set_replay_pace(d, {"posts": 5, "minutes": 45})))
+    dirs = _loaded(project)["directions"]
+    assert "past_mode" not in dirs[0]  # no history: no pace either
+    assert dirs[1]["past_mode"] == {"last_n": 5, "send_delay": 2.0, "drip": {"posts": 5, "minutes": 45}}
+    assert ce.replay_paces(cs.load(project).data) == [{"posts": 5, "minutes": 45}]
+    run(_store().update(project, lambda d: ce.set_history(d, {"full_history": True})))
+    dirs = _loaded(project)["directions"]
+    assert dirs[1]["past_mode"] == {"full_history": True, "send_delay": 2.0,
+                                    "drip": {"posts": 5, "minutes": 45}}  # the pace kept
+    assert {str(ce.history_of(d)) for d in ce.directions(cs.load(project).data)} == {"{'full_history': True}"}
+    run(_store().update(project, lambda d: ce.set_replay_pace(d, None)))
+    assert all("drip" not in d["past_mode"] for d in _loaded(project)["directions"])
+    (tmp_path / "e").mkdir()
+    empty = _project(tmp_path / "e", "directions: []\n")
+    with pytest.raises(cp.ConfigError) as e:
+        run(_store().update(empty, lambda d: ce.set_replay_pace(d, {"posts": 1, "minutes": 1})))
+    assert e.value.code == "no_history"
+
+
+def test_a_new_direction_takes_the_projects_one_pace(tmp_path):
+    project = _project(tmp_path, WITH_FILTERS)
+    run(_store().update(project, lambda d: ce.set_replay_pace(d, {"posts": 5, "minutes": 45})))
+    run(_store().update(project, lambda d: ce.add_direction(d, ["-1005555555555"], ["-1006666666666"], "copy", True)))
+    assert _loaded(project)["directions"][-1]["past_mode"] == {"full_history": True, "send_delay": 2.0,
+                                                              "drip": {"posts": 5, "minutes": 45}}
+    run(_store().update(project, lambda d: ce.add_direction(d, ["-1007777777777"], ["-1008888888888"], "copy", False)))
+    assert "past_mode" not in _loaded(project)["directions"][-1]  # no history: no pace
+    # paces differ (hand-written): none is guessed
+    data = _loaded(project)
+    data["directions"][1]["past_mode"]["drip"] = {"posts": 1, "minutes": 10}
+    project.config_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    run(_store().update(project, lambda d: ce.add_direction(d, ["-1009999999999"], ["-1001010101010"], "copy", True)))
+    assert _loaded(project)["directions"][-1]["past_mode"] == {"full_history": True, "send_delay": 2.0}
+
+
+def test_one_pace_written_in_another_key_order_is_still_one():
+    """Regression: compared as text, a hand-written ``{minutes, posts}`` made
+    the pace «разный» — a new direction got none, its history not dripped."""
+    data = {"directions": [{"from": [1], "to": [2], "past_mode": {"full_history": True,
+                                                                  "drip": {"posts": 5, "minutes": 45}}},
+                           {"from": [3], "to": [4], "past_mode": {"full_history": True,
+                                                                  "drip": {"minutes": 45, "posts": 5}}}]}
+    ce.add_direction(data, ["-1005555555555"], ["-1006666666666"], "copy", True)
+    assert data["directions"][-1]["past_mode"] == {"full_history": True, "drip": {"posts": 5, "minutes": 45}}
+
+
+def test_a_direction_without_a_history_takes_the_projects_pace_with_one(tmp_path):
+    """Regression: added with «ничего», then «Что копировать → всё» left it
+    without the pace — copied at once, by the replay that stops the mirror."""
+    project = _project(tmp_path, WITH_FILTERS)
+    run(_store().update(project, lambda d: ce.set_replay_pace(d, {"posts": 5, "minutes": 45})))
+    run(_store().update(project, lambda d: ce.set_history(d, {"full_history": True})))
+    dirs = _loaded(project)["directions"]
+    assert all(d["past_mode"]["drip"] == {"posts": 5, "minutes": 45} for d in dirs)
+    assert all(d["past_mode"]["send_delay"] == 2.0 for d in dirs)  # and the pause: not «разная»
+    assert "&" not in project.config_path.read_text()  # each its own map, not a YAML alias
+
+
 def test_one_history_for_every_direction(tmp_path):
     project = _project(tmp_path, WITH_FILTERS)
     run(_store().update(project, lambda d: ce.set_history(d, {"full_history": True})))
     dirs = _loaded(project)["directions"]
-    assert dirs[0]["past_mode"] == {"full_history": True}
+    assert dirs[0]["past_mode"] == {"full_history": True, "send_delay": 2.0}  # the project's one pause
     assert dirs[1]["past_mode"] == {"full_history": True, "send_delay": 2.0}  # its pause kept
     assert {str(ce.history_of(d)) for d in ce.directions(cs.load(project).data)} == {"{'full_history': True}"}
     run(_store().update(project, lambda d: ce.set_history(d, None)))
@@ -535,16 +608,37 @@ def test_one_history_for_every_direction(tmp_path):
 # ── parsing ─────────────────────────────────────────────────────────────────
 
 
+def test_a_refused_number_says_what_to_send_instead():
+    from bot import texts
+    for fn, raw, says in [(cp.parse_delay, "61", "от 0 до 60"), (cp.parse_hours, "721", "от 0 до 720"),
+                          (cp.parse_last_n, "0", "от 1 до 1 000 000"), (cp.parse_number, "x", "например")]:
+        with pytest.raises(cp.ConfigError) as e:
+            fn(raw)
+        assert says in texts.config_error(e.value.code, e.value.detail), (fn, e.value.code)
+
+
+def test_dates_are_shown_in_moscow_time():
+    from bot import texts
+    assert texts.fmt_date("2024-01-31T00:00:00+03:00") == "31.01.2024"
+    assert texts.fmt_date("2024-01-31T12:05:00+03:00") == "31.01.2024 12:05"
+    assert texts.fmt_date(datetime.date(2024, 1, 31)) == "31.01.2024 03:00"  # hand-written: UTC to the mirror
+    assert texts.fmt_ts(0) == "01.01 03:00"  # the epoch, in Moscow
+
+
 def test_value_parsers():
     assert cp.parse_channel_id("-1001234567890") == -1001234567890
     assert cp.parse_delay("0,5") == 0.5
     assert cp.parse_last_n("100") == 100
-    assert cp.parse_since("2024-01-31") == "2024-01-31"
+    # Moscow time, kept as ISO with its offset (a bare one is UTC to Telethon)
+    assert cp.parse_since(" 31.01.2024 ") == "2024-01-31T00:00:00+03:00"
+    assert cp.parse_since("31.01.2024 12:05") == "2024-01-31T12:05:00+03:00"
+    assert cp.parse_since("2024-01-31") == "2024-01-31T00:00:00+03:00"
+    assert cp.parse_since("2024-01-31T12:00:00+00:00") == "2024-01-31T12:00:00+00:00"  # its own offset
     assert cp.parse_url("https://t.me/x") == "https://t.me/x"
     assert cp.parse_filter_items("a, b\n\n c \na, b") == ["a, b", "c"]
     for fn, raw in [
         (cp.parse_channel_id, "-1001234567890#3"), (cp.parse_delay, "61"), (cp.parse_delay, "x"),
-        (cp.parse_last_n, "0"), (cp.parse_last_n, "-5"), (cp.parse_since, "31.01.2024"),
+        (cp.parse_last_n, "0"), (cp.parse_last_n, "-5"), (cp.parse_since, "31.13.2024"), (cp.parse_since, "31/01/2024"),
         (cp.parse_url, "t.me/x"), (cp.parse_url, "https://a b"), (cp.parse_filter_items, " \n "),
         (cp.parse_filter_items, "x" * 201),
     ]:

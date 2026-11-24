@@ -1,9 +1,11 @@
 import asyncio
 import logging
+from contextlib import suppress
 from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from bot import pending, settings, texts
 from bot.callbacks import ChoiceCB
@@ -60,6 +62,41 @@ class LeaveFormOnNavigation(BaseMiddleware):
                 and await state.get_state() is not None:
             await leave_form(data["event_from_user"].id, state)
         return await handler(event, data)
+
+
+class DropStalePrompt(BaseMiddleware):
+    """Outer middleware on ``message`` and ``callback_query``: a form's prompt
+    sent as its own message (FSM data ``prompt`` — ``_common.start_form`` /
+    ``ask``) loses its buttons once it is answered — the form over, or the next
+    step's prompt sent —, so its ✖️ Отмена isn't left behind dead; the screen
+    the form began under (``screen``) loses them once the form is over — the
+    outcome is a screen of its own, below. A prompt asked again (a refused
+    value) keeps them; so does a message whose own button was tapped (its
+    handler shows something else in its place)."""
+
+    KEYS = ("prompt", "screen")
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        state = data.get("state")
+        if state is None:
+            return await handler(event, data)
+        form = await state.get_data()
+        before = [form.get(key) for key in self.KEYS]
+        result = await handler(event, data)
+        form = await state.get_data()
+        tapped = event.message.message_id if isinstance(event, CallbackQuery) and event.message else None
+        for key, old in zip(self.KEYS, before, strict=True):
+            if old is None or form.get(key) == old or old == tapped:
+                continue
+            with suppress(TelegramBadRequest):  # gone or too old: nothing to tidy
+                await data["bot"].edit_message_reply_markup(
+                    chat_id=data["event_from_user"].id, message_id=old, reply_markup=None)
+        return result
 
 
 class ChatPicked(BaseMiddleware):
